@@ -1,0 +1,19 @@
+# 車体の物理パラメータ (SI 単位: m)
+# 出典: ハードウェア構成
+#   オムニホイール 直径48mm / 幅25.5mm / 3個
+#   ステッピングモーター ステップ角1.8° (=200 step/rev)
+
+wheel_diameter_m: 0.048
+wheel_count: 3
+steps_per_rev: 200
+
+# マイクロステップ分割数 (L6470 STEP_MODE)。1/16 を初期値とする。
+microstep: 16
+
+# 中心から各輪の接地点までの距離 L [m]。
+# TODO(M2): 実機採寸 / キャリブレーションで確定する暫定値。
+center_to_wheel_m: 0.050
+
+# 各輪の駆動方向角 [deg]。120°対称配置 (wheel1 を +x 側に置く規約)。
+# v_i = -sin(theta_i)*vx + cos(theta_i)*vy + L*omega
+wheel_angles_deg: [90.0, 210.0, 330.0]
