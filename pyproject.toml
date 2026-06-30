@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "krilly"
+version = "0.0.1"
+description = "Holonomic (3 omni-wheel) Micromouse running on Raspberry Pi 5"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "HORIE Tetsuya" }]
+
+# NOTE: hardware-only packages (spidev, picamera2, lgpio) are installed via the
+# Raspberry Pi OS system packages / apt where appropriate. They are listed here
+# for completeness but may be skipped on a non-Pi dev machine using the
+# `dev` extra below. See docs/setup-pi5.md.
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "pyserial",
+    "opencv-python",
+    "adafruit-circuitpython-bno055",
+    "spidev; platform_machine == 'aarch64'",
+    "lgpio; platform_machine == 'aarch64'",
+    "picamera2; platform_machine == 'aarch64'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
