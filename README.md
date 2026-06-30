@@ -1,34 +1,33 @@
 # krilly
 
-Krilly is a Micromouse equipped with omni-wheels — a **holonomic (3 omni-wheel,
-kiwi-drive)** Micromouse running on a Raspberry Pi 5, targeting the classic
-16×16 Micromouse competition.
+Krilly はオムニホイールを備えたマイクロマウスです。Raspberry Pi 5 上で動作する
+**ホロノミック（3輪オムニ・kiwi ドライブ）** マイクロマウスで、クラシック 16×16
+マイクロマウス競技への出場を目標としています。
 
-## Hardware
+## ハードウェア
 
 - Raspberry Pi 5
-- 3× omni-wheels (Ø48 mm, width 25.5 mm)
-- 3× stepper motors (1.8°/step) + 3× L6470 drivers (SPI daisy-chain)
-- BNO055 9-axis IMU (UART mode)
-- Pi Camera Module V3 (wide), mounted downward to detect the **red wall-tops**
-  of the maze
+- オムニホイール 3個（Ø48 mm・幅 25.5 mm）
+- ステッピングモーター 3個（ステップ角 1.8°）＋ L6470 ドライバ 3個（SPI デイジーチェーン）
+- BNO055 9軸センサー（UART モード）
+- Raspberry Pi カメラモジュール V3（広角）— 下向きに取り付け、迷路の**赤い壁上面**を検知
 
-## Architecture
+## アーキテクチャ
 
-Layered, low → high level (see `src/krilly/`):
+下位 → 上位のレイヤ構成（`src/krilly/` を参照）:
 
-| Layer | Role |
+| レイヤ | 役割 |
 |-------|------|
-| `hal` | L6470 (SPI) / BNO055 (UART) / camera (picamera2) |
-| `kinematics` | kiwi-drive forward/inverse kinematics, wheel-speed ⇄ step rate |
-| `motion` | body velocity (vx, vy, ω) → 3 wheels, accel ramps |
-| `localization` | dead-reckoning + gyro heading + camera grid correction `[X, Y, φ]` |
-| `perception` | red wall-top detection (HSV) |
-| `solver` | maze model (16×16, shared-edge) + flood-fill + fastest path |
-| `strategy` / `app` | search-run / fastest-run state machine |
-| `config` | robot & maze dimensions (YAML) |
+| `hal` | L6470（SPI）/ BNO055（UART）/ カメラ（picamera2） |
+| `kinematics` | kiwi ドライブの正逆運動学、輪速 ⇄ ステップレート変換 |
+| `motion` | ボディ速度 (vx, vy, ω) → 3輪、加減速ランプ |
+| `localization` | デッドレコニング + ジャイロ姿勢 + カメラ格子補正 `[X, Y, φ]` |
+| `perception` | 赤い壁上面の検出（HSV） |
+| `solver` | 迷路モデル（16×16・共有エッジ）+ flood-fill + 最短経路 |
+| `strategy` / `app` | 探索ラン / 最速ランの状態機械 |
+| `config` | 車体・迷路の寸法（YAML） |
 
-## Development
+## 開発
 
 ```bash
 python3 -m venv --system-site-packages .venv
@@ -37,11 +36,11 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Raspberry Pi 5 hardware setup: see [`docs/setup-pi5.md`](docs/setup-pi5.md).
+Raspberry Pi 5 の実機セットアップは [`docs/setup-pi5.md`](docs/setup-pi5.md) を参照してください。
 
-Progress is tracked on the [GitHub Project board](https://github.com/users/horie-t/projects/4)
-via Milestones (M0–M6) and Issues; code lands through reviewed PRs.
+進捗は [GitHub Project ボード](https://github.com/users/horie-t/projects/4) で
+Milestone（M0〜M6）と Issue により管理し、コードはレビュー済みの PR を通じてマージします。
 
-## License
+## ライセンス
 
-MIT — see [LICENSE](LICENSE).
+MIT — [LICENSE](LICENSE) を参照。
