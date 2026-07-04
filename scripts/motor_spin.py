@@ -23,16 +23,20 @@ from krilly.logging_config import get_logger, setup_logging
 log = get_logger("krilly.motor_spin")
 
 
-def _decode_status(status: int) -> str:
+def _decode_status(status: int, first_read: bool = False) -> str:
     # L6470 STATUS のフォールト系ビットを簡易デコード。
     # UVLO/TH_WRN/TH_SD/OCD/STEP_LOSS はアクティブLow (0 = 発生)。
+    # first_read=True: リセット後の初回 GetStatus。UVLO の扱いを注記する。
     if status in (0x0000, 0xFFFF):
         return ("★SPI通信不可の可能性 (応答が全ビット %s)。正常なら 0x7C03 付近。"
                 "配線(MISO/MOSI/SCK/CS/GND)・電源(VDD/VS)・SPI有効化・CE番号を確認"
                 % ("0" if status == 0x0000 else "1"))
     flags = []
     if not (status >> 9) & 1:
-        flags.append("UVLO(低電圧)")
+        # UVLO はアクティブLow。電源投入時に必ずラッチされ、最初の GetStatus で
+        # クリアされる。よって初回読み出しでの UVLO は正常（実際の低電圧ではない）。
+        flags.append("UVLO(初回読み出しなら電源投入時の正常フラグ)"
+                     if first_read else "UVLO(低電圧)")
     if not (status >> 10) & 1:
         flags.append("TH_WRN(熱警告)")
     if not (status >> 11) & 1:
@@ -64,7 +68,7 @@ def main() -> None:
 
     with L6470(bus=args.bus, device=args.device) as drv:
         status = drv.configure(L6470Profile(max_speed_steps_s=max(args.speed, 400.0)))
-        log.info("初期化後 STATUS=0x%04X (%s)", status, _decode_status(status))
+        log.info("初期化後 STATUS=0x%04X (%s)", status, _decode_status(status, first_read=True))
 
         if status in (0x0000, 0xFFFF):
             log.error("SPI 応答が異常のためモーター指令を中止します。"
@@ -83,7 +87,8 @@ def main() -> None:
             drv.soft_stop()
 
         time.sleep(0.3)
-        log.info("終了 STATUS=0x%04X (%s)", drv.get_status(), _decode_status(drv.get_status()))
+        end_status = drv.get_status()
+        log.info("終了 STATUS=0x%04X (%s)", end_status, _decode_status(end_status))
 
 
 if __name__ == "__main__":
