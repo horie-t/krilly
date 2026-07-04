@@ -24,19 +24,28 @@ log = get_logger("krilly.motor_spin")
 
 
 def _decode_status(status: int) -> str:
-    # よく見るフラグだけ簡易デコード (L6470 STATUS, アクティブLowに注意)
+    # L6470 STATUS のフォールト系ビットを簡易デコード。
+    # UVLO/TH_WRN/TH_SD/OCD/STEP_LOSS はアクティブLow (0 = 発生)。
+    if status in (0x0000, 0xFFFF):
+        return ("★SPI通信不可の可能性 (応答が全ビット %s)。正常なら 0x7C03 付近。"
+                "配線(MISO/MOSI/SCK/CS/GND)・電源(VDD/VS)・SPI有効化・CE番号を確認"
+                % ("0" if status == 0x0000 else "1"))
     flags = []
-    if not (status & (1 << 9)):
-        flags.append("OCD(過電流)")
-    if not (status & (1 << 10)):
-        flags.append("TH_WRN(熱警告)")
-    if not (status & (1 << 11)):
-        flags.append("TH_SD(熱遮断)")
-    if not (status & (1 << 7)):
+    if not (status >> 9) & 1:
         flags.append("UVLO(低電圧)")
-    if status & (1 << 0):
+    if not (status >> 10) & 1:
+        flags.append("TH_WRN(熱警告)")
+    if not (status >> 11) & 1:
+        flags.append("TH_SD(熱遮断)")
+    if not (status >> 12) & 1:
+        flags.append("OCD(過電流)")
+    if not (status >> 13) & 1:
+        flags.append("STEP_LOSS_A")
+    if not (status >> 14) & 1:
+        flags.append("STEP_LOSS_B")
+    if status & 1:
         flags.append("HiZ(出力停止)")
-    return ", ".join(flags) if flags else "正常"
+    return ", ".join(flags) if flags else "フォールトなし"
 
 
 def main() -> None:
@@ -56,6 +65,11 @@ def main() -> None:
     with L6470(bus=args.bus, device=args.device) as drv:
         status = drv.configure(L6470Profile(max_speed_steps_s=max(args.speed, 400.0)))
         log.info("初期化後 STATUS=0x%04X (%s)", status, _decode_status(status))
+
+        if status in (0x0000, 0xFFFF):
+            log.error("SPI 応答が異常のためモーター指令を中止します。"
+                      "配線・電源・SPI有効化・CE番号を確認してください。")
+            return
 
         if args.move is not None:
             log.info("Move: dir=%s steps=%d", args.dir, args.move)
