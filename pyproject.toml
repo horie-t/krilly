@@ -18,9 +18,8 @@ authors = [{ name = "HORIE Tetsuya" }]
 dependencies = [
     "numpy",
     "pyyaml",
-    "pyserial",
+    "smbus2",                # BNO055 I2C (hal/imu.py)
     "opencv-python",
-    "adafruit-circuitpython-bno055",
     "spidev; platform_machine == 'aarch64'",
     "lgpio; platform_machine == 'aarch64'",
     "picamera2; platform_machine == 'aarch64'",

@@ -27,19 +27,25 @@ sudo raspi-config   # Interface Options -> SPI -> Enable
 - 接続: SPI0、**CS 1本**でデイジーチェーン。SPI mode 3 (CPOL=1/CPHA=1)、MSB-first、~5MHz。
 - 初期化時に各ドライバの STATUS を読み、UVLO/OCD 等の電源投入フラグをクリアすること。
 
-## 3. UART を有効化 (BNO055)
+## 3. I2C を有効化 (BNO055)
 
-BNO055 は I2C クロックストレッチで Pi と相性が悪いため **UART モード**を使う。
+BNO055 モジュール(AE-BNO055-BO)は出荷時 **I2C モード(アドレス 0x28)** で、
+ジャンパ変更なしに SDA/SCL 配線だけで使える。
 
 ```bash
-sudo raspi-config   # Interface Options -> Serial Port
-#   ログインシェル: No / シリアルHW: Yes
+sudo raspi-config   # Interface Options -> I2C -> Enable
 # /boot/firmware/config.txt:
-#   enable_uart=1
+#   dtparam=i2c_arm=on
 ```
 
-- センサ側 PS1 を High にして UART を選択し、`/dev/serial0` に接続。
-- Python からは `adafruit-circuitpython-bno055` + `pyserial` で読む。
+- 配線: VIN->3.3V(pin1), GND, SDA->GPIO2(pin3), SCL->GPIO3(pin5)。**電源は3.3V**
+  (基板のレベル変換が VIN 電位になるため、5V 給電すると信号も5Vになり Pi を痛める)。
+- 確認: `i2cdetect -y 1` で `0x28` が見えること。
+- **クロックストレッチ**: 旧 Pi(1〜4) の Broadcom BSC はクロックストレッチのバグが
+  あり BNO055 と相性が悪かったが、**Pi 5 は RP1(DesignWare)の I2C に変わり正しく扱える**。
+  実機で **100kHz(既定)のまま BNO055 が安定動作することを確認済み**。低速化は不要。
+  万一不安定な場合のみ `dtparam=i2c_arm_baudrate=10000` を追加する。
+- Python からは `smbus2` で読む (`hal/imu.py`)。ドライバ側でも転送をリトライする。
 
 ## 4. カメラ (Camera Module V3 wide)
 
