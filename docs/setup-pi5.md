@@ -27,19 +27,26 @@ sudo raspi-config   # Interface Options -> SPI -> Enable
 - 接続: SPI0、**CS 1本**でデイジーチェーン。SPI mode 3 (CPOL=1/CPHA=1)、MSB-first、~5MHz。
 - 初期化時に各ドライバの STATUS を読み、UVLO/OCD 等の電源投入フラグをクリアすること。
 
-## 3. UART を有効化 (BNO055)
+## 3. I2C を有効化 (BNO055)
 
-BNO055 は I2C クロックストレッチで Pi と相性が悪いため **UART モード**を使う。
+BNO055 モジュール(AE-BNO055-BO)は出荷時 **I2C モード(アドレス 0x28)** で、
+ジャンパ変更なしに SDA/SCL 配線だけで使える。
 
 ```bash
-sudo raspi-config   # Interface Options -> Serial Port
-#   ログインシェル: No / シリアルHW: Yes
+sudo raspi-config   # Interface Options -> I2C -> Enable
 # /boot/firmware/config.txt:
-#   enable_uart=1
+#   dtparam=i2c_arm=on
+#   dtparam=i2c_arm_baudrate=10000   # ★クロックストレッチ対策で低速化(10kHz)
 ```
 
-- センサ側 PS1 を High にして UART を選択し、`/dev/serial0` に接続。
-- Python からは `adafruit-circuitpython-bno055` + `pyserial` で読む。
+- 配線: VIN->3.3V(pin1), GND, SDA->GPIO2(pin3), SCL->GPIO3(pin5)。**電源は3.3V**
+  (基板のレベル変換が VIN 電位になるため、5V 給電すると信号も5Vになり Pi を痛める)。
+- 確認: `i2cdetect -y 1` で `0x28` が見えること。
+- **クロックストレッチ注意**: Pi の I2C はクロックストレッチを完全には扱えず、
+  BNO055 で読み取りエラーが出ることがある。上記の `i2c_arm_baudrate` 低速化 +
+  ドライバ側のリトライで緩和する。改善しない場合の最終手段は UART だが、基板の
+  PS1 はんだパッド変更が必要。
+- Python からは `smbus2` で読む (`hal/imu.py`)。
 
 ## 4. カメラ (Camera Module V3 wide)
 
