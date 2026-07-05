@@ -148,6 +148,37 @@ def accel_to_register(steps_per_sec2: float) -> int:
     return _clamp(round(steps_per_sec2 * _ACC_COEF), 12)
 
 
+def decode_status(status: int, first_read: bool = False) -> str:
+    """Human-readable summary of the 16-bit STATUS register.
+
+    Fault bits (UVLO/TH_WRN/TH_SD/OCD/STEP_LOSS) are active-low (0 = event).
+    An all-zero / all-one response means no SPI communication was established.
+    ``first_read=True`` annotates UVLO as the normal power-up latch (UVLO is
+    always set at power-up and cleared by the first GetStatus).
+    """
+    if status in (0x0000, 0xFFFF):
+        return ("★SPI通信不可の可能性 (応答が全ビット %s)。正常なら 0x7C03 付近。"
+                "配線(MISO/MOSI/SCK/CS/GND)・電源(VDD/VS)・SPI有効化・CE番号を確認"
+                % ("0" if status == 0x0000 else "1"))
+    flags = []
+    if not (status >> 9) & 1:
+        flags.append("UVLO(初回読み出しなら電源投入時の正常フラグ)"
+                     if first_read else "UVLO(低電圧)")
+    if not (status >> 10) & 1:
+        flags.append("TH_WRN(熱警告)")
+    if not (status >> 11) & 1:
+        flags.append("TH_SD(熱遮断)")
+    if not (status >> 12) & 1:
+        flags.append("OCD(過電流)")
+    if not (status >> 13) & 1:
+        flags.append("STEP_LOSS_A")
+    if not (status >> 14) & 1:
+        flags.append("STEP_LOSS_B")
+    if status & 1:
+        flags.append("HiZ(出力停止)")
+    return ", ".join(flags) if flags else "フォールトなし"
+
+
 @dataclass(frozen=True)
 class L6470Profile:
     """Motion/torque configuration applied at init.

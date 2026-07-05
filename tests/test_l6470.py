@@ -103,6 +103,23 @@ def test_get_param_big_endian():
     assert val == 0x010203
 
 
+def test_decode_status_no_fault():
+    assert l6470.decode_status(0x7E50) == "フォールトなし"
+
+
+def test_decode_status_no_comms():
+    assert "通信不可" in l6470.decode_status(0x0000)
+    assert "通信不可" in l6470.decode_status(0xFFFF)
+
+
+def test_decode_status_uvlo_first_read_annotated():
+    first = l6470.decode_status(0x7C03, first_read=True)
+    normal = l6470.decode_status(0x7C03)
+    assert "正常フラグ" in first          # power-up latch note
+    assert "正常フラグ" not in normal
+    assert "UVLO" in normal and "HiZ" in normal
+
+
 def test_context_manager_puts_bridges_hiz_and_closes():
     spi = FakeSpi()
     with L6470(spi=spi) as drv:
