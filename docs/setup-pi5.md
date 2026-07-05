@@ -36,17 +36,16 @@ BNO055 モジュール(AE-BNO055-BO)は出荷時 **I2C モード(アドレス 0x
 sudo raspi-config   # Interface Options -> I2C -> Enable
 # /boot/firmware/config.txt:
 #   dtparam=i2c_arm=on
-#   dtparam=i2c_arm_baudrate=10000   # ★クロックストレッチ対策で低速化(10kHz)
 ```
 
 - 配線: VIN->3.3V(pin1), GND, SDA->GPIO2(pin3), SCL->GPIO3(pin5)。**電源は3.3V**
   (基板のレベル変換が VIN 電位になるため、5V 給電すると信号も5Vになり Pi を痛める)。
 - 確認: `i2cdetect -y 1` で `0x28` が見えること。
-- **クロックストレッチ注意**: Pi の I2C はクロックストレッチを完全には扱えず、
-  BNO055 で読み取りエラーが出ることがある。上記の `i2c_arm_baudrate` 低速化 +
-  ドライバ側のリトライで緩和する。改善しない場合の最終手段は UART だが、基板の
-  PS1 はんだパッド変更が必要。
-- Python からは `smbus2` で読む (`hal/imu.py`)。
+- **クロックストレッチ**: 旧 Pi(1〜4) の Broadcom BSC はクロックストレッチのバグが
+  あり BNO055 と相性が悪かったが、**Pi 5 は RP1(DesignWare)の I2C に変わり正しく扱える**。
+  実機で **100kHz(既定)のまま BNO055 が安定動作することを確認済み**。低速化は不要。
+  万一不安定な場合のみ `dtparam=i2c_arm_baudrate=10000` を追加する。
+- Python からは `smbus2` で読む (`hal/imu.py`)。ドライバ側でも転送をリトライする。
 
 ## 4. カメラ (Camera Module V3 wide)
 

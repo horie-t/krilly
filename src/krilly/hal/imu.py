@@ -3,14 +3,12 @@
 The board (Akizuki AE-BNO055-BO) ships in I2C mode (address 0x28) with no
 jumper changes needed, so I2C avoids the tiny UART-select solder pads.
 
-Clock-stretching caveat: the Raspberry Pi's I2C controller does not handle the
-BNO055's clock stretching well, which shows up as intermittent read errors /
-corrupted bytes. Mitigations, in order:
-- Lower the bus speed: add ``dtparam=i2c_arm_baudrate=10000`` (10 kHz) to
-  ``/boot/firmware/config.txt`` and reboot. See docs/setup-pi5.md.
-- We retry every transfer on OSError (below).
-If reads stay unreliable even at low speed, the UART interface is the fallback
-(kept in the closed PR #28 branch), but it needs the PS1 solder pads.
+Clock-stretching note: the legacy Broadcom BSC I2C (Pi 1-4) mishandles the
+BNO055's clock stretching, but the **Pi 5 uses RP1 (DesignWare) I2C which
+handles it correctly** — 100 kHz has been verified stable on hardware, so no
+bus-speed reduction is needed. We still retry every transfer on OSError as cheap
+insurance; if a slower Pi ever mishandles reads, lower the bus speed via
+``dtparam=i2c_arm_baudrate`` (see docs/setup-pi5.md).
 
 Register protocol: standard I2C register read/write (write the register
 pointer, repeated-start read N bytes). All multi-byte values are signed 16-bit

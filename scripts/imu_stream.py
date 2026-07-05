@@ -53,17 +53,21 @@ def main() -> None:
             bias = imu.measure_gyro_bias()
             log.info("ジャイロバイアス [deg/s] = (%.3f, %.3f, %.3f)", *bias)
 
+        log.info("Ctrl+C で終了 (自動終了は --duration で指定)")
         start = time.monotonic()
-        while args.duration is None or (time.monotonic() - start) < args.duration:
-            heading, roll, pitch = imu.euler
-            gx, gy, gz = imu.gyro
-            sys_, gyr, acc, mag = imu.calibration_status
-            log.info(
-                "heading=%6.1f roll=%6.1f pitch=%6.1f | gyro=(%7.2f,%7.2f,%7.2f) "
-                "| calib sys=%d gyr=%d acc=%d mag=%d",
-                heading, roll, pitch, gx, gy, gz, sys_, gyr, acc, mag,
-            )
-            time.sleep(period)
+        try:
+            while args.duration is None or (time.monotonic() - start) < args.duration:
+                heading, roll, pitch = imu.euler
+                gx, gy, gz = imu.gyro
+                sys_, gyr, acc, mag = imu.calibration_status
+                log.info(
+                    "heading=%6.1f roll=%6.1f pitch=%6.1f | gyro=(%7.2f,%7.2f,%7.2f) "
+                    "| calib sys=%d gyr=%d acc=%d mag=%d",
+                    heading, roll, pitch, gx, gy, gz, sys_, gyr, acc, mag,
+                )
+                time.sleep(period)
+        except KeyboardInterrupt:
+            log.info("終了します")
 
 
 if __name__ == "__main__":
