@@ -27,6 +27,9 @@ Krilly はオムニホイールを備えたマイクロマウスです。Raspber
 | `strategy` / `app` | 探索ラン / 最速ランの状態機械 |
 | `config` | 車体・迷路の寸法（YAML） |
 
+車体座標系・ホイール(モーター)番号・BNO055 取り付け向きの定義は
+[`docs/coordinate-frames.md`](docs/coordinate-frames.md) を参照。
+
 ## 開発
 
 ```bash

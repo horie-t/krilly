@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 720" font-family="sans-serif">
+  <defs>
+    <marker id="ax" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1f6feb"/>
+    </marker>
+    <marker id="drv" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1a7f37"/>
+    </marker>
+    <marker id="om" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#8250df"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="680" height="720" fill="#ffffff"/>
+  <text x="340" y="34" text-anchor="middle" font-size="22" font-weight="bold">Krilly 車体・センサー・ホイール座標系 (上面図)</text>
+  <text x="340" y="56" text-anchor="middle" font-size="13" fill="#555">上から見た図。+z は紙面手前(上方向)。角度は +x から反時計回り(CCW)。</text>
+
+  <!-- chassis -->
+  <circle cx="330" cy="330" r="196" fill="#f6f8fa" stroke="#333" stroke-width="2"/>
+  <!-- front marker -->
+  <path d="M330,110 L318,132 L342,132 Z" fill="#333"/>
+  <text x="330" y="102" text-anchor="middle" font-size="13" fill="#333">前 (FRONT)</text>
+
+  <!-- spokes (radial) -->
+  <line x1="330" y1="330" x2="330" y2="170" stroke="#aaa" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <line x1="330" y1="330" x2="191.4" y2="410" stroke="#aaa" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <line x1="330" y1="330" x2="468.6" y2="410" stroke="#aaa" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="345" y="255" font-size="12" fill="#888">spoke 0°</text>
+  <text x="228" y="392" font-size="12" fill="#888">spoke 120°</text>
+  <text x="408" y="392" font-size="12" fill="#888">spoke 240°</text>
+
+  <!-- wheels (rectangles aligned to rolling/drive direction) -->
+  <g stroke="#111" stroke-width="2" fill="#d0d7de">
+    <rect x="-24" y="-11" width="48" height="22" rx="4" transform="translate(330,170) rotate(180)"/>
+    <rect x="-24" y="-11" width="48" height="22" rx="4" transform="translate(191.4,410) rotate(60)"/>
+    <rect x="-24" y="-11" width="48" height="22" rx="4" transform="translate(468.6,410) rotate(-60)"/>
+  </g>
+  <!-- wheel/motor labels -->
+  <g font-size="16" font-weight="bold" fill="#c00">
+    <text x="330" y="150" text-anchor="middle">M0 / W0</text>
+    <text x="150" y="435" text-anchor="middle">M1 / W1</text>
+    <text x="510" y="435" text-anchor="middle">M2 / W2</text>
+  </g>
+
+  <!-- drive-direction arrows (CCW tangent; positive wheel speed) -->
+  <g stroke="#1a7f37" stroke-width="2.5" marker-end="url(#drv)">
+    <line x1="330" y1="170" x2="268" y2="170"/>
+    <line x1="191.4" y1="410" x2="222.4" y2="463.7"/>
+    <line x1="468.6" y1="410" x2="499.6" y2="356.3"/>
+  </g>
+  <text x="250" y="196" font-size="11" fill="#1a7f37">駆動方向 θ0=90°</text>
+  <text x="232" y="470" font-size="11" fill="#1a7f37">θ1=210°</text>
+  <text x="470" y="345" font-size="11" fill="#1a7f37">θ2=330°</text>
+
+  <!-- body frame axes at center -->
+  <line x1="330" y1="330" x2="330" y2="234" stroke="#1f6feb" stroke-width="3" marker-end="url(#ax)"/>
+  <line x1="330" y1="330" x2="234" y2="330" stroke="#1f6feb" stroke-width="3" marker-end="url(#ax)"/>
+  <text x="338" y="228" font-size="15" font-weight="bold" fill="#1f6feb">+x 前方</text>
+  <text x="196" y="324" font-size="15" font-weight="bold" fill="#1f6feb">+y 左</text>
+  <!-- z up: dot -->
+  <circle cx="330" cy="330" r="6" fill="#1f6feb"/>
+  <circle cx="330" cy="330" r="2.5" fill="#fff"/>
+  <text x="340" y="352" font-size="12" fill="#1f6feb">+z 上(紙面手前)</text>
+
+  <!-- omega CCW arc -->
+  <path d="M 386 330 A 56 56 0 0 0 358 281" fill="none" stroke="#8250df" stroke-width="2.5" marker-end="url(#om)"/>
+  <text x="392" y="300" font-size="12" fill="#8250df">+ω (CCW=左旋回)</text>
+
+  <!-- BNO055 mounting inset -->
+  <g>
+    <rect x="470" y="560" width="196" height="146" rx="6" fill="#fff" stroke="#333" stroke-width="1.5"/>
+    <text x="568" y="582" text-anchor="middle" font-size="13" font-weight="bold">BNO055 取り付け向き</text>
+    <rect x="540" y="612" width="56" height="56" rx="4" fill="#eee" stroke="#111" stroke-width="1.5"/>
+    <text x="568" y="644" text-anchor="middle" font-size="9" fill="#555">BNO055</text>
+    <!-- sensor axes: X up=前方, Y left=左 -->
+    <line x1="568" y1="640" x2="568" y2="600" stroke="#1f6feb" stroke-width="2" marker-end="url(#ax)"/>
+    <line x1="568" y1="640" x2="528" y2="640" stroke="#1f6feb" stroke-width="2" marker-end="url(#ax)"/>
+    <text x="574" y="600" font-size="11" fill="#1f6feb">X→+x</text>
+    <text x="500" y="636" font-size="11" fill="#1f6feb">Y→+y</text>
+    <text x="606" y="628" font-size="10" fill="#8250df">Z→+z</text>
+    <text x="478" y="690" font-size="10" fill="#555">heading(yaw)=Z軸周り, +ω と同符号</text>
+  </g>
+
+  <!-- legend -->
+  <g font-size="12">
+    <rect x="18" y="560" width="300" height="146" rx="6" fill="#fff" stroke="#ccc"/>
+    <text x="30" y="582" font-weight="bold">凡例</text>
+    <line x1="30" y1="600" x2="60" y2="600" stroke="#1f6feb" stroke-width="3" marker-end="url(#ax)"/>
+    <text x="68" y="604">車体座標軸 (x前 / y左 / z上, 右手系)</text>
+    <line x1="30" y1="624" x2="60" y2="624" stroke="#1a7f37" stroke-width="2.5" marker-end="url(#drv)"/>
+    <text x="68" y="628">駆動方向 θ (正回転で接地点が進む向き)</text>
+    <line x1="30" y1="648" x2="60" y2="648" stroke="#aaa" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="68" y="652">スポーク (中心→ホイール, 位置角)</text>
+    <path d="M 34 672 A 12 12 0 0 0 46 660" fill="none" stroke="#8250df" stroke-width="2.5" marker-end="url(#om)"/>
+    <text x="68" y="676">+ω = 反時計回り = 左旋回</text>
+    <text x="30" y="698" fill="#c00" font-weight="bold">M0/M1/M2 = モーター(L6470 index)=ホイール番号</text>
+  </g>
+</svg>
