@@ -6,8 +6,7 @@
 - 設計本体の **`*.FCStd`** をコミットする（例: `krilly-chassis.FCStd`）。
 - バックアップ・一時ファイル（`*.FCStd1`, `*.FCBak`, ロックファイル）は
   `.gitignore` 済み。
-- 書き出した中間データ（STL/STEP 等）を共有する場合は `hardware/cad/export/`
-  に置く（必要になったら作成）。
+- 書き出した中間データ（STL/STEP 等）は [`export/`](export/) に置く。
 
 ## 規約
 - 単位は **mm**。
