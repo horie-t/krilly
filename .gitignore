@@ -17,3 +17,9 @@ venv/
 # Logs / captures
 *.log
 captures/
+
+# FreeCAD backup / transient files (keep *.FCStd, drop backups)
+*.FCStd1
+*.FCStd[0-9]
+*.FCBak
+*.FCStd.lock
