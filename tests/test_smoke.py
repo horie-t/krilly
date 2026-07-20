@@ -21,7 +21,7 @@ def test_robot_config_defaults():
     cfg = load_robot_config()
     assert cfg.wheel_count == 3
     assert cfg.steps_per_rev == 200
-    assert math.isclose(cfg.wheel_circumference_m, math.pi * 0.048)
+    assert math.isclose(cfg.wheel_circumference_m, math.pi * cfg.wheel_diameter_m)
     assert cfg.microsteps_per_rev == cfg.steps_per_rev * cfg.microstep
     # オドメトリ分解能 (μ=16 で約47µm)
     assert 0 < cfg.metres_per_microstep < 1e-3
