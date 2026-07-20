@@ -119,3 +119,55 @@ def test_reset(est, kin):
     est.update_wheel_distances(*_forward_wheels(kin, 1.0))
     est.reset(1.0, 2.0, 0.5)
     assert est.pose == (1.0, 2.0, 0.5)
+
+
+# --- #13 ジャイロ融合 -----------------------------------------------------
+from krilly.localization.estimator import _wrap_angle  # noqa: E402
+
+
+def test_wrap_angle():
+    assert _wrap_angle(0.0) == pytest.approx(0.0)
+    assert _wrap_angle(math.pi + 0.1) == pytest.approx(-math.pi + 0.1)
+    assert _wrap_angle(-math.pi - 0.1) == pytest.approx(math.pi - 0.1)
+
+
+def test_gyro_drives_heading_not_wheels(est, kin):
+    # 車輪は回転 +30° を示すが、ジャイロは +90° -> φ はジャイロに従う
+    wheels = _rotate_wheels(kin, math.radians(30))
+    est.update_with_gyro(*wheels, math.radians(90))
+    assert est.pose[2] == pytest.approx(math.radians(90))
+
+
+def test_gyro_fusion_translation_uses_gyro_heading(kin):
+    # ジャイロで +90° 回してから前進 -> 世界 +y へ進む (車輪 dφ は無視)
+    est = DeadReckoning(kinematics=kin)
+    est.update_with_gyro(0.0, 0.0, 0.0, math.pi / 2)          # ジャイロのみで +90°
+    est.update_with_gyro(*_forward_wheels(kin, 0.3), 0.0)     # 前進 (回転なし)
+    x, y, phi = est.pose
+    assert x == pytest.approx(0.0, abs=1e-9)
+    assert y == pytest.approx(0.3)
+    assert phi == pytest.approx(math.pi / 2)
+
+
+def test_update_with_gyro_rate_matches_increment(kin):
+    a = DeadReckoning(kinematics=kin)
+    b = DeadReckoning(kinematics=kin)
+    wheel_mps = kin.body_to_wheels(0.2, 0.0, 0.0)
+    a.update_with_gyro_rate(wheel_mps, 0.5, 0.1)                       # 0.5 rad/s * 0.1s
+    b.update_with_gyro(*(v * 0.1 for v in wheel_mps), 0.5 * 0.1)
+    assert a.pose == pytest.approx(b.pose)
+
+
+def test_correct_heading_pulls_toward_reference(kin):
+    est = DeadReckoning(kinematics=kin, phi=0.0)
+    est.correct_heading(1.0, weight=0.5)      # 半分だけ引き込む
+    assert est.phi == pytest.approx(0.5)
+    est.correct_heading(1.0, weight=1.0)      # 完全に一致
+    assert est.phi == pytest.approx(1.0)
+
+
+def test_correct_heading_takes_shortest_path(kin):
+    # φ=170°, 参照=-170° -> 差は +20° 相当(最短) で、350°側には回らない
+    est = DeadReckoning(kinematics=kin, phi=math.radians(170))
+    est.correct_heading(math.radians(-170), weight=1.0)
+    assert est.phi == pytest.approx(math.radians(190))  # 170+20
