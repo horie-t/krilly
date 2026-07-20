@@ -14,6 +14,9 @@ microstep: 16
 # TODO(M2): 実機採寸 / キャリブレーションで確定する暫定値。
 center_to_wheel_m: 0.050
 
-# 各輪の駆動方向角 [deg]。120°対称配置 (wheel1 を +x 側に置く規約)。
-# v_i = -sin(theta_i)*vx + cos(theta_i)*vy + L*omega
-wheel_angles_deg: [90.0, 210.0, 330.0]
+# 各輪の「スポーク角」(車輪位置の角度) [deg]。120°対称配置。
+# 運動学の式 v_i = -sin(theta_i)*vx + cos(theta_i)*vy + L*omega は、theta_i に
+# このスポーク角を入れると正しく動く (駆動方向 = スポーク角 + 90°)。
+# M0=前(spoke 0°, 駆動+y) / M1=後左(120°) / M2=後右(240°)。docs/coordinate-frames.md 参照。
+# 実機で校正済み (#11): drive_demo で +x=前進 / +y=左 / +omega=CCW を確認。
+wheel_angles_deg: [0.0, 120.0, 240.0]
