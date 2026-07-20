@@ -98,6 +98,23 @@ class DeadReckoning:
         self.phi += weight * err
         return self.phi
 
+    # -- 位置の補正 (カメラ格子スナップの受け皿) #14 ------------------------
+    def correct_x(self, x_ref: float, weight: float = 1.0) -> float:
+        """世界座標 X を ``x_ref`` へ weight の割合で引き込む。"""
+        self.x += weight * (x_ref - self.x)
+        return self.x
+
+    def correct_y(self, y_ref: float, weight: float = 1.0) -> float:
+        """世界座標 Y を ``y_ref`` へ weight の割合で引き込む。"""
+        self.y += weight * (y_ref - self.y)
+        return self.y
+
+    def correct_position(
+        self, x_ref: float, y_ref: float, weight: float = 1.0
+    ) -> tuple[float, float]:
+        """(X, Y) を参照位置へ weight の割合で引き込む。"""
+        return (self.correct_x(x_ref, weight), self.correct_y(y_ref, weight))
+
     # -- 更新 (入力元別の便利メソッド) --------------------------------------
     def update_wheel_speeds(
         self, wheel_mps: tuple[float, float, float], dt: float
