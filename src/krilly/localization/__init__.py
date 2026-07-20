@@ -4,5 +4,6 @@
 """
 
 from .estimator import DeadReckoning
+from .grid import GridCorrector, snap_to_grid
 
-__all__ = ["DeadReckoning"]
+__all__ = ["DeadReckoning", "GridCorrector", "snap_to_grid"]
