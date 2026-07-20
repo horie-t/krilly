@@ -2,3 +2,7 @@
 
 状態量は [X, Y, phi]。M3 (issues #12-#14) で実装する。
 """
+
+from .estimator import DeadReckoning
+
+__all__ = ["DeadReckoning"]
