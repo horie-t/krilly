@@ -1,24 +1,24 @@
-"""Raspberry Pi Camera Module V3 via picamera2 (issue #7).
+"""Raspberry Pi Camera Module V3 を picamera2 経由で扱う (issue #7)。
 
-On the Pi 5, ``cv2.VideoCapture`` does not work with the libcamera stack — we use
-**picamera2** and pull frames as NumPy arrays for OpenCV. For a downward
-wall-detector we want low resolution, high fps, and **locked exposure / AWB** so
-the red HSV thresholds stay stable while the robot moves.
+Pi 5 では ``cv2.VideoCapture`` が libcamera スタックで動作しないため、
+**picamera2** を使い、フレームを OpenCV 向けの NumPy 配列として取得する。
+下向きの壁検出では、低解像度・高 fps で、さらに **露出 / AWB をロック** したい。
+そうすることで、ロボットの移動中も赤の HSV しきい値が安定して保たれる。
 
-Channel order gotcha: picamera2's ``"RGB888"`` format yields an array whose bytes
-are in **B, G, R** order, i.e. it is already BGR for OpenCV — so ``capture()``
-returns a BGR frame directly (no conversion). If colors look swapped on a given
-setup, swap R/B at the call site.
+チャンネル順の落とし穴: picamera2 の ``"RGB888"`` フォーマットは、バイト列が
+**B, G, R** の順に並んだ配列を返す。つまり OpenCV から見ればすでに BGR なので、
+``capture()`` は変換なしで BGR フレームをそのまま返す。特定の環境で色が入れ替わって
+見える場合は、呼び出し側で R/B を入れ替えること。
 """
 
 from __future__ import annotations
 
 
 class Camera:
-    """Pi camera wrapper returning BGR frames for OpenCV.
+    """OpenCV 向けに BGR フレームを返す Pi カメラのラッパー。
 
-    ``picam2`` may be injected (any object with ``capture_array`` / ``stop`` /
-    ``close``) for testing; otherwise a ``Picamera2`` is opened and started.
+    ``picam2`` はテスト用に注入できる (``capture_array`` / ``stop`` /
+    ``close`` を持つオブジェクト)。注入しない場合は ``Picamera2`` を開いて開始する。
     """
 
     def __init__(
@@ -40,7 +40,7 @@ class Camera:
             picam2.configure(config)
             picam2.start()
             if lock_awb_exposure:
-                time.sleep(0.5)  # let auto exposure / white balance settle
+                time.sleep(0.5)  # 自動露出 / ホワイトバランスが落ち着くのを待つ
                 meta = picam2.capture_metadata()
                 picam2.set_controls({
                     "AeEnable": False,
@@ -51,7 +51,7 @@ class Camera:
         self._picam2 = picam2
 
     def capture(self):
-        """Return the latest frame as a BGR NumPy array (see channel note)."""
+        """最新のフレームを BGR の NumPy 配列として返す (チャンネルに関する注意を参照)。"""
         return self._picam2.capture_array()
 
     def close(self) -> None:

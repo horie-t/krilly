@@ -1,4 +1,4 @@
-"""Run strategy: search run vs fastest run, goal detection.
+"""ランの戦略: 探索ランと最速ランの切替、ゴール検出。
 
-Implemented in M5 (issue #20).
+M5 (issue #20) で実装する。
 """

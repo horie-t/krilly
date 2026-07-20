@@ -1,7 +1,7 @@
-"""Unit tests for the L6470 driver: pure conversions + SPI command framing.
+"""L6470 ドライバのユニットテスト: 純粋な換算処理と SPI コマンドのフレーミング。
 
-No hardware required — the SPI device is faked and we assert on the exact byte
-stream, plus the datasheet register-conversion math.
+ハードウェア不要 — SPI デバイスをフェイクにして、正確なバイト列と
+データシートのレジスタ換算計算を検証する。
 """
 
 import math
@@ -13,7 +13,7 @@ from krilly.hal.l6470 import FWD, REV, L6470, Reg
 
 
 class FakeSpi:
-    """Records every byte sent; returns ``read_values`` (default 0) on reads."""
+    """送信された全バイトを記録し、read 時には ``read_values`` (デフォルト 0) を返す。"""
 
     def __init__(self, read_values=None):
         self.sent = []
@@ -30,7 +30,7 @@ class FakeSpi:
         self.closed = True
 
 
-# --- conversions -----------------------------------------------------------
+# --- 換算処理 --------------------------------------------------------------
 def test_run_register_known_value():
     # 400 step/s * (2^28 * 250ns) = 26843.55 -> 26844
     assert l6470.speed_to_run_register(400) == 26844
@@ -57,12 +57,12 @@ def test_accel_register_known_value():
     assert l6470.accel_to_register(1000) == 69
 
 
-# --- command framing -------------------------------------------------------
+# --- コマンドフレーミング --------------------------------------------------
 def test_run_command_framing():
     spi = FakeSpi()
     drv = L6470(spi=spi)
     drv.run(FWD, 400)
-    # RUN(0x50)|FWD(1) = 0x51, then 3-byte speed 26844 = 0x0068DC
+    # RUN(0x50)|FWD(1) = 0x51 に続けて、3 バイトの速度 26844 = 0x0068DC
     assert spi.sent == [0x51, 0x00, 0x68, 0xDC]
 
 
@@ -75,27 +75,27 @@ def test_run_reverse_opcode():
 def test_set_param_single_byte():
     spi = FakeSpi()
     L6470(spi=spi).set_param(Reg.STEP_MODE, 0x04)
-    # SET_PARAM(0x00) | STEP_MODE(0x16) = 0x16, payload 0x04
+    # SET_PARAM(0x00) | STEP_MODE(0x16) = 0x16、ペイロード 0x04
     assert spi.sent == [0x16, 0x04]
 
 
 def test_set_param_multibyte_big_endian():
     spi = FakeSpi()
-    L6470(spi=spi).set_param(Reg.ACC, 0x0123)  # ACC is 2 bytes
+    L6470(spi=spi).set_param(Reg.ACC, 0x0123)  # ACC は 2 バイト
     assert spi.sent == [0x00 | Reg.ACC, 0x01, 0x23]
 
 
 def test_get_status_reads_two_bytes():
-    # The byte clocked out during the opcode transfer is a dummy; data follows.
+    # オペコード転送中にクロックアウトされるバイトはダミーで、その後にデータが続く。
     spi = FakeSpi(read_values=[0x00, 0xAB, 0xCD])
     drv = L6470(spi=spi)
     status = drv.get_status()
-    assert spi.sent == [0xD0, 0x00, 0x00]  # GET_STATUS + 2 NOP
+    assert spi.sent == [0xD0, 0x00, 0x00]  # GET_STATUS + NOP 2 個
     assert status == 0xABCD
 
 
 def test_get_param_big_endian():
-    # Leading dummy for the opcode transfer, then 3 data bytes (ABS_POS).
+    # 先頭はオペコード転送用のダミー、続いて 3 バイトのデータ (ABS_POS)。
     spi = FakeSpi(read_values=[0x00, 0x01, 0x02, 0x03])
     drv = L6470(spi=spi)
     val = drv.get_param(Reg.ABS_POS)
@@ -115,7 +115,7 @@ def test_decode_status_no_comms():
 def test_decode_status_uvlo_first_read_annotated():
     first = l6470.decode_status(0x7C03, first_read=True)
     normal = l6470.decode_status(0x7C03)
-    assert "正常フラグ" in first          # power-up latch note
+    assert "正常フラグ" in first          # パワーオン時のラッチに関する注記
     assert "正常フラグ" not in normal
     assert "UVLO" in normal and "HiZ" in normal
 
@@ -124,5 +124,5 @@ def test_context_manager_puts_bridges_hiz_and_closes():
     spi = FakeSpi()
     with L6470(spi=spi) as drv:
         drv.run(FWD, 200)
-    assert spi.sent[-1] == 0xA8  # HARD_HIZ on exit
+    assert spi.sent[-1] == 0xA8  # 終了時に HARD_HIZ
     assert getattr(spi, "closed", False) is True

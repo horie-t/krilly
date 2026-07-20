@@ -1,7 +1,7 @@
-"""Unit tests for the BNO055 I2C driver (no hardware).
+"""BNO055 I2C ドライバのユニットテスト (ハードウェア不要)。
 
-A FakeI2CBus replays preloaded register bytes and records writes, so the
-register access, retry-on-error, and value parsing can be verified offline.
+FakeI2CBus はあらかじめ設定したレジスタバイトを再生し、write を記録する。
+これによりレジスタアクセス、エラー時のリトライ、値のパースをオフラインで検証できる。
 """
 
 import pytest
@@ -12,10 +12,10 @@ from krilly.hal.imu import Bno055Imu
 
 class FakeI2CBus:
     def __init__(self, reads=None, fail_times=0):
-        # reads: {reg: [ints]} returned by read_i2c_block_data
+        # reads: read_i2c_block_data が返す {reg: [ints]}
         self.reads = reads or {}
-        self.writes = []          # list of (reg, [data])
-        self.fail_times = fail_times  # number of leading reads/writes that raise OSError
+        self.writes = []          # (reg, [data]) のリスト
+        self.fail_times = fail_times  # 先頭から OSError を投げる read/write の回数
         self.closed = False
 
     def read_i2c_block_data(self, addr, reg, length):
@@ -44,7 +44,7 @@ def _vec(*raw16):
     return out
 
 
-# --- helper ----------------------------------------------------------------
+# --- ヘルパー --------------------------------------------------------------
 def test_s16_signed():
     assert imu._s16(0x00, 0x00) == 0
     assert imu._s16(0xFF, 0x7F) == 32767
@@ -52,7 +52,7 @@ def test_s16_signed():
     assert imu._s16(0x38, 0xFF) == -200  # 0xFF38
 
 
-# --- register access -------------------------------------------------------
+# --- レジスタアクセス ------------------------------------------------------
 def test_read_register_returns_bytes():
     bus = FakeI2CBus(reads={imu.CHIP_ID: [0xA0]})
     dev = Bno055Imu(bus=bus)
@@ -85,7 +85,7 @@ def test_write_raises_after_retries():
         dev._write_register(imu.OPR_MODE, b"\x0C")
 
 
-# --- value parsing ---------------------------------------------------------
+# --- 値のパース ------------------------------------------------------------
 def test_euler_parsing_degrees():
     bus = FakeI2CBus(reads={imu.EUL_HEADING_LSB: _vec(2880, -160 & 0xFFFF, 0)})
     h, r, p = Bno055Imu(bus=bus).euler
@@ -113,7 +113,7 @@ def test_calibration_status_bits():
 
 
 def test_measure_gyro_bias_averages():
-    # two reads of the same reg; FakeI2CBus returns the same frame each time
+    # 同じ reg を 2 回読む。FakeI2CBus は毎回同じフレームを返す
     bus = FakeI2CBus(reads={imu.GYR_DATA_X_LSB: _vec(48, 0, 0)})  # 48 LSB = 3.0 dps
     bx, by, bz = Bno055Imu(bus=bus).measure_gyro_bias(samples=4, delay=0)
     assert bx == pytest.approx(3.0)

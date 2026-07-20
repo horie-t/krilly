@@ -1,10 +1,10 @@
-"""Hardware abstraction layer.
+"""ハードウェア抽象化レイヤ。
 
-Each peripheral is wrapped behind a small, independently testable class:
+各ペリフェラルは、小さく個別にテスト可能なクラスでラップする:
 
-    l6470  — 3x stepper drivers over SPI0 daisy-chain (single CS), mode 3
-    imu    — BNO055 9-axis IMU in UART mode (/dev/serial0)
-    camera — Pi Camera Module V3 via picamera2 -> NumPy arrays for OpenCV
+    l6470  — SPI0 デイジーチェーン (単一 CS)、mode 3 で接続した 3 個のステッパドライバ
+    imu    — UART モード (/dev/serial0) の BNO055 9軸 IMU
+    camera — picamera2 経由の Pi Camera Module V3 -> OpenCV 用の NumPy 配列
 
-Implemented incrementally in milestone M1 (issues #5-#7).
+マイルストーン M1 (issues #5-#7) で段階的に実装する。
 """

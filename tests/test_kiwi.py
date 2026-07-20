@@ -1,4 +1,4 @@
-"""Unit tests for kiwi-drive kinematics and stepper conversion."""
+"""kiwi ドライブの運動学とステッパ換算のユニットテスト。"""
 
 import math
 
@@ -7,7 +7,7 @@ import pytest
 from krilly.config import RobotConfig
 from krilly.kinematics.kiwi import KiwiKinematics
 
-# Fixed geometry so the tests do not depend on config/robot.yaml values.
+# テストが config/robot.yaml の値に依存しないよう、ジオメトリを固定する。
 CFG = RobotConfig(
     wheel_diameter_m=0.048,
     wheel_count=3,
@@ -24,7 +24,7 @@ def kin():
     return KiwiKinematics(config=CFG)
 
 
-# --- inverse kinematics ----------------------------------------------------
+# --- 逆運動学 --------------------------------------------------------------
 def test_pure_forward(kin):
     # vx=1: v_i = -sin(theta_i) -> [-1, +0.5, +0.5]
     assert kin.body_to_wheels(1.0, 0.0, 0.0) == pytest.approx((-1.0, 0.5, 0.5))
@@ -36,11 +36,11 @@ def test_pure_left(kin):
 
 
 def test_pure_rotation(kin):
-    # omega=1 rad/s: all wheels = L*omega
+    # omega=1 rad/s: 全ホイール = L*omega
     assert kin.body_to_wheels(0.0, 0.0, 1.0) == pytest.approx((0.05, 0.05, 0.05))
 
 
-# --- forward kinematics (round trip) ---------------------------------------
+# --- 順運動学 (往復変換) ---------------------------------------------------
 def test_round_trip_body_wheels_body(kin):
     for vx, vy, w in [(0.3, 0.0, 0.0), (0.0, -0.2, 0.0), (0.1, 0.15, 2.0), (-0.25, 0.05, -1.5)]:
         wheels = kin.body_to_wheels(vx, vy, w)
@@ -53,9 +53,9 @@ def test_all_wheels_equal_is_pure_rotation(kin):
     assert w == pytest.approx(1.0)
 
 
-# --- stepper conversion ----------------------------------------------------
+# --- ステッパ換算 ----------------------------------------------------------
 def test_wheel_speed_to_full_step_hz(kin):
-    # one wheel revolution/s = circumference m/s -> steps_per_rev full step/s
+    # ホイール 1 回転/s = 円周 m/s -> steps_per_rev フルステップ/s
     circumference = math.pi * 0.048
     assert kin.wheel_speed_to_step_hz(circumference) == pytest.approx(200.0)
 
@@ -66,7 +66,7 @@ def test_step_hz_round_trip(kin):
 
 
 def test_distance_to_microsteps(kin):
-    # one revolution = steps_per_rev * microstep microsteps = 200*16 = 3200
+    # 1 回転 = steps_per_rev * microstep マイクロステップ = 200*16 = 3200
     circumference = math.pi * 0.048
     assert kin.distance_to_microsteps(circumference) == pytest.approx(3200.0)
     assert kin.microsteps_to_distance(3200.0) == pytest.approx(circumference)

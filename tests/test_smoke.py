@@ -1,4 +1,4 @@
-"""Smoke tests for the M0 scaffold: package imports + config loading."""
+"""M0 スキャフォールドのスモークテスト: パッケージの import と config 読み込み。"""
 
 import math
 

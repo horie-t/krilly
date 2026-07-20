@@ -1,4 +1,4 @@
-"""Self-localization: dead-reckoning + gyro heading + camera grid correction.
+"""自己位置推定: デッドレコニング + ジャイロ方位 + カメラによるグリッド補正。
 
-State is [X, Y, phi]. Implemented in M3 (issues #12-#14).
+状態量は [X, Y, phi]。M3 (issues #12-#14) で実装する。
 """

@@ -1,7 +1,8 @@
-"""Load robot and maze configuration from YAML.
+"""車体・迷路の設定を YAML から読み込む。
 
-Dimensions live in YAML (``robot.yaml`` / ``maze.yaml``) so they can be tuned
-without code changes. These dataclasses give typed, validated access.
+寸法はコードを変更せずにチューニングできるよう YAML (``robot.yaml`` /
+``maze.yaml``) に置いている。これらの dataclass は型付きで検証済みの
+アクセス手段を提供する。
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class RobotConfig:
-    """Physical parameters of the robot (units: SI — metres, radians)."""
+    """車体の物理パラメータ (単位: SI — メートル、ラジアン)。"""
 
     wheel_diameter_m: float
     wheel_count: int
@@ -50,14 +51,14 @@ class RobotConfig:
 
 @dataclass(frozen=True)
 class MazeConfig:
-    """Classic Micromouse maze geometry."""
+    """クラシック競技のマイクロマウス迷路の寸法。"""
 
-    grid_size: int                    # N (16 for classic)
+    grid_size: int                    # N (クラシックは 16)
     cell_pitch_m: float               # 0.180 m
     wall_thickness_m: float           # 0.012 m
     wall_height_m: float              # 0.050 m
-    goal_min: tuple[int, int]         # 0-indexed inclusive corner
-    goal_max: tuple[int, int]         # 0-indexed inclusive corner
+    goal_min: tuple[int, int]         # 0始まりインデックスの角 (端点を含む)
+    goal_max: tuple[int, int]         # 0始まりインデックスの角 (端点を含む)
 
     @property
     def passage_width_m(self) -> float:

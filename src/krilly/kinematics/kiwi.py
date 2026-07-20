@@ -1,23 +1,23 @@
-"""kiwi-drive (3 omni-wheel) kinematics and wheel-speed <-> stepper conversion.
+"""kiwi-drive (3輪オムニホイール) の運動学と輪速 <-> ステッパ変換。
 
-Conventions follow docs/coordinate-frames.md and config/robot.yaml:
-- Body frame: +x forward, +y left, +z up (right-handed); +omega = CCW.
-- ``wheel_angles_deg`` are the drive-direction angles theta_i (spoke + 90 deg),
-  default [90, 210, 330] for wheels M0(front) / M1(rear-left) / M2(rear-right).
+規約は docs/coordinate-frames.md と config/robot.yaml に従う:
+- ボディ座標系: +x が前方、+y が左方、+z が上方 (右手系)、+omega は反時計回り (CCW)。
+- ``wheel_angles_deg`` は各輪の駆動方向角 theta_i (スポーク方向 + 90 度) であり、
+  デフォルトは M0(前) / M1(後左) / M2(後右) に対して [90, 210, 330]。
 
-Inverse kinematics (body velocity -> wheel surface speed), for each wheel i:
+逆運動学 (ボディ速度 -> 各輪の接地面速度)、各輪 i について:
 
     v_i = -sin(theta_i) * vx + cos(theta_i) * vy + L * omega
 
-i.e. ``v = J @ [vx, vy, omega]`` with row_i = [-sin theta_i, cos theta_i, L].
-Forward kinematics is ``J^-1 @ v`` (J is invertible for the symmetric layout).
+すなわち row_i = [-sin theta_i, cos theta_i, L] とした ``v = J @ [vx, vy, omega]``。
+順運動学は ``J^-1 @ v`` (対称配置では J は正則で逆行列が存在する)。
 
-Stepper conversion — note the two different units the L6470 uses:
-- **Run (speed)**: the L6470 speed registers are in **full step/s** (micro-
-  stepping is applied internally and does not scale the commanded speed). So
-  ``wheel_speed_to_step_hz`` returns full step/s.
-- **Move / odometry (position)**: distances are counted in **microsteps** (per
-  the STEP_MODE), so use ``distance_to_microsteps`` for position/dead-reckoning.
+ステッパ変換 — L6470 が用いる 2 種類の単位に注意:
+- **Run (速度)**: L6470 の速度レジスタは **フルステップ/s** 単位 (マイクロステップは
+  内部で適用され、指令速度をスケールしない)。よって ``wheel_speed_to_step_hz`` は
+  フルステップ/s を返す。
+- **Move / odometry (位置)**: 距離は (STEP_MODE に応じた) **マイクロステップ** 単位で
+  数えるため、位置推定・デッドレコニングには ``distance_to_microsteps`` を使う。
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from krilly.config import RobotConfig, load_robot_config
 
 
 class KiwiKinematics:
-    """Kiwi-drive forward/inverse kinematics for a given robot geometry."""
+    """指定した車体形状に対する kiwi-drive の順運動学・逆運動学。"""
 
     def __init__(self, config: RobotConfig | None = None) -> None:
         self.cfg = config or load_robot_config()
@@ -43,43 +43,43 @@ class KiwiKinematics:
         self._m_per_fullstep = self.cfg.wheel_circumference_m / self.cfg.steps_per_rev
         self._m_per_microstep = self.cfg.metres_per_microstep
 
-    # -- kinematics ---------------------------------------------------------
+    # -- 運動学 -------------------------------------------------------------
     def body_to_wheels(
         self, vx: float, vy: float, omega: float
     ) -> tuple[float, float, float]:
-        """Body velocity (m/s, m/s, rad/s) -> wheel surface speeds (m/s)."""
+        """ボディ速度 (m/s, m/s, rad/s) -> 各輪の接地面速度 (m/s)。"""
         v = self._J @ np.array([vx, vy, omega], dtype=float)
         return (float(v[0]), float(v[1]), float(v[2]))
 
     def wheels_to_body(
         self, v0: float, v1: float, v2: float
     ) -> tuple[float, float, float]:
-        """Wheel surface speeds (m/s) -> body velocity (vx, vy, omega)."""
+        """各輪の接地面速度 (m/s) -> ボディ速度 (vx, vy, omega)。"""
         b = self._J_inv @ np.array([v0, v1, v2], dtype=float)
         return (float(b[0]), float(b[1]), float(b[2]))
 
-    # -- stepper conversions ------------------------------------------------
+    # -- ステッパ変換 -------------------------------------------------------
     def wheel_speed_to_step_hz(self, v_mps: float) -> float:
-        """Wheel surface speed (m/s) -> L6470 Run speed (full step/s)."""
+        """各輪の接地面速度 (m/s) -> L6470 の Run 速度 (フルステップ/s)。"""
         return v_mps / self._m_per_fullstep
 
     def step_hz_to_wheel_speed(self, step_hz: float) -> float:
-        """L6470 Run speed (full step/s) -> wheel surface speed (m/s)."""
+        """L6470 の Run 速度 (フルステップ/s) -> 各輪の接地面速度 (m/s)。"""
         return step_hz * self._m_per_fullstep
 
     def distance_to_microsteps(self, distance_m: float) -> float:
-        """Wheel rolling distance (m) -> microsteps (for Move / odometry)."""
+        """車輪の転がり距離 (m) -> マイクロステップ数 (Move / odometry 用)。"""
         return distance_m / self._m_per_microstep
 
     def microsteps_to_distance(self, microsteps: float) -> float:
-        """Microsteps -> wheel rolling distance (m)."""
+        """マイクロステップ数 -> 車輪の転がり距離 (m)。"""
         return microsteps * self._m_per_microstep
 
-    # -- convenience --------------------------------------------------------
+    # -- 補助メソッド -------------------------------------------------------
     def body_to_wheel_step_hz(
         self, vx: float, vy: float, omega: float
     ) -> tuple[float, float, float]:
-        """Body velocity -> each wheel's L6470 Run speed (full step/s)."""
+        """ボディ速度 -> 各輪の L6470 Run 速度 (フルステップ/s)。"""
         return tuple(  # type: ignore[return-value]
             self.wheel_speed_to_step_hz(v) for v in self.body_to_wheels(vx, vy, omega)
         )

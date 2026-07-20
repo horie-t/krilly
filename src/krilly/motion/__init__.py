@@ -1,4 +1,4 @@
-"""Motion control: body velocity (vx, vy, omega) -> 3 wheels, accel ramps.
+"""運動制御: ボディ速度 (vx, vy, omega) -> 3輪、加減速ランプ。
 
-Implemented in M2 (issues #9, #11) and M4 (issue #17).
+M2 (issues #9, #11) と M4 (issue #17) で実装する。
 """
