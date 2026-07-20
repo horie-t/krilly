@@ -20,6 +20,11 @@ import math
 from krilly.kinematics.kiwi import KiwiKinematics
 
 
+def _wrap_angle(a: float) -> float:
+    """角度を (-π, π] に正規化する。"""
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
 class DeadReckoning:
     """ステップ積算で世界座標の姿勢 [X, Y, φ] を推定する。"""
 
@@ -43,18 +48,55 @@ class DeadReckoning:
     def reset(self, x: float = 0.0, y: float = 0.0, phi: float = 0.0) -> None:
         self.x, self.y, self.phi = x, y, phi
 
-    # -- 更新 (汎用: 各輪の転がり距離デルタ) --------------------------------
-    def update_wheel_distances(self, d0: float, d1: float, d2: float) -> tuple[float, float, float]:
-        """各輪の転がり距離デルタ[m](符号付き)から姿勢を1ステップ積分する。"""
-        # 車体フレームの微小変位 (前進dx, 左dy, 回転dφ)
-        dx_b, dy_b, dphi = self.kin.wheels_to_body(d0, d1, d2)
-        # 中点姿勢で世界フレームへ回転 (小さな回転中の並進を近似)
-        phi_mid = self.phi + dphi / 2.0
+    # -- 積分の共通処理 -----------------------------------------------------
+    def _integrate(self, dx_b: float, dy_b: float, dphi: float) -> tuple[float, float, float]:
+        """車体フレームの微小変位を中点姿勢で世界フレームへ回転し積分する。"""
+        phi_mid = self.phi + dphi / 2.0  # 回転中の並進を中点姿勢で近似
         cos_m, sin_m = math.cos(phi_mid), math.sin(phi_mid)
         self.x += dx_b * cos_m - dy_b * sin_m
         self.y += dx_b * sin_m + dy_b * cos_m
         self.phi += dphi
         return self.pose
+
+    # -- 更新 (汎用: 各輪の転がり距離デルタ) --------------------------------
+    def update_wheel_distances(self, d0: float, d1: float, d2: float) -> tuple[float, float, float]:
+        """各輪の転がり距離デルタ[m](符号付き)から姿勢を1ステップ積分する。"""
+        dx_b, dy_b, dphi = self.kin.wheels_to_body(d0, d1, d2)
+        return self._integrate(dx_b, dy_b, dphi)
+
+    # -- 更新 (ジャイロ融合: 姿勢はジャイロ、並進は車輪) #13 -----------------
+    def update_with_gyro(
+        self, d0: float, d1: float, d2: float, gyro_dphi: float
+    ) -> tuple[float, float, float]:
+        """並進は車輪から、回転 dφ は**ジャイロ**から取って積分する。
+
+        ステッパの脱調・スリップは並進より回転に効きやすいため、回転を
+        スリップしないジャイロに委ねてφ誤差の蓄積を抑える (#13)。
+        ``gyro_dphi`` はこのステップのジャイロ積分値[rad] (+ω=CCW, バイアス減算済)。
+        """
+        dx_b, dy_b, _dphi_odom = self.kin.wheels_to_body(d0, d1, d2)
+        return self._integrate(dx_b, dy_b, gyro_dphi)
+
+    def update_with_gyro_rate(
+        self,
+        wheel_mps: tuple[float, float, float],
+        gyro_rate: float,
+        dt: float,
+    ) -> tuple[float, float, float]:
+        """便利版: 各輪速度[m/s]と ジャイロ角速度[rad/s] を dt で積分する。"""
+        return self.update_with_gyro(*(v * dt for v in wheel_mps), gyro_rate * dt)
+
+    # -- 絶対方位による緩やかな補正 (相補フィルタの低域側) #13 --------------
+    def correct_heading(self, phi_ref: float, weight: float = 1.0) -> float:
+        """絶対方位 ``phi_ref``[rad] へ向けて φ を緩やかに補正する。
+
+        ジャイロは長期的にバイアスでドリフトするため、信頼できる絶対方位
+        (BNO055 融合 heading や、後段 #14 の迷路軸に整列した方位) が得られた
+        ときに ``weight`` (0..1) の割合で引き込む。角度差は最短方向で扱う。
+        """
+        err = _wrap_angle(phi_ref - self.phi)
+        self.phi += weight * err
+        return self.phi
 
     # -- 更新 (入力元別の便利メソッド) --------------------------------------
     def update_wheel_speeds(
