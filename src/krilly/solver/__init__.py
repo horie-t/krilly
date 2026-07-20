@@ -1,4 +1,4 @@
-"""Maze model (16x16, shared-edge walls) + flood-fill + fastest path.
+"""迷路モデル (16x16、辺を共有する壁) + flood-fill + 最速経路。
 
-Implemented in M4 (issue #15) and M5 (issues #18, #19).
+M4 (issue #15) と M5 (issues #18, #19) で実装する。
 """

@@ -1,32 +1,33 @@
-"""L6470 (dSPIN) daisy-chain control — 3 drivers on one shared chip-select.
+"""L6470 (dSPIN) デイジーチェーン制御 — 1 個の共有 chip-select に 3 個のドライバ。
 
-This is the multi-driver path (issue #25). It builds on the single-driver
-register map / command set / conversions in :mod:`krilly.hal.l6470`.
+これは複数ドライバの経路 (issue #25)。:mod:`krilly.hal.l6470` の単体ドライバ用の
+register マップ・コマンドセット・変換の上に構築される。
 
-Daisy-chain topology (shared SCLK + shared CS):
+デイジーチェーンのトポロジ (SCLK 共有 + CS 共有):
 
     Pi.MOSI -> dev0.SDI, dev0.SDO -> dev1.SDI, dev1.SDO -> dev2.SDI,
     dev2.SDO -> Pi.MISO
 
-So device **index 0 is nearest MOSI** and index ``n-1`` is nearest MISO.
-Set ``mosi_is_index0=False`` if your wiring numbers them the other way.
+したがって **index 0 のデバイスが MOSI に最も近く**、index ``n-1`` が MISO に
+最も近い。配線が逆の番号付けになっている場合は ``mosi_is_index0=False`` を
+指定する。
 
-Framing model (important):
-- The chain is one big shift register (n bytes = n*8 bits). In **one CS pulse**
-  we clock ``n`` bytes — exactly one byte lands in each device, and each device
-  latches its byte on the CS rising edge.
-- A K-byte command (opcode + payload) therefore needs **K CS pulses**, and in
-  each pulse we send one byte per device (NOP for devices we aren't commanding).
-- Because the first byte clocked out travels the *furthest* down the chain, the
-  per-pulse transmit order is reversed relative to device index (handled in
-  :meth:`_pulse`). The same reversal maps the MISO response bytes back to index
-  order.
+フレーミングモデル (重要):
+- チェーン全体が 1 個の大きなシフトレジスタ (n バイト = n*8 ビット)。**1 回の
+  CS パルス** で ``n`` バイトをクロックすると、各デバイスにちょうど 1 バイトずつ
+  行き渡り、各デバイスは CS の立ち上がりエッジで自分のバイトをラッチする。
+- したがって K バイトのコマンド (opcode + payload) には **K 回の CS パルス** が
+  必要で、各パルスでデバイスごとに 1 バイトずつ送信する (コマンドを送らない
+  デバイスには NOP)。
+- 最初にクロックアウトされたバイトはチェーンの *最も奥* まで進むため、パルス
+  ごとの送信順序はデバイスの index に対して逆順になる (:meth:`_pulse` で処理)。
+  MISO の応答バイトを index の順序に戻すのにも同じ逆転を用いる。
 
-Read-back caveat: GetParam/GetStatus responses in a daisy chain are shifted by
-the chain and appear on the transfer following the opcode. The read helpers here
-implement the common scheme, but **the exact read framing must be validated on
-hardware** — spin/write is the primary M1 goal; treat reads as best-effort until
-confirmed on the bench.
+読み出しに関する注意: デイジーチェーンでは GetParam/GetStatus の応答はチェーン
+分だけシフトされ、opcode の次の転送で現れる。ここの読み出しヘルパは一般的な
+方式を実装しているが、**正確な読み出しフレーミングは実機で検証する必要がある**。
+回転・書き込みが M1 の主目的なので、読み出しはベンチで確認できるまで
+best-effort として扱う。
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ __all__ = ["L6470Chain", "FWD", "REV"]
 
 
 class L6470Chain:
-    """Control ``num_devices`` L6470 drivers daisy-chained on one CS."""
+    """1 個の CS にデイジーチェーン接続された ``num_devices`` 個の L6470 ドライバを制御する。"""
 
     def __init__(
         self,
@@ -63,7 +64,7 @@ class L6470Chain:
         self.n = num_devices
         self._mosi_first = mosi_is_index0
         if spi is None:
-            import spidev  # lazy: hardware-only dependency (aarch64)
+            import spidev  # 遅延 import: 実機専用の依存 (aarch64)
 
             spi = spidev.SpiDev()
             spi.open(bus, device)
@@ -71,30 +72,31 @@ class L6470Chain:
             spi.mode = 0b11  # SPI mode 3
         self._spi = spi
 
-    # -- low-level: one CS pulse transfers one byte per device --------------
+    # -- 低レベル: 1 回の CS パルスでデバイスごとに 1 バイト転送 ------------
     def _pulse(self, values_by_index: list[int]) -> list[int]:
-        """Clock one byte per device in a single CS pulse.
+        """1 回の CS パルスでデバイスごとに 1 バイトをクロックする。
 
-        ``values_by_index[i]`` is the byte destined for device ``i``. Returns
-        the response bytes mapped back to device index order.
+        ``values_by_index[i]`` はデバイス ``i`` 宛てのバイト。応答バイトを
+        デバイスの index の順序に戻して返す。
         """
         if len(values_by_index) != self.n:
             raise ValueError(f"expected {self.n} bytes, got {len(values_by_index)}")
         tx = list(values_by_index)
         if self._mosi_first:
-            tx.reverse()  # index n-1 (nearest MISO) must be clocked out first
+            tx.reverse()  # index n-1 (MISO に最も近い) を最初にクロックアウトする必要がある
         rx = self._spi.xfer2([b & 0xFF for b in tx])
         if self._mosi_first:
             rx = list(reversed(rx))
         return list(rx)
 
-    # -- command framing ----------------------------------------------------
+    # -- コマンドフレーミング -----------------------------------------------
     def send_commands(self, commands: list[bytes]) -> list[list[int]]:
-        """Send a (possibly different) command to each device simultaneously.
+        """各デバイスに (それぞれ異なりうる) コマンドを同時に送信する。
 
-        ``commands[i]`` is the full byte string (opcode + payload) for device
-        ``i``. All commands must be the same length; pad shorter ones with NOP.
-        Returns, per device, the list of response bytes (one per pulse).
+        ``commands[i]`` はデバイス ``i`` 向けの完全なバイト列 (opcode +
+        payload)。すべてのコマンドは同じ長さでなければならず、短いものは NOP で
+        パディングする。デバイスごとに応答バイトのリスト (パルスごとに 1 つ) を
+        返す。
         """
         if len(commands) != self.n:
             raise ValueError(f"expected {self.n} commands, got {len(commands)}")
@@ -109,12 +111,12 @@ class L6470Chain:
         return responses
 
     def broadcast(self, opcode: int, payload: bytes = b"") -> list[list[int]]:
-        """Send the same command to every device."""
+        """すべてのデバイスに同じコマンドを送信する。"""
         cmd = bytes([opcode]) + payload
         return self.send_commands([cmd] * self.n)
 
     def send_to(self, index: int, opcode: int, payload: bytes = b"") -> list[list[int]]:
-        """Command a single device; all others receive NOP."""
+        """単一のデバイスにコマンドを送る。他のすべてには NOP が送られる。"""
         if not 0 <= index < self.n:
             raise IndexError(index)
         cmd = bytes([opcode]) + payload
@@ -122,7 +124,7 @@ class L6470Chain:
         commands = [cmd if i == index else nop for i in range(self.n)]
         return self.send_commands(commands)
 
-    # -- parameter / status -------------------------------------------------
+    # -- パラメータ / ステータス --------------------------------------------
     def set_param_all(self, reg: int, value: int) -> None:
         payload = value.to_bytes(_REG_BYTES[reg], "big")
         self.broadcast(Cmd.SET_PARAM | reg, payload)
@@ -132,9 +134,9 @@ class L6470Chain:
         self.send_to(index, Cmd.SET_PARAM | reg, payload)
 
     def get_status_all(self) -> list[int]:
-        """Read the 16-bit STATUS of every device (best-effort; verify on HW)."""
+        """すべてのデバイスの 16-bit STATUS を読み出す (best-effort。実機で検証すること)。"""
         resp = self.broadcast(Cmd.GET_STATUS, bytes([Cmd.NOP, Cmd.NOP]))
-        # resp[i] = [dummy(opcode xfer), hi, lo]
+        # resp[i] = [ダミー(opcode 転送), hi, lo]
         return [(r[1] << 8) | r[2] for r in resp]
 
     def get_param_all(self, reg: int) -> list[int]:
@@ -143,12 +145,12 @@ class L6470Chain:
         out = []
         for r in resp:
             value = 0
-            for b in r[1:]:  # skip the opcode-transfer byte
+            for b in r[1:]:  # opcode 転送のバイトをスキップする
                 value = (value << 8) | b
             out.append(value)
         return out
 
-    # -- motion (per device) ------------------------------------------------
+    # -- モーション (デバイス個別) ------------------------------------------
     def run(self, index: int, direction: int, steps_per_sec: float) -> None:
         speed = speed_to_run_register(steps_per_sec)
         self.send_to(index, Cmd.RUN | (direction & 1), speed.to_bytes(3, "big"))
@@ -158,9 +160,9 @@ class L6470Chain:
             index, Cmd.MOVE | (direction & 1), (microsteps & 0x3FFFFF).to_bytes(3, "big")
         )
 
-    # -- motion (all devices at once) ---------------------------------------
+    # -- モーション (全デバイス同時) ----------------------------------------
     def run_all(self, directions: list[int], speeds: list[float]) -> None:
-        """Start all devices at their own direction/speed in aligned pulses."""
+        """整列したパルスで、全デバイスをそれぞれの方向・速度で始動させる。"""
         if len(directions) != self.n or len(speeds) != self.n:
             raise ValueError("directions/speeds length must match num_devices")
         commands = [
@@ -182,11 +184,11 @@ class L6470Chain:
     def reset_all(self) -> None:
         self.broadcast(Cmd.RESET_DEVICE)
 
-    # -- setup --------------------------------------------------------------
+    # -- セットアップ -------------------------------------------------------
     def configure_all(self, profile: L6470Profile | None = None) -> list[int]:
-        """Reset + apply the same profile to every device; clear power-up flags.
+        """リセットし、全デバイスに同じプロファイルを適用し、電源投入時のフラグをクリアする。
 
-        Returns each device's STATUS after configuration.
+        設定後の各デバイスの STATUS を返す。
         """
         profile = profile or L6470Profile()
         self.reset_all()

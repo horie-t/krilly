@@ -1,6 +1,6 @@
-"""Camera perception: detect red wall-tops (two-range HSV mask -> centroid).
+"""カメラによる認識: 赤い壁の上端を検出する (2 レンジの HSV マスク -> 重心)。
 
-Implemented in M1 (issue #7) and M4 (issue #16).
+M1 (issue #7) と M4 (issue #16) で実装する。
 """
 
 from .red_wall import (

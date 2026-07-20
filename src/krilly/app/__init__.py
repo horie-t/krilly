@@ -1,4 +1,4 @@
-"""Application entry point and run state machine (待機 / 探索 / 最速).
+"""アプリケーションのエントリポイントとランの状態機械 (待機 / 探索 / 最速)。
 
-Implemented in M5 (issue #20) and tuned in M6.
+M5 (issue #20) で実装し、M6 でチューニングする。
 """

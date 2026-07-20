@@ -1,40 +1,42 @@
-"""L6470 (dSPIN) stepper driver — single-driver control over SPI.
+"""L6470 (dSPIN) ステッピングドライバ — SPI 経由の単体ドライバ制御。
 
-This is the **single-driver** bring-up path (issue #5): one L6470 on its own
-chip-select, addressed via ``spidev`` (bus, device). Daisy-chaining all three
-drivers on a shared CS is a later step (issue #25).
+これは **単体ドライバ** の立ち上げ経路 (issue #5)。1 個の L6470 を専用の
+chip-select に接続し、``spidev`` (bus, device) 経由でアクセスする。3 個の
+ドライバを共有 CS でデイジーチェーン接続するのは後の段階 (issue #25)。
 
-Wiring / protocol notes (see docs/setup-pi5.md):
-- SPI **mode 3** (CPOL=1, CPHA=1), MSB-first, ~5 MHz.
-- The L6470 latches **one byte per CS pulse**: every byte is its own SPI
-  transaction, so CS toggles between bytes. ``spidev.xfer2([b])`` pulses CS
-  around the transfer, so we send byte-by-byte.
-- The L6470 has an on-board motion engine: we issue high-level commands
-  (Run / Move / Stop), not individual step pulses.
-- On power-up the STATUS register holds UVLO/OCD flags; read STATUS once at
-  init (it clears on read) or the driver refuses to move.
+配線・プロトコルに関する注意 (docs/setup-pi5.md 参照):
+- SPI は **mode 3** (CPOL=1, CPHA=1)、MSB ファースト、約 5 MHz。
+- L6470 は **CS パルスごとに 1 バイト** をラッチする。各バイトはそれぞれ
+  独立した SPI トランザクションであり、バイト間で CS がトグルする。
+  ``spidev.xfer2([b])`` は転送の前後で CS をパルスするため、1 バイトずつ
+  送信する。
+- L6470 は内蔵のモーションエンジンを持つため、個々のステップパルスではなく
+  高レベルなコマンド (Run / Move / Stop) を発行する。
+- 電源投入直後は STATUS register に UVLO/OCD フラグが立っている。init 時に
+  STATUS を 1 回読み出す (読み出しでクリアされる) こと。そうしないと
+  ドライバは動作を拒否する。
 
-The pure register-conversion helpers (steps/s ⇄ register value) live at module
-level so they can be unit-tested without hardware.
+純粋な register 変換ヘルパ (steps/s ⇄ register 値) はハードウェア無しで
+ユニットテストできるよう、モジュールレベルに配置している。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# --- L6470 timing constant -------------------------------------------------
-# The device's internal tick is 250 ns. All speed/accel register formulas are
-# derived from it (datasheet "Programming manual", §"Specific registers").
+# --- L6470 タイミング定数 --------------------------------------------------
+# デバイス内部の tick は 250 ns。速度・加速度の register 式はすべてこれを
+# 基に導出される (データシート "Programming manual" の §"Specific registers")。
 _TICK_S = 250e-9
 
-# Conversion coefficients = (2 ** shift) * tick
+# 変換係数 = (2 ** shift) * tick
 _SPEED_COEF = (2 ** 28) * _TICK_S       # Run SPEED register   (20-bit)
 _MAX_SPEED_COEF = (2 ** 18) * _TICK_S   # MAX_SPEED / FS_SPD   (10-bit)
 _MIN_SPEED_COEF = (2 ** 24) * _TICK_S   # MIN_SPEED            (12-bit)
 _ACC_COEF = (2 ** 40) * (_TICK_S ** 2)  # ACC / DEC            (12-bit)
 
 
-# --- Register addresses ----------------------------------------------------
+# --- Register アドレス ------------------------------------------------------
 class Reg:
     ABS_POS = 0x01
     EL_POS = 0x02
@@ -63,7 +65,7 @@ class Reg:
     STATUS = 0x19
 
 
-# Byte width of each register's payload (ceil(bits / 8)).
+# 各 register のペイロードのバイト幅 (ceil(bits / 8))。
 _REG_BYTES = {
     Reg.ABS_POS: 3, Reg.EL_POS: 2, Reg.MARK: 3, Reg.SPEED: 3,
     Reg.ACC: 2, Reg.DEC: 2, Reg.MAX_SPEED: 2, Reg.MIN_SPEED: 2,
@@ -75,7 +77,7 @@ _REG_BYTES = {
 }
 
 
-# --- Command opcodes -------------------------------------------------------
+# --- Command opcode ---------------------------------------------------------
 class Cmd:
     NOP = 0x00
     SET_PARAM = 0x00      # | register
@@ -98,11 +100,11 @@ class Cmd:
     GET_STATUS = 0xD0
 
 
-# Direction bit
+# Direction ビット
 REV = 0
 FWD = 1
 
-# Step-mode STEP_SEL field (full .. 1/128)
+# Step-mode の STEP_SEL フィールド (full 〜 1/128)
 STEP_MODE_FULL = 0x00
 STEP_MODE_HALF = 0x01
 STEP_MODE_1_4 = 0x02
@@ -113,48 +115,49 @@ STEP_MODE_1_64 = 0x06
 STEP_MODE_1_128 = 0x07
 
 
-# --- Pure conversions (steps/s, steps/s^2 ⇄ register value) ----------------
+# --- 純粋な変換 (steps/s, steps/s^2 ⇄ register 値) --------------------------
 def _clamp(value: int, bits: int) -> int:
     return max(0, min(value, (1 << bits) - 1))
 
 
 def speed_to_run_register(steps_per_sec: float) -> int:
-    """Convert a Run speed [steps/s] to the 20-bit SPEED register value."""
+    """Run 速度 [steps/s] を 20-bit の SPEED register 値に変換する。"""
     return _clamp(round(steps_per_sec * _SPEED_COEF), 20)
 
 
 def run_register_to_speed(reg_value: int) -> float:
-    """Inverse of :func:`speed_to_run_register` [steps/s]."""
+    """:func:`speed_to_run_register` の逆変換 [steps/s]。"""
     return reg_value / _SPEED_COEF
 
 
 def speed_to_max_speed_register(steps_per_sec: float) -> int:
-    """Convert a max speed [steps/s] to the 10-bit MAX_SPEED register value."""
+    """最大速度 [steps/s] を 10-bit の MAX_SPEED register 値に変換する。"""
     return _clamp(round(steps_per_sec * _MAX_SPEED_COEF), 10)
 
 
 def speed_to_min_speed_register(steps_per_sec: float) -> int:
-    """Convert a min speed [steps/s] to the 12-bit MIN_SPEED register value."""
+    """最小速度 [steps/s] を 12-bit の MIN_SPEED register 値に変換する。"""
     return _clamp(round(steps_per_sec * _MIN_SPEED_COEF), 12)
 
 
 def speed_to_fs_spd_register(steps_per_sec: float) -> int:
-    """Convert the full-step switch-over speed [steps/s] to FS_SPD (10-bit)."""
+    """フルステップ切り替え速度 [steps/s] を FS_SPD (10-bit) に変換する。"""
     return _clamp(round(steps_per_sec * _MAX_SPEED_COEF - 0.5), 10)
 
 
 def accel_to_register(steps_per_sec2: float) -> int:
-    """Convert acceleration/deceleration [steps/s^2] to the 12-bit register."""
+    """加速度・減速度 [steps/s^2] を 12-bit の register 値に変換する。"""
     return _clamp(round(steps_per_sec2 * _ACC_COEF), 12)
 
 
 def decode_status(status: int, first_read: bool = False) -> str:
-    """Human-readable summary of the 16-bit STATUS register.
+    """16-bit の STATUS register を人間が読める形に要約する。
 
-    Fault bits (UVLO/TH_WRN/TH_SD/OCD/STEP_LOSS) are active-low (0 = event).
-    An all-zero / all-one response means no SPI communication was established.
-    ``first_read=True`` annotates UVLO as the normal power-up latch (UVLO is
-    always set at power-up and cleared by the first GetStatus).
+    フォールトビット (UVLO/TH_WRN/TH_SD/OCD/STEP_LOSS) は active-low
+    (0 = イベント発生)。応答が全ビット 0 / 全ビット 1 の場合は SPI 通信が
+    確立していないことを意味する。``first_read=True`` の場合は UVLO を
+    電源投入時の正常なラッチとして注記する (UVLO は電源投入時に常にセット
+    され、最初の GetStatus でクリアされる)。
     """
     if status in (0x0000, 0xFFFF):
         return ("★SPI通信不可の可能性 (応答が全ビット %s)。正常なら 0x7C03 付近。"
@@ -181,27 +184,28 @@ def decode_status(status: int, first_read: bool = False) -> str:
 
 @dataclass(frozen=True)
 class L6470Profile:
-    """Motion/torque configuration applied at init.
+    """init 時に適用するモーション・トルク設定。
 
-    Defaults are conservative (low KVAL torque, moderate speed) — safe for
-    first power-on bench testing. Tune on hardware in M2/M6.
+    デフォルト値は保守的 (KVAL トルクは低め、速度は中程度) で、初回電源投入時の
+    ベンチテストでも安全。実機でのチューニングは M2/M6 で行う。
     """
 
     step_mode: int = STEP_MODE_1_16
-    max_speed_steps_s: float = 400.0      # ~2 rev/s at 200 step/rev
+    max_speed_steps_s: float = 400.0      # 200 step/rev で約 2 rev/s
     acc_steps_s2: float = 1000.0
     dec_steps_s2: float = 1000.0
-    kval_hold: int = 0x20                 # ~12.5 % of Vs
-    kval_run: int = 0x40                  # ~25 %
+    kval_hold: int = 0x20                 # Vs の約 12.5 %
+    kval_run: int = 0x40                  # 約 25 %
     kval_acc: int = 0x40
     kval_dec: int = 0x40
 
 
 class L6470:
-    """Single L6470 driver on one chip-select.
+    """1 個の chip-select に接続された単体の L6470 ドライバ。
 
-    ``spi`` may be injected (any object with ``xfer2`` and ``close``) for
-    testing; otherwise a ``spidev.SpiDev`` is opened on (bus, device).
+    テスト用に ``spi`` を注入できる (``xfer2`` と ``close`` を持つ任意の
+    オブジェクト)。指定しない場合は (bus, device) で ``spidev.SpiDev`` を
+    オープンする。
     """
 
     def __init__(
@@ -212,7 +216,7 @@ class L6470:
         spi=None,
     ) -> None:
         if spi is None:
-            import spidev  # lazy: hardware-only dependency (aarch64)
+            import spidev  # 遅延 import: 実機専用の依存 (aarch64)
 
             spi = spidev.SpiDev()
             spi.open(bus, device)
@@ -220,7 +224,7 @@ class L6470:
             spi.mode = 0b11  # SPI mode 3
         self._spi = spi
 
-    # -- low-level: one byte per CS pulse -----------------------------------
+    # -- 低レベル: CS パルスごとに 1 バイト ---------------------------------
     def _send_byte(self, value: int) -> int:
         return self._spi.xfer2([value & 0xFF])[0]
 
@@ -229,7 +233,7 @@ class L6470:
         for b in payload:
             self._send_byte(b)
 
-    # -- parameter access ---------------------------------------------------
+    # -- パラメータアクセス -------------------------------------------------
     def set_param(self, reg: int, value: int) -> None:
         nbytes = _REG_BYTES[reg]
         payload = value.to_bytes(nbytes, "big")
@@ -243,22 +247,22 @@ class L6470:
             result = (result << 8) | self._send_byte(Cmd.NOP)
         return result
 
-    # -- status -------------------------------------------------------------
+    # -- ステータス ---------------------------------------------------------
     def get_status(self) -> int:
-        """Read (and clear) the 16-bit STATUS register."""
+        """16-bit の STATUS register を読み出す (同時にクリアする)。"""
         self._send_byte(Cmd.GET_STATUS)
         hi = self._send_byte(Cmd.NOP)
         lo = self._send_byte(Cmd.NOP)
         return (hi << 8) | lo
 
-    # -- motion commands ----------------------------------------------------
+    # -- モーションコマンド -------------------------------------------------
     def run(self, direction: int, steps_per_sec: float) -> None:
-        """Spin at constant speed until stopped."""
+        """停止するまで一定速度で回転させる。"""
         speed = speed_to_run_register(steps_per_sec)
         self._send_command(Cmd.RUN | (direction & 1), speed.to_bytes(3, "big"))
 
     def move(self, direction: int, microsteps: int) -> None:
-        """Move a relative number of (micro)steps, then stop. Motor must be stopped."""
+        """相対的な (マイクロ)ステップ数だけ移動して停止する。モーターは停止している必要がある。"""
         self._send_command(
             Cmd.MOVE | (direction & 1), (microsteps & 0x3FFFFF).to_bytes(3, "big")
         )
@@ -270,7 +274,7 @@ class L6470:
         self._send_command(Cmd.HARD_STOP)
 
     def soft_hiz(self) -> None:
-        """Decelerate then put the bridges in high-impedance (free spin)."""
+        """減速後にブリッジをハイインピーダンス状態にする (フリースピン)。"""
         self._send_command(Cmd.SOFT_HIZ)
 
     def hard_hiz(self) -> None:
@@ -279,11 +283,11 @@ class L6470:
     def reset_device(self) -> None:
         self._send_command(Cmd.RESET_DEVICE)
 
-    # -- setup --------------------------------------------------------------
+    # -- セットアップ -------------------------------------------------------
     def configure(self, profile: L6470Profile | None = None) -> int:
-        """Reset, apply a motion/torque profile, and clear power-up flags.
+        """リセットし、モーション・トルクプロファイルを適用し、電源投入時のフラグをクリアする。
 
-        Returns the STATUS read after configuration (flags cleared).
+        設定後に読み出した STATUS を返す (フラグはクリア済み)。
         """
         profile = profile or L6470Profile()
         self.reset_device()
@@ -295,7 +299,7 @@ class L6470:
         self.set_param(Reg.KVAL_RUN, profile.kval_run)
         self.set_param(Reg.KVAL_ACC, profile.kval_acc)
         self.set_param(Reg.KVAL_DEC, profile.kval_dec)
-        return self.get_status()  # clears UVLO/OCD power-up flags
+        return self.get_status()  # 電源投入時の UVLO/OCD フラグをクリアする
 
     def close(self) -> None:
         self._spi.close()

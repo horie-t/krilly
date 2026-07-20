@@ -1,12 +1,13 @@
-"""Red wall-top detection (issue #7).
+"""赤い壁上部の検出 (issue #7)。
 
-The downward camera looks at the maze walls, whose tops are painted **red**.
-This module turns a BGR frame into a red mask and the centroids of the red
-regions (wall tops) — pure OpenCV/NumPy so it is unit-testable without a camera.
+下向きのカメラは迷路の壁を捉える。壁の上部は **赤** に塗られている。
+このモジュールは BGR フレームを赤のマスクと、赤い領域 (壁上部) の重心へと変換する。
+純粋に OpenCV/NumPy のみで実装しているため、カメラなしでもユニットテストできる。
 
-Red wraps the HSV hue boundary, so we OR two hue ranges (low and high). Defaults
-are a starting point; the competition rules warn walls fade and mix, so tune the
-S/V floors on the real maze / lighting and lock the camera exposure & AWB.
+赤は HSV の hue 境界をまたぐため、2 つの hue 範囲 (低域と高域) を OR で結合する。
+デフォルト値はあくまで出発点である。競技規則では壁が退色したり混ざったりすると
+注意されているので、実際の迷路 / 照明に合わせて S/V の下限を調整し、
+カメラの露出と AWB をロックすること。
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class RedDetectorConfig:
-    """HSV thresholds (OpenCV ranges: H 0-179, S/V 0-255) and filtering."""
+    """HSV しきい値 (OpenCV の範囲: H 0-179, S/V 0-255) とフィルタリング設定。"""
 
     h1_lo: int = 0
     h1_hi: int = 10
@@ -27,13 +28,13 @@ class RedDetectorConfig:
     h2_hi: int = 179
     s_min: int = 100
     v_min: int = 70
-    min_area: float = 100.0   # ignore red blobs smaller than this (px^2)
-    morph_kernel: int = 3     # 0 disables open/close denoising
+    min_area: float = 100.0   # これより小さい赤の blob は無視する (px^2)
+    morph_kernel: int = 3     # 0 で open/close によるノイズ除去を無効化
 
 
 @dataclass(frozen=True)
 class RedRegion:
-    """A detected red blob."""
+    """検出された 1 つの赤い blob。"""
 
     cx: float
     cy: float
@@ -42,7 +43,7 @@ class RedRegion:
 
 
 def red_mask(bgr: np.ndarray, config: RedDetectorConfig | None = None) -> np.ndarray:
-    """Return a uint8 (0/255) mask of red pixels in a BGR image."""
+    """BGR 画像中の赤ピクセルを表す uint8 (0/255) のマスクを返す。"""
     cfg = config or RedDetectorConfig()
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     lo1 = np.array([cfg.h1_lo, cfg.s_min, cfg.v_min], dtype=np.uint8)
@@ -60,10 +61,10 @@ def red_mask(bgr: np.ndarray, config: RedDetectorConfig | None = None) -> np.nda
 def detect_red_regions(
     bgr: np.ndarray, config: RedDetectorConfig | None = None
 ) -> list[RedRegion]:
-    """Detect red blobs and return them as centroids/bboxes, largest first."""
+    """赤い blob を検出し、重心 / bbox として面積の大きい順に返す。"""
     cfg = config or RedDetectorConfig()
     mask = red_mask(bgr, cfg)
-    # findContours returns (contours, hierarchy) on cv2 4.x, (img, ...) on 3.x
+    # findContours は cv2 4.x では (contours, hierarchy) を、3.x では (img, ...) を返す
     contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
     regions: list[RedRegion] = []
     for c in contours:
@@ -81,7 +82,7 @@ def detect_red_regions(
 
 
 def annotate(bgr: np.ndarray, regions: list[RedRegion]) -> np.ndarray:
-    """Draw bounding boxes and centroids for visual bring-up. Returns a copy."""
+    """動作確認用にバウンディングボックスと重心を描画する。コピーを返す。"""
     out = bgr.copy()
     for r in regions:
         x, y, w, h = r.bbox

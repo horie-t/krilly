@@ -1,6 +1,6 @@
-"""Krilly — holonomic (3 omni-wheel) Micromouse for Raspberry Pi 5.
+"""Krilly — Raspberry Pi 5 向けのホロノミック (3輪オムニホイール) マイクロマウス。
 
-Layered architecture (low → high level), see the project plan:
+低レベルから高レベルへの階層アーキテクチャ。プロジェクト計画も参照:
 
     hal          ハードウェア抽象化 (L6470 / BNO055 / camera)
     kinematics   kiwi-drive 正逆運動学・輪速⇄ステップ変換

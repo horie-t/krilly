@@ -1,6 +1,6 @@
-"""Centralized logging setup for Krilly.
+"""Krilly のロギングを一元的にセットアップするモジュール。
 
-Call :func:`setup_logging` once at application/script start-up.
+アプリケーションやスクリプトの起動時に :func:`setup_logging` を一度だけ呼び出す。
 """
 
 from __future__ import annotations
@@ -13,10 +13,10 @@ _DEFAULT_DATEFMT = "%H:%M:%S"
 
 
 def setup_logging(level: int | str | None = None) -> None:
-    """Configure root logging.
+    """ルートロガーを設定する。
 
-    The level can be overridden by the ``KRILLY_LOG_LEVEL`` environment
-    variable (e.g. ``DEBUG``, ``INFO``). Defaults to ``INFO``.
+    ログレベルは ``KRILLY_LOG_LEVEL`` 環境変数 (例: ``DEBUG``、``INFO``)
+    で上書きできる。デフォルトは ``INFO``。
     """
     if level is None:
         level = os.environ.get("KRILLY_LOG_LEVEL", "INFO")
@@ -24,5 +24,5 @@ def setup_logging(level: int | str | None = None) -> None:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Return a module logger (thin wrapper around :func:`logging.getLogger`)."""
+    """モジュール用ロガーを返す ( :func:`logging.getLogger` の薄いラッパー)。"""
     return logging.getLogger(name)

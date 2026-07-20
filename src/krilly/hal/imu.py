@@ -1,26 +1,27 @@
-"""BNO055 9-axis IMU over **I2C** (issue #6).
+"""BNO055 9軸 IMU を **I2C** 経由で扱う (issue #6)。
 
-The board (Akizuki AE-BNO055-BO) ships in I2C mode (address 0x28) with no
-jumper changes needed, so I2C avoids the tiny UART-select solder pads.
+ボード (秋月 AE-BNO055-BO) は I2C モード (アドレス 0x28) で出荷され、
+ジャンパの変更は不要なので、I2C を使えば小さな UART 選択用のはんだパッドを
+触らずに済む。
 
-Clock-stretching note: the legacy Broadcom BSC I2C (Pi 1-4) mishandles the
-BNO055's clock stretching, but the **Pi 5 uses RP1 (DesignWare) I2C which
-handles it correctly** — 100 kHz has been verified stable on hardware, so no
-bus-speed reduction is needed. We still retry every transfer on OSError as cheap
-insurance; if a slower Pi ever mishandles reads, lower the bus speed via
-``dtparam=i2c_arm_baudrate`` (see docs/setup-pi5.md).
+クロックストレッチについての注意: 従来の Broadcom BSC I2C (Pi 1-4) は
+BNO055 のクロックストレッチを正しく扱えないが、**Pi 5 は RP1 (DesignWare) I2C を
+使用しており、これを正しく処理できる** — 100 kHz で実機上の安定動作が確認済みなので、
+バス速度を下げる必要はない。念のため保険として、各転送は OSError 時にリトライする。
+もし遅い Pi で読み取りが正しく行えない場合は、``dtparam=i2c_arm_baudrate`` で
+バス速度を下げること (docs/setup-pi5.md を参照)。
 
-Register protocol: standard I2C register read/write (write the register
-pointer, repeated-start read N bytes). All multi-byte values are signed 16-bit
-little-endian. Default units: Euler 16 LSB/deg, gyro 16 LSB/deg-per-sec,
-quaternion 2^14 LSB/unit. All registers used are on page 0 (default).
+レジスタプロトコル: 標準的な I2C レジスタ読み書き (レジスタポインタを書き込み、
+repeated-start で N バイト読み取る)。マルチバイト値はすべて符号付き 16-bit
+リトルエンディアン。デフォルトの単位: Euler 16 LSB/deg、gyro 16 LSB/deg-per-sec、
+quaternion 2^14 LSB/unit。使用するレジスタはすべて page 0 (デフォルト) にある。
 """
 
 from __future__ import annotations
 
 import time
 
-# --- registers (page 0) ----------------------------------------------------
+# --- レジスタ (page 0) ------------------------------------------------------
 CHIP_ID = 0x00
 GYR_DATA_X_LSB = 0x14
 EUL_HEADING_LSB = 0x1A
@@ -32,30 +33,30 @@ PWR_MODE = 0x3E
 SYS_TRIGGER = 0x3F
 
 CHIP_ID_VALUE = 0xA0
-DEFAULT_ADDRESS = 0x28  # AE-BNO055-BO factory default (J1 open)
+DEFAULT_ADDRESS = 0x28  # AE-BNO055-BO の工場出荷デフォルト (J1 オープン)
 
-# operation modes
+# 動作モード
 MODE_CONFIG = 0x00
-MODE_NDOF = 0x0C  # 9-DOF fusion, absolute orientation
+MODE_NDOF = 0x0C  # 9-DOF センサフュージョン、絶対姿勢
 
-# scale factors for the default unit selection
+# デフォルトの単位選択に対応するスケールファクタ
 _EULER_LSB_PER_DEG = 16.0
 _GYRO_LSB_PER_DPS = 16.0
 _QUAT_LSB = float(1 << 14)  # 16384
 
 
 def _s16(lo: int, hi: int) -> int:
-    """Interpret two bytes as a signed 16-bit little-endian integer."""
+    """2 バイトを符号付き 16-bit リトルエンディアン整数として解釈する。"""
     value = lo | (hi << 8)
     return value - 0x10000 if value & 0x8000 else value
 
 
 class Bno055Imu:
-    """BNO055 over I2C.
+    """BNO055 を I2C 経由で扱う。
 
-    ``bus`` may be injected (anything with ``read_i2c_block_data`` /
-    ``write_i2c_block_data`` / ``close``, e.g. ``smbus2.SMBus``) for testing;
-    otherwise an ``smbus2.SMBus`` is opened on ``bus_id``.
+    ``bus`` はテスト用に注入できる (``read_i2c_block_data`` /
+    ``write_i2c_block_data`` / ``close`` を持つオブジェクト、例えば
+    ``smbus2.SMBus`` など)。注入しない場合は ``bus_id`` 上で ``smbus2.SMBus`` を開く。
     """
 
     def __init__(
@@ -66,20 +67,20 @@ class Bno055Imu:
         retries: int = 5,
     ) -> None:
         if bus is None:
-            from smbus2 import SMBus  # lazy import
+            from smbus2 import SMBus  # 遅延インポート
 
             bus = SMBus(bus_id)
         self._bus = bus
         self._addr = address
         self._retries = retries
 
-    # -- low-level register access (retry on I2C errors / clock stretch) ----
+    # -- 低レベルなレジスタアクセス (I2C エラー / クロックストレッチ時にリトライ) --
     def _read_register(self, reg: int, length: int) -> bytes:
         last = None
         for _ in range(self._retries):
             try:
                 return bytes(self._bus.read_i2c_block_data(self._addr, reg, length))
-            except OSError as exc:  # bus error / clock-stretch corruption
+            except OSError as exc:  # バスエラー / クロックストレッチによる破損
                 last = exc
         raise IOError(f"BNO055 I2C read reg 0x{reg:02X} failed: {last}")
 
@@ -97,31 +98,31 @@ class Bno055Imu:
         data = self._read_register(reg, count * 2)
         return tuple(_s16(data[2 * i], data[2 * i + 1]) / scale for i in range(count))
 
-    # -- setup --------------------------------------------------------------
+    # -- セットアップ -------------------------------------------------------
     def set_mode(self, mode: int) -> None:
         self._write_register(OPR_MODE, bytes([mode]))
 
     def begin(self, mode: int = MODE_NDOF, use_external_crystal: bool = False) -> None:
-        """Verify the chip and enter an operating mode (NDOF by default).
+        """チップを確認し、動作モード (デフォルトは NDOF) に移行する。
 
-        Set ``use_external_crystal=True`` if the board has a 32.768 kHz crystal
-        (the AE-BNO055-BO does); it improves heading stability.
+        ボードに 32.768 kHz の水晶発振子がある場合 (AE-BNO055-BO にはある) は
+        ``use_external_crystal=True`` を指定する。heading の安定性が向上する。
         """
         chip = self._read_register(CHIP_ID, 1)[0]
         if chip != CHIP_ID_VALUE:
             raise IOError(f"unexpected BNO055 chip id 0x{chip:02X} (expected 0xA0)")
         self.set_mode(MODE_CONFIG)
-        time.sleep(0.025)  # operating -> CONFIG needs ~19 ms
+        time.sleep(0.025)  # operating -> CONFIG には約 19 ms 必要
         if use_external_crystal:
             self._write_register(SYS_TRIGGER, bytes([0x80]))
             time.sleep(0.01)
         self.set_mode(mode)
-        time.sleep(0.02)  # CONFIG -> operating needs ~7 ms
+        time.sleep(0.02)  # CONFIG -> operating には約 7 ms 必要
 
-    # -- fused / raw readings ----------------------------------------------
+    # -- フュージョン結果 / 生の測定値 -------------------------------------
     @property
     def euler(self) -> tuple[float, float, float]:
-        """Fused absolute orientation (heading, roll, pitch) in degrees."""
+        """フュージョンした絶対姿勢 (heading, roll, pitch) を度単位で返す。"""
         return self._read_vector(EUL_HEADING_LSB, 3, _EULER_LSB_PER_DEG)  # type: ignore[return-value]
 
     @property
@@ -130,27 +131,27 @@ class Bno055Imu:
 
     @property
     def quaternion(self) -> tuple[float, float, float, float]:
-        """Fused orientation quaternion (w, x, y, z)."""
+        """フュージョンした姿勢のクォータニオン (w, x, y, z)。"""
         return self._read_vector(QUA_DATA_W_LSB, 4, _QUAT_LSB)  # type: ignore[return-value]
 
     @property
     def gyro(self) -> tuple[float, float, float]:
-        """Angular rate (x, y, z) in deg/s."""
+        """角速度 (x, y, z) を deg/s 単位で返す。"""
         return self._read_vector(GYR_DATA_X_LSB, 3, _GYRO_LSB_PER_DPS)  # type: ignore[return-value]
 
     @property
     def calibration_status(self) -> tuple[int, int, int, int]:
-        """Calibration levels (sys, gyro, accel, mag), each 0 (uncal) .. 3 (full)."""
+        """キャリブレーションレベル (sys, gyro, accel, mag)。各値は 0 (未較正) .. 3 (完了)。"""
         c = self._read_register(CALIB_STAT, 1)[0]
         return ((c >> 6) & 3, (c >> 4) & 3, (c >> 2) & 3, c & 3)
 
     def measure_gyro_bias(
         self, samples: int = 100, delay: float = 0.01
     ) -> tuple[float, float, float]:
-        """Average the gyro output while the robot is held still (deg/s).
+        """ロボットを静止させた状態で gyro 出力を平均する (deg/s)。
 
-        Subtract this bias from later gyro readings in dead-reckoning. Keep the
-        robot motionless for the duration.
+        デッドレコニングでは、以降の gyro 読み取り値からこのバイアスを差し引く。
+        計測の間はロボットを動かさないこと。
         """
         sx = sy = sz = 0.0
         for _ in range(samples):
