@@ -3,7 +3,8 @@
 #   オムニホイール 直径48mm / 幅25.5mm / 3個
 #   ステッピングモーター ステップ角1.8° (=200 step/rev)
 
-wheel_diameter_m: 0.048
+# 実効径 (公称48mm)。実機で校正済み (#11, scripts/calibrate --straight)。
+wheel_diameter_m: 0.04629
 wheel_count: 3
 steps_per_rev: 200
 
@@ -11,8 +12,8 @@ steps_per_rev: 200
 microstep: 16
 
 # 中心から各輪の接地点までの距離 L [m]。
-# TODO(M2): 実機採寸 / キャリブレーションで確定する暫定値。
-center_to_wheel_m: 0.050
+# 実機で校正済み (#11, scripts/calibrate --rotate)。
+center_to_wheel_m: 0.04595
 
 # 各輪の「スポーク角」(車輪位置の角度) [deg]。120°対称配置。
 # 運動学の式 v_i = -sin(theta_i)*vx + cos(theta_i)*vy + L*omega は、theta_i に
