@@ -8,13 +8,14 @@ from krilly.config import RobotConfig
 from krilly.kinematics.kiwi import KiwiKinematics
 
 # テストが config/robot.yaml の値に依存しないよう、ジオメトリを固定する。
+# wheel_angles_deg はスポーク角 [0,120,240] (実機で校正済み、#11)。
 CFG = RobotConfig(
     wheel_diameter_m=0.048,
     wheel_count=3,
     center_to_wheel_m=0.05,
     steps_per_rev=200,
     microstep=16,
-    wheel_angles_deg=[90.0, 210.0, 330.0],
+    wheel_angles_deg=[0.0, 120.0, 240.0],
 )
 SQRT3_2 = math.sqrt(3) / 2
 
@@ -24,15 +25,15 @@ def kin():
     return KiwiKinematics(config=CFG)
 
 
-# --- 逆運動学 --------------------------------------------------------------
+# --- 逆運動学 (実機で確認した向きと一致) -----------------------------------
 def test_pure_forward(kin):
-    # vx=1: v_i = -sin(theta_i) -> [-1, +0.5, +0.5]
-    assert kin.body_to_wheels(1.0, 0.0, 0.0) == pytest.approx((-1.0, 0.5, 0.5))
+    # vx=1: v_i = -sin(theta_i) -> [0, -sqrt3/2, +sqrt3/2] (前輪M0は前進に寄与せず)
+    assert kin.body_to_wheels(1.0, 0.0, 0.0) == pytest.approx((0.0, -SQRT3_2, SQRT3_2))
 
 
 def test_pure_left(kin):
-    # vy=1: v_i = cos(theta_i) -> [0, -sqrt3/2, +sqrt3/2]
-    assert kin.body_to_wheels(0.0, 1.0, 0.0) == pytest.approx((0.0, -SQRT3_2, SQRT3_2))
+    # vy=1: v_i = cos(theta_i) -> [+1, -0.5, -0.5]
+    assert kin.body_to_wheels(0.0, 1.0, 0.0) == pytest.approx((1.0, -0.5, -0.5))
 
 
 def test_pure_rotation(kin):

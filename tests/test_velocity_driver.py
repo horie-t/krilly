@@ -15,7 +15,7 @@ CFG = RobotConfig(
     center_to_wheel_m=0.05,
     steps_per_rev=200,
     microstep=16,
-    wheel_angles_deg=[90.0, 210.0, 330.0],
+    wheel_angles_deg=[0.0, 120.0, 240.0],  # スポーク角 (実機校正済み #11)
 )
 
 
@@ -98,12 +98,12 @@ def test_command_matches_kinematics(driver, kin):
 
 
 def test_forward_wheel_directions(driver):
-    # 前進(vx>0)では各輪の周速は (-, +, +) -> 向きは (REV, FWD, FWD)
+    # 前進(vx>0)では各輪の周速は (0, -, +) -> 向きは (FWD, REV, FWD)
     driver.set_velocity(1.0, 0.0, 0.0)
     for _ in range(100):
         driver.update(0.1)
     dirs, hz = driver.chain.calls[-1]
-    assert dirs == [REV, FWD, FWD]
+    assert dirs == [FWD, REV, FWD]
     assert all(h >= 0 for h in hz)   # run_all へ渡す速度は正の大きさ
 
 

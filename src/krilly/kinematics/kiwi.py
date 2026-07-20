@@ -2,13 +2,15 @@
 
 規約は docs/coordinate-frames.md と config/robot.yaml に従う:
 - ボディ座標系: +x が前方、+y が左方、+z が上方 (右手系)、+omega は反時計回り (CCW)。
-- ``wheel_angles_deg`` は各輪の駆動方向角 theta_i (スポーク方向 + 90 度) であり、
-  デフォルトは M0(前) / M1(後左) / M2(後右) に対して [90, 210, 330]。
+- ``wheel_angles_deg`` は各輪の **スポーク角 theta_i (車輪位置の角度)** であり、
+  デフォルトは M0(前) / M1(後左) / M2(後右) に対して [0, 120, 240]。
+  駆動方向は theta_i + 90 度 (= [90, 210, 330])。
 
 逆運動学 (ボディ速度 -> 各輪の接地面速度)、各輪 i について:
 
     v_i = -sin(theta_i) * vx + cos(theta_i) * vy + L * omega
 
+ここで (-sin theta_i, cos theta_i) は駆動方向 (スポーク角 + 90 度) の単位ベクトル。
 すなわち row_i = [-sin theta_i, cos theta_i, L] とした ``v = J @ [vx, vy, omega]``。
 順運動学は ``J^-1 @ v`` (対称配置では J は正則で逆行列が存在する)。
 
