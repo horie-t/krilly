@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# FreeCAD のコンソール版でスクリプトを実行する。使える中で最も新しい版を選ぶ。
+#
+#   hardware/cad/scripts/fcrun hardware/cad/scripts/three_view.py
+#
+# 優先順位:
+#   1. $FREECAD_CMD                     … 明示指定
+#   2. ~/opt/FreeCAD*.AppImage          … Linux AppImage（推奨。ネイティブパス）
+#   3. Windows 側 FreeCAD の freecadcmd.exe … WSL interop 経由（要パス変換）
+#   4. PATH 上の freecadcmd             … apt 版（Ubuntu 24.04 は 0.21.2 止まり）
+#
+# 注意: Windows 版で実行する場合、Python の既定エンコーディングが cp932、改行が
+# CRLF になる。ファイルを書くスクリプトは encoding/newline を明示すること。
+set -euo pipefail
+
+script="${1:?usage: fcrun <script.py> [args...]}"
+shift || true
+[[ -f "$script" ]] || { echo "fcrun: no such script: $script" >&2; exit 1; }
+
+pick_appimage() {
+  local c
+  # 展開済み（libfuse2 が無く AppImage を直接マウントできない環境向け）を優先
+  for c in ${FREECAD_APPRUN:-} "$HOME"/opt/FreeCAD-*/AppRun; do
+    [[ -x "$c" ]] && { printf '%s\n' "$c"; return 0; }
+  done
+  for c in ${FREECAD_APPIMAGE:-} "$HOME"/opt/FreeCAD*.AppImage \
+           "$HOME"/Applications/FreeCAD*.AppImage; do
+    [[ -x "$c" ]] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+
+pick_windows() {
+  # インストール先に空白が入る（"FreeCAD 1.1"）ので必ず改行区切りで扱う。
+  # 版が複数ある場合はバージョン順で最後（= 最も新しい）を採る。
+  local found
+  found=$(
+    shopt -s nullglob
+    for c in /mnt/c/Users/*/AppData/Local/Programs/FreeCAD*/bin/freecadcmd.exe \
+             "/mnt/c/Program Files"/FreeCAD*/bin/freecadcmd.exe; do
+      [[ -f "$c" ]] && printf '%s\n' "$c"
+    done | sort -V | tail -1
+  )
+  [[ -n "$found" ]] && { printf '%s\n' "$found"; return 0; }
+  return 1
+}
+
+if [[ -n "${FREECAD_CMD:-}" ]]; then
+  exec "$FREECAD_CMD" "$script" "$@"
+elif app="$(pick_appimage)"; then
+  echo "fcrun: using AppImage $app" >&2
+  exec "$app" --console "$script" "$@"
+elif win="$(pick_windows)"; then
+  echo "fcrun: using Windows $win" >&2
+  exec "$win" "$(wslpath -w "$script")" "$@"
+elif command -v freecadcmd >/dev/null; then
+  echo "fcrun: falling back to system freecadcmd ($(freecadcmd --version 2>/dev/null | head -1))" >&2
+  exec freecadcmd "$script" "$@"
+else
+  echo "fcrun: no FreeCAD found" >&2
+  exit 1
+fi
