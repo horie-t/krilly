@@ -71,6 +71,32 @@ def default_rois(width: int = 640, height: int = 480, thickness: int = 70,
     }
 
 
+# --- 実機校正済みの設定 (#16) ---------------------------------------------
+# 640x480、カメラ中央・高さ約39cm・セル中央。ラベル付き3枚 (all/none/dead-end) で
+# 調整済み。壁ありで赤割合 ~0.34-0.47、壁なし ~0.00 (閾値0.15で分離)。右壁は影で
+# 暗く既定の赤しきい値では拾えないため、壁上面検出は S/V を緩める。
+# 画像の上=車体前方(+x)。壁は端でなく内側の帯に写り、四隅の格子点(赤ポスト)は
+# 各辺の中央 ROI で避ける。
+CALIBRATED_RED = RedDetectorConfig(s_min=70, v_min=40)
+
+
+def calibrated_rois() -> dict[str, Roi]:
+    """実機 (640x480, 39cm, セル中央) で校正した各辺 ROI。"""
+    return {
+        FRONT: Roi(230, 118, 180, 50),
+        BACK: Roi(215, 398, 150, 38),
+        LEFT: Roi(163, 172, 46, 215),
+        RIGHT: Roi(438, 172, 46, 215),
+    }
+
+
+def calibrated_config(threshold: float = 0.15) -> "WallDetectorConfig":
+    """実機校正済みの WallDetectorConfig を返す (ROI + 緩めた赤しきい値)。"""
+    return WallDetectorConfig(
+        rois=calibrated_rois(), threshold=threshold, red=CALIBRATED_RED
+    )
+
+
 @dataclass
 class WallDetectorConfig:
     rois: dict[str, Roi]

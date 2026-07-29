@@ -5,6 +5,7 @@ import pytest
 
 from krilly.perception.wall_detect import (
     BACK,
+    BODY_DIRS,
     FRONT,
     LEFT,
     RIGHT,
@@ -12,6 +13,8 @@ from krilly.perception.wall_detect import (
     WallDetector,
     WallDetectorConfig,
     body_walls_to_maze,
+    calibrated_config,
+    calibrated_rois,
     default_rois,
     roi_red_fraction,
     update_maze_walls,
@@ -34,6 +37,15 @@ def test_roi_red_fraction():
     assert roi_red_fraction(mask, Roi(10, 10, 20, 20)) == pytest.approx(1.0)
     assert roi_red_fraction(mask, Roi(50, 50, 20, 20)) == pytest.approx(0.0)
     assert roi_red_fraction(mask, Roi(0, 0, 40, 20)) == pytest.approx(200 / 800)
+
+
+def test_calibrated_config():
+    rois = calibrated_rois()
+    assert set(rois) == set(BODY_DIRS)
+    cfg = calibrated_config()
+    assert set(cfg.rois) == set(BODY_DIRS)
+    # 右壁が影で暗いため赤しきい値は既定より緩い
+    assert cfg.red.s_min < 100 and cfg.red.v_min < 70
 
 
 def test_default_rois_positions():

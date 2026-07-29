@@ -25,9 +25,10 @@ import numpy as np
 from krilly.logging_config import get_logger, setup_logging
 from krilly.perception.red_wall import RedDetectorConfig, red_mask
 from krilly.perception.wall_detect import (
+    CALIBRATED_RED,
     WallDetector,
     WallDetectorConfig,
-    default_rois,
+    calibrated_rois,
 )
 
 log = get_logger("krilly.wall_detect")
@@ -37,11 +38,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description="セル壁判定の可視化")
     p.add_argument("--image", default=None, help="入力画像 (未指定ならカメラ取得)")
     p.add_argument("--out", default="walls.png", help="注釈画像の保存先")
-    p.add_argument("--thickness", type=int, default=70, help="ROI の辺方向の厚み[px]")
-    p.add_argument("--span", type=float, default=0.5, help="ROI の辺に沿う割合")
     p.add_argument("--threshold", type=float, default=0.15, help="壁ありとみなす赤割合")
-    p.add_argument("--s-min", type=int, default=RedDetectorConfig.s_min)
-    p.add_argument("--v-min", type=int, default=RedDetectorConfig.v_min)
+    p.add_argument("--s-min", type=int, default=CALIBRATED_RED.s_min, help="赤HSVのS下限")
+    p.add_argument("--v-min", type=int, default=CALIBRATED_RED.v_min, help="赤HSVのV下限")
     args = p.parse_args()
 
     setup_logging()
@@ -56,9 +55,8 @@ def main() -> None:
         with Camera() as cam:
             frame = cam.capture()
 
-    h, w = frame.shape[:2]
     red = RedDetectorConfig(s_min=args.s_min, v_min=args.v_min)
-    rois = default_rois(w, h, thickness=args.thickness, span=args.span)
+    rois = calibrated_rois()  # 実機校正済みの各辺 ROI
     det = WallDetector(WallDetectorConfig(rois=rois, threshold=args.threshold, red=red))
 
     fractions = det.red_fractions(frame)
