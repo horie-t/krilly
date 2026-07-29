@@ -10,6 +10,15 @@ from .red_wall import (
     detect_red_regions,
     red_mask,
 )
+from .wall_detect import (
+    Roi,
+    WallDetector,
+    WallDetectorConfig,
+    body_walls_to_maze,
+    default_rois,
+    roi_red_fraction,
+    update_maze_walls,
+)
 
 __all__ = [
     "RedDetectorConfig",
@@ -17,4 +26,11 @@ __all__ = [
     "annotate",
     "detect_red_regions",
     "red_mask",
+    "Roi",
+    "WallDetector",
+    "WallDetectorConfig",
+    "body_walls_to_maze",
+    "default_rois",
+    "roi_red_fraction",
+    "update_maze_walls",
 ]
