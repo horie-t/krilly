@@ -2,3 +2,7 @@
 
 M4 (issue #15) と M5 (issues #18, #19) で実装する。
 """
+
+from .maze import Direction, Maze
+
+__all__ = ["Direction", "Maze"]
