@@ -67,7 +67,8 @@ MODEL_TO_BODY_DEG = 0.0
 DRAW_HIDDEN = True      # かくれ線を描くか
 DEFLECTION = 0.02       # 曲線の折れ線近似 [mm]
 
-PAGE_W, PAGE_H = 297.0, 210.0   # A4 横。SVG の 1 ユーザー単位 = 1mm
+# 尺度 1:1 を保ったまま収まる最小の用紙を選ぶ。SVG の 1 ユーザー単位 = 1mm。
+PAGES = [("A4横", 297.0, 210.0), ("A3横", 420.0, 297.0)]
 MARGIN = 10.0
 GAP = 22.0                      # 図同士の間隔
 BLOCK_X, BLOCK_Y = 44.0, 24.0   # 図面ブロック左上
@@ -280,8 +281,23 @@ def build(layout, shape, placement, src, body_name, stem, title):
     assert abs(plan["w"] - elev1["w"]) < 1e-9, "平面図と立面図の幅が不一致"
     assert abs(elev1["h"] - elev2["h"]) < 1e-9, "立面図どうしの高さが不一致"
 
-    # --- 配置と視点座標 -> ページ座標
+    # --- 尺度 1:1 のまま収まる最小の用紙を選ぶ
     W1, W2, H1, H2 = plan["w"], elev2["w"], plan["h"], elev1["h"]
+    n_notes = 10                            # 注記の行数（下の notes と一致させる）
+    need_right = BLOCK_X + W1 + GAP + W2
+    need_bottom = BLOCK_Y + H1 + GAP + H2 + 11.0        # 図名の分
+    title_bottom = BLOCK_Y + 2.0 + (12.0 + 4.4 * n_notes) + 5.0 + 20.0
+    page_name = PAGE_W = PAGE_H = None
+    for nm, pw, ph in PAGES:
+        if (need_right < pw - MARGIN and need_bottom < ph - MARGIN
+                and pw - MARGIN - 1.0 - (BLOCK_X + W1 + GAP) > 90.0
+                and title_bottom < BLOCK_Y + H1 + GAP):
+            page_name, PAGE_W, PAGE_H = nm, pw, ph
+            break
+    assert page_name, ("%s/%s: どの用紙にも収まらない (要 %.1f x %.1f)"
+                       % (stem, layout["key"], need_right, need_bottom))
+
+    # --- 配置と視点座標 -> ページ座標
     origins = {
         "plan":  (BLOCK_X, BLOCK_Y),
         "elev1": (BLOCK_X, BLOCK_Y + H1 + GAP),
@@ -404,7 +420,7 @@ def build(layout, shape, placement, src, body_name, stem, title):
     out.append(text(bx + 3.0, by + 6.0, title, 3.6, anchor="start",
                     weight="bold"))
     rows = ["出典 hardware/cad/%s (%s)" % (src, body_name),
-            "尺度 1:1   単位 mm   投影 第三角法",
+            "尺度 1:1   単位 mm   投影 第三角法   用紙 %s" % page_name,
             "生成 FreeCAD %s + TechDraw HLR   %s"
             % (".".join(FreeCAD.Version()[0:3]), DATE)]
     for i, row in enumerate(rows):
@@ -429,14 +445,20 @@ def build(layout, shape, placement, src, body_name, stem, title):
     with io.open(dst, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(out) + "\n")
     sys.__stdout__.write(
-        "  %-14s -> %-40s  block %.1f x %.1f  edges %d/%d %d/%d %d/%d\n"
-        % (layout["key"], os.path.basename(dst), right_edge, bottom_edge,
+        "  %-5s %-5s -> %-38s  block %.1f x %.1f  edges %d/%d %d/%d %d/%d\n"
+        % (layout["key"], page_name, os.path.basename(dst),
+           right_edge, bottom_edge,
            len(plan["vis"]), len(plan["hid"]),
            len(elev1["vis"]), len(elev1["hid"]),
            len(elev2["vis"]), len(elev2["hid"])))
 
 
+# 環境変数 THREE_VIEW_PARTS で対象を絞れる（カンマ区切りの部品名）。
+_only = [s for s in os.environ.get("THREE_VIEW_PARTS", "").split(",") if s]
+
 for _src, _body, _stem, _title in PARTS:
+    if _only and _stem not in _only:
+        continue
     _doc = FreeCAD.openDocument(os.path.join(CAD_DIR, _src))
     _obj = _doc.getObject(_body)
     if _obj is None:
