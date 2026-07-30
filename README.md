@@ -4,6 +4,8 @@ Krilly はオムニホイールを備えたマイクロマウスです。Raspber
 **ホロノミック（3輪オムニ・kiwi ドライブ）** マイクロマウスで、クラシック 16×16
 マイクロマウス競技への出場を目標としています。
 
+![krilly](docs/images/krilly.jpg)
+
 ## ハードウェア
 
 - Raspberry Pi 5
