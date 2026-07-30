@@ -45,6 +45,9 @@ python -m scripts.calibrate      --straight 0.5        # → wheel_diameter_m
 python -m scripts.calibrate      --rotate 2            # → center_to_wheel_m (L); do straight first
 python -m scripts.odometry_demo  --seg 0.5             # L-path, prints estimated [X, Y, φ]
 python -m scripts.heading_demo   --omega 1.0           # odometry-only φ vs gyro-fused φ
+
+# perception tuning (works off-Pi on a saved photo)
+python -m scripts.wall_detect --image shot.png --out walls.png   # per-edge ROI red fraction + verdict
 ```
 
 ## Architecture
@@ -55,7 +58,7 @@ Layered under `src/krilly/` (low → high level; each layer is independently tes
 - `kinematics/kiwi.py` — `KiwiKinematics`: forward/inverse kinematics + wheel-speed ⇄ stepper conversion.
 - `motion/velocity_driver.py` — `VelocityDriver`: rate-limits body velocity (trapezoidal ramp), then commands all 3 wheels in one `run_all`. Ramping in *body* space keeps the wheel-speed ratio constant, so the path holds during accel (L6470's per-device ACC alone would skew it). `update(dt)` is pure computation — no sleeps; the caller drives the loop.
 - `localization/` — `estimator.py` (`DeadReckoning`: `[X, Y, φ]`, midpoint integration, pluggable input: commanded speeds / microsteps / distances) and `grid.py` (`GridCorrector`: snap X/Y to the 180 mm grid with a `max_error` guard).
-- `perception/red_wall.py` — red wall-top detection (two-range HSV mask → contour centroids).
+- `perception/` — `red_wall.py` (red wall-top detection: two-range HSV mask → contour centroids) and `wall_detect.py` (`WallDetector`: per-edge ROI red *fraction* → walls present front/back/left/right, then `body_walls_to_maze()` → `Maze`).
 - `solver/maze.py` — `Maze` / `Direction`: 16×16 grid with **shared-edge walls** (cell A's east wall *is* cell B's west wall, so they can never disagree), outer walls, centre-2×2 goal, `to_ascii()`.
 - `strategy/`, `app/` — stubs pending M5–M6.
 - `config/` — `robot.yaml` / `maze.yaml` + typed loader (`RobotConfig`, `MazeConfig`).
@@ -73,6 +76,12 @@ Layered under `src/krilly/` (low → high level; each layer is independently tes
 - **Config values are calibrated, not nominal**: `wheel_diameter_m` (~0.0463, effective ≠ nominal 48 mm) and `center_to_wheel_m` (~0.0460) came from `scripts/calibrate.py`. Don't "fix" them back to spec values, and don't hard-code them in tests — read them off `RobotConfig` (see `tests/test_smoke.py`).
 - **L6470 unit gotcha**: the Run/speed registers are in **full step/s** (microstepping does not scale speed); Move / positioning / odometry counts are in **microsteps**. `KiwiKinematics` exposes both (`wheel_speed_to_step_hz` vs `distance_to_microsteps`).
 - **picamera2 channel order**: `RGB888` frames are byte-order **BGR** for OpenCV (used directly, no conversion); `red_detect --swap-rb` if colors look inverted.
+- **Wall detection is ROI-based, and the ROIs are calibrated to this exact rig** (`perception/wall_detect.py`, `calibrated_rois()` / `CALIBRATED_RED`). Camera is centre-mounted ~39 cm up, one cell fills the 640×480 frame, and **image top = body forward (+x)**. Hard-won specifics — re-check all of these if the mount, height, or lighting changes:
+  - Walls appear as bands **inside** the frame, *not* at its edges, so ROIs sit on the bands.
+  - The four red **lattice posts are always visible at the corners** (even with no walls) → ROIs sit mid-edge to avoid them.
+  - The **camera ribbon cable reads as red** in the lower part of the frame → the BACK ROI is offset left to dodge it (`WallDetectorConfig.exclude` can mask fixed self-occlusion too).
+  - The right-hand wall is **shadowed and desaturated**, so `CALIBRATED_RED` loosens the red thresholds to `s_min=70, v_min=40`; `red_wall`'s stricter defaults miss it entirely.
+  - Calibrated separation: wall present ≈ 0.34–0.47 red fraction, absent ≈ 0.00 (threshold 0.15). Re-tune offline with `scripts/wall_detect.py --image <photo>` against labelled shots (all-walls / no-walls / dead-end).
 - **`l6470.decode_status()`**: all-`0x0000`/all-`0xFFFF` ⇒ no SPI communication (wiring/power/CS), not a real fault; fault bits are active-low; UVLO on the first read after power-up is the normal power-up latch.
 
 ## Contributing workflow
