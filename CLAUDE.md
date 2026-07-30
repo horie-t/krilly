@@ -45,6 +45,7 @@ python -m scripts.calibrate      --straight 0.5        # → wheel_diameter_m
 python -m scripts.calibrate      --rotate 2            # → center_to_wheel_m (L); do straight first
 python -m scripts.odometry_demo  --seg 0.5             # L-path, prints estimated [X, Y, φ]
 python -m scripts.heading_demo   --omega 1.0           # odometry-only φ vs gyro-fused φ
+python -m scripts.cell_move_demo --seq F,L,F,R          # closed-loop 1-cell moves / 90° turns
 
 # perception tuning (works off-Pi on a saved photo)
 python -m scripts.wall_detect --image shot.png --out walls.png   # per-edge ROI red fraction + verdict
@@ -57,6 +58,7 @@ Layered under `src/krilly/` (low → high level; each layer is independently tes
 - `hal/` — hardware abstraction: `l6470` (single driver) / `l6470_chain` (3× daisy-chain) over SPI; `imu` (BNO055/I2C); `camera` (picamera2 → BGR frames).
 - `kinematics/kiwi.py` — `KiwiKinematics`: forward/inverse kinematics + wheel-speed ⇄ stepper conversion.
 - `motion/velocity_driver.py` — `VelocityDriver`: rate-limits body velocity (trapezoidal ramp), then commands all 3 wheels in one `run_all`. Ramping in *body* space keeps the wheel-speed ratio constant, so the path holds during accel (L6470's per-device ACC alone would skew it). `update(dt)` is pure computation — no sleeps; the caller drives the loop.
+- `motion/cell_motion.py` — `CellMotion`: closed-loop **1-cell forward / 90° turn** primitives (M4 #17). Holds an *ideal lattice* reference pose and drives the estimated pose to it, so per-move residuals don't accumulate across cells. Primary axis follows a `sqrt(2·a·remaining)` decel envelope (clamped to the `VelocityDriver` ramp so it stays followable); the other DOFs are P-held (forward: cross-track + heading; turn: X/Y). Terminates on *remaining*, then settles and re-tries once at creep speed if it coasted past. `update(dt, gyro_rate=…)` is pure computation and also integrates the estimator.
 - `localization/` — `estimator.py` (`DeadReckoning`: `[X, Y, φ]`, midpoint integration, pluggable input: commanded speeds / microsteps / distances) and `grid.py` (`GridCorrector`: snap X/Y to the 180 mm grid with a `max_error` guard).
 - `perception/` — `red_wall.py` (red wall-top detection: two-range HSV mask → contour centroids) and `wall_detect.py` (`WallDetector`: per-edge ROI red *fraction* → walls present front/back/left/right, then `body_walls_to_maze()` → `Maze`).
 - `solver/maze.py` — `Maze` / `Direction`: 16×16 grid with **shared-edge walls** (cell A's east wall *is* cell B's west wall, so they can never disagree), outer walls, centre-2×2 goal, `to_ascii()`.
