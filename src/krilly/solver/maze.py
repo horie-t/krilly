@@ -67,6 +67,52 @@ class Maze:
         m._goal_max = tuple(maze.goal_max)  # type: ignore[assignment]
         return m
 
+    @classmethod
+    def from_ascii(cls, text: str) -> "Maze":
+        """ASCII 表記から迷路を作る (:meth:`to_ascii` の逆)。
+
+        セル幅は任意 (``+-+`` でも ``+---+`` でもよい)。行数は 2N+1 で、上の行が
+        北。既知形状を手書きで与えたいとき (校正・テスト・デバッグ) に使う。
+
+        例::
+
+            +-+-+-+
+            |     |
+            + +-+ +
+            | |   |
+            + +-+ +
+            | |   |
+            +-+-+-+
+        """
+        lines = [ln.rstrip() for ln in text.strip("\n").splitlines()]
+        if len(lines) < 3 or len(lines) % 2 == 0:
+            raise ValueError("ASCII 迷路の行数は 2N+1 でなければならない")
+        size = len(lines) // 2
+        plus = [i for i, ch in enumerate(lines[0]) if ch == "+"]
+        if len(plus) != size + 1:
+            raise ValueError(f"1 行目の '+' が {len(plus)} 個 (期待 {size + 1} 個)")
+
+        def at(row: int, col: int) -> str:
+            line = lines[row]
+            return line[col] if col < len(line) else " "
+
+        def segment(row: int, x: int) -> str:
+            return "".join(at(row, c) for c in range(plus[x] + 1, plus[x + 1]))
+
+        maze = cls(size)
+        for row in range(size):
+            y = size - 1 - row                  # 上の行が北 (y が大きい)
+            for x in range(size):
+                if "-" in segment(2 * row, x):
+                    maze.set_wall(x, y, Direction.N)
+                if "-" in segment(2 * row + 2, x):
+                    maze.set_wall(x, y, Direction.S)
+                if at(2 * row + 1, plus[x]) == "|":
+                    maze.set_wall(x, y, Direction.W)
+                if at(2 * row + 1, plus[x + 1]) == "|":
+                    maze.set_wall(x, y, Direction.E)
+        return maze
+
     # -- 範囲・近傍 ---------------------------------------------------------
     def in_bounds(self, x: int, y: int) -> bool:
         return 0 <= x < self.size and 0 <= y < self.size

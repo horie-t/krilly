@@ -18,7 +18,7 @@ from krilly.perception.axis_yaw import (
     median_axis_yaw,
     yaw_delta_rad,
 )
-from krilly.perception.wall_detect import Roi
+from krilly.perception.wall_detect import CALIBRATED_RED, Roi
 
 RED = (0, 0, 255)   # BGR
 
@@ -110,7 +110,8 @@ def test_exclude_region_is_ignored():
 def test_calibrated_config_excludes_the_robot_body():
     cfg = calibrated_axis_yaw_config()
     assert cfg.exclude and cfg.exclude[0].w > 200   # 機体矩形が入っている
-    assert cfg.red.s_min == 70                      # 影の壁も拾う緩めのしきい値
+    # 壁検出と同じ緩めた赤しきい値を使う (白飛び・影の壁も拾うため #56)
+    assert cfg.red is CALIBRATED_RED
 
 
 # --- 中央値 ---------------------------------------------------------------
