@@ -6,6 +6,7 @@ import pytest
 from krilly.perception.wall_detect import (
     BACK,
     BODY_DIRS,
+    CALIBRATED_BANDS,
     FRONT,
     LEFT,
     RIGHT,
@@ -44,8 +45,22 @@ def test_calibrated_config():
     assert set(rois) == set(BODY_DIRS)
     cfg = calibrated_config()
     assert set(cfg.rois) == set(BODY_DIRS)
-    # 右壁が影で暗いため赤しきい値は既定より緩い
-    assert cfg.red.s_min < 100 and cfg.red.v_min < 70
+    # 右壁が白飛びして彩度が落ちるため、赤しきい値は既定より緩い (#56)
+    assert cfg.red.s_min <= 50 and cfg.red.v_min < 70
+
+
+def test_calibrated_rois_contain_the_measured_wall_bands():
+    """ROI が実測した赤帯を内側に含むこと (#56 の ROI ずれの回帰テスト)。
+
+    帯から外れた分だけ赤割合が下がり、しきい値を割ると壁を見落として衝突する。
+    """
+    rois = calibrated_rois()
+    for edge, (lo, hi) in CALIBRATED_BANDS.items():
+        roi = rois[edge]
+        start, length = (roi.y, roi.h) if edge in (FRONT, BACK) else (roi.x, roi.w)
+        assert start <= lo and hi <= start + length, (
+            f"{edge}: ROI {start}..{start + length} が帯 {lo}..{hi} を含んでいない"
+        )
 
 
 def test_default_rois_positions():
