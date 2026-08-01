@@ -9,7 +9,7 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.velocity_driver import VelocityDriver
-from scripts.cell_move_demo import TOKENS, parse_seq
+from scripts.cell_move_demo import TOKENS, parse_seq, wrapped_deg
 
 ROBOT = RobotConfig(
     wheel_diameter_m=0.048,
@@ -48,6 +48,13 @@ def test_parse_seq_accepts_both_notations():
     assert parse_seq("F,L,F") == ["F", "L", "F"]
     assert parse_seq("FLF") == ["F", "L", "F"]
     assert parse_seq("f, l ,r") == ["F", "L", "R"]
+
+
+def test_wrapped_deg_normalises_accumulated_heading():
+    # 推定φは積算値なので 360° を超える (4×90° 旋回で ≈ 358.8° = -1.2°)
+    assert wrapped_deg(math.radians(358.76)) == pytest.approx(-1.24, abs=1e-9)
+    assert wrapped_deg(math.radians(-90.0)) == pytest.approx(-90.0)
+    assert wrapped_deg(math.radians(450.0)) == pytest.approx(90.0)
 
 
 def test_parse_seq_rejects_unknown_token():

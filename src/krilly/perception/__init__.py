@@ -1,8 +1,16 @@
 """カメラによる認識: 赤い壁の上端を検出する (2 レンジの HSV マスク -> 重心)。
 
-M1 (issue #7) と M4 (issue #16) で実装する。
+M1 (issue #7) と M4 (issues #16, #17) で実装する。
 """
 
+from .axis_yaw import (
+    AxisYaw,
+    AxisYawConfig,
+    axis_yaw,
+    calibrated_axis_yaw_config,
+    median_axis_yaw,
+    yaw_delta_rad,
+)
 from .red_wall import (
     RedDetectorConfig,
     RedRegion,
@@ -24,6 +32,12 @@ from .wall_detect import (
 )
 
 __all__ = [
+    "AxisYaw",
+    "AxisYawConfig",
+    "axis_yaw",
+    "calibrated_axis_yaw_config",
+    "median_axis_yaw",
+    "yaw_delta_rad",
     "RedDetectorConfig",
     "RedRegion",
     "annotate",

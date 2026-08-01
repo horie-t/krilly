@@ -21,3 +21,8 @@ center_to_wheel_m: 0.04595
 # M0=前(spoke 0°, 駆動+y) / M1=後左(120°) / M2=後右(240°)。docs/coordinate-frames.md 参照。
 # 実機で校正済み (#11): drive_demo で +x=前進 / +y=左 / +omega=CCW を確認。
 wheel_angles_deg: [0.0, 120.0, 240.0]
+
+# BNO055 ジャイロ z のスケール補正 (読み値 * この値 = 実際の角速度)。
+# 実機で校正済み (#17): カメラの軸角実測 (perception/axis_yaw) と比べ、90°ターンで
+# +1.54%、360°で +1.61% 過大だったため 1/1.016 を採用。1.0 で補正なし。
+gyro_scale_z: 0.984

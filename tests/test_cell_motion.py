@@ -107,6 +107,23 @@ def test_envelope_decel_is_clamped_to_driver_ramp(motion):
     assert m._angular_decel == pytest.approx(driver.limits.max_angular_accel_radps2)
 
 
+def test_floor_keeps_primary_axis_moving_but_not_past_tolerance(motion):
+    """残量が許容外の間は下限速度を保証し、許容内では素通しする。"""
+    motion.start_forward_cells(1)
+    assert motion._with_floor(0.001, 0.010, 0.05) == pytest.approx(0.010)   # 下限まで持ち上げ
+    assert motion._with_floor(-0.001, 0.010, -0.05) == pytest.approx(-0.010)  # 符号は残量側
+    assert motion._with_floor(0.05, 0.010, 0.05) == pytest.approx(0.05)     # 下限以上は素通し
+    tol = motion.cfg.pos_tol_m
+    assert motion._with_floor(0.001, 0.010, tol / 2) == pytest.approx(0.001)  # 許容内は素通し
+
+
+def test_floor_cannot_jump_over_the_tolerance_band(motion):
+    """``下限 * dt <= 2 * 許容値`` — 下限速度でも 1 tick で許容帯を跳び越さない。"""
+    cfg = motion.cfg
+    assert cfg.min_v * DT <= 2 * cfg.pos_tol_m
+    assert cfg.min_omega * DT <= 2 * cfg.angle_tol_rad
+
+
 # --- 1セル前進 -------------------------------------------------------------
 def test_forward_one_cell_reaches_cell_pitch(motion):
     motion.start_forward_cells(1)

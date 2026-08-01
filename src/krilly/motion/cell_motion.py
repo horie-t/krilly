@@ -95,9 +95,16 @@ class CellMotionConfig:
     k_position: float = 3.0                # 旋回中の位置ずれ[m] -> vx,vy [1/s]
     v_hold_max: float = 0.04               # 位置保持の速度上限 [m/s]
 
-    # 終了判定
-    pos_tol_m: float = 0.003               # 前進の残距離許容 [m]
-    angle_tol_rad: float = math.radians(1.0)   # 旋回の残角許容 [rad]
+    # 主軸の下限速度 (エンベロープの終端で静止摩擦に負けて止まらないように)
+    # 許容値を詰めるとエンベロープの終端指令が小さくなり、実機では動かないまま
+    # creep し続けることがある。残量が許容外の間は下限を保証する。
+    # ``下限 * dt <= 2 * 許容値`` なら 1 tick で許容帯を跳び越さない (既定は満たす)。
+    min_v: float = 0.010                   # 前進の下限速度 [m/s]
+    min_omega: float = 0.15                # 旋回の下限角速度 [rad/s]
+
+    # 終了判定 (実機 #17: 残差はほぼ許容値そのものになるので小さめに取る)
+    pos_tol_m: float = 0.0015              # 前進の残距離許容 [m]
+    angle_tol_rad: float = math.radians(0.3)   # 旋回の残角許容 [rad]
     settled_v: float = 1e-3                # 整定判定の速度しきい値 [m/s]
     settled_omega: float = 1e-2            # 整定判定の角速度しきい値 [rad/s]
     retry_v_max: float = 0.03              # やり直し時の速度上限 [m/s]
@@ -278,16 +285,30 @@ class CellMotion:
         retry = self._retries > 0
         if self._kind is Kind.FORWARD:
             v_max = cfg.retry_v_max if retry else cfg.v_max
-            vx = _envelope(self._along_remaining(), v_max, self._decel, dt)
+            remaining = self._along_remaining()
+            vx = _envelope(remaining, v_max, self._decel, dt)
+            vx = self._with_floor(vx, cfg.min_v, remaining)
             vy = _clamp(cfg.k_cross * self._cross_error(), cfg.v_cross_max)
             omega = _clamp(cfg.k_heading * self._heading_error(), cfg.omega_hold_max)
         else:  # Kind.TURN
             omega_max = cfg.retry_omega_max if retry else cfg.omega_max
             omega = _envelope(self._angle_remaining, omega_max, self._angular_decel, dt)
+            omega = self._with_floor(omega, cfg.min_omega, self._angle_remaining)
             e_fwd, e_left = self._position_error_body()
             vx = _clamp(cfg.k_position * e_fwd, cfg.v_hold_max)
             vy = _clamp(cfg.k_position * e_left, cfg.v_hold_max)
         self.driver.set_velocity(vx, vy, omega)
+
+    def _with_floor(self, v: float, floor: float, remaining: float) -> float:
+        """主軸の指令に下限速度をかける (残量が許容内なら素通し)。
+
+        許容値を詰めるとエンベロープ終端の指令が静止摩擦を下回り、実機では
+        動かないまま creep し続けることがあるため、まだ詰めるべき残量がある間は
+        ``floor`` 以上を保証する。許容帯に入ったら素通しして、そのまま整定へ渡す。
+        """
+        if abs(remaining) <= self._tolerance():
+            return v
+        return math.copysign(max(abs(v), floor), remaining)
 
     def _advance_phase(self, cur: tuple[float, float, float]) -> None:
         """残量・整定状況から状態遷移する (旋回の残角もここで減らす)。"""
