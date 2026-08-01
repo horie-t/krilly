@@ -35,6 +35,7 @@ class RobotConfig:
     steps_per_rev: int                # フルステップ数 (1.8° -> 200)
     microstep: int                    # マイクロステップ分割数 (1/μ)
     wheel_angles_deg: list[float]     # 各輪の駆動方向角 [deg]
+    gyro_scale_z: float = 1.0         # BNO055 gyro z のスケール補正 (#17 で校正)
 
     @property
     def wheel_circumference_m(self) -> float:
@@ -74,6 +75,7 @@ def load_robot_config(path: str | Path | None = None) -> RobotConfig:
         steps_per_rev=int(data["steps_per_rev"]),
         microstep=int(data["microstep"]),
         wheel_angles_deg=[float(a) for a in data["wheel_angles_deg"]],
+        gyro_scale_z=float(data.get("gyro_scale_z", 1.0)),
     )
 
 

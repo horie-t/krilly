@@ -26,6 +26,8 @@ def test_robot_config_defaults():
     # オドメトリ分解能 (μ=16 で約47µm)
     assert 0 < cfg.metres_per_microstep < 1e-3
     assert len(cfg.wheel_angles_deg) == cfg.wheel_count
+    # ジャイロzのスケール補正 (#17 でカメラ実測と比較して校正、1.0 なら無補正)
+    assert 0.9 < cfg.gyro_scale_z < 1.1
 
 
 def test_maze_config_defaults():
