@@ -39,6 +39,13 @@ from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.wall_detect import BODY_DIRS, WallDetector, calibrated_config
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import Explorer, Step, Unreachable, heading_rad
+from krilly.strategy.shortest_path import (
+    DEFAULT_TURN_COST,
+    describe_legs,
+    path_cost,
+    path_to_legs,
+    shortest_path,
+)
 
 log = get_logger("krilly.search_run")
 
@@ -69,6 +76,8 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true",
                    help="走行せず、その場の壁判定と次の1手だけを表示する")
     p.add_argument("--verbose", action="store_true", help="毎ステップ ASCII 迷路を表示")
+    p.add_argument("--turn-cost", type=float, default=DEFAULT_TURN_COST,
+                   help="最速経路の旋回コスト [セル換算] (既定 1.0 = 実測の 90°ターン≒1セル)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
     args = p.parse_args()
 
@@ -203,6 +212,32 @@ def main() -> None:
             log.warning("%d 手で終わらなかった (現在 %s)", args.max_steps, explorer.cell)
 
         log.info("判明した迷路:\n%s", maze.to_ascii())
+        report_shortest_path(explorer, args.turn_cost)
+
+
+def report_shortest_path(explorer: Explorer, turn_cost: float) -> None:
+    """確定した壁情報から最速ランの最短経路を求めて表示する (#19)。
+
+    通すのは**観測済みセルのみ** (未探索セルは壁が未確定なので最速では走れない)。
+    """
+    maze = explorer.maze
+    path = shortest_path(
+        maze,
+        maze.start,
+        start_facing=Direction.N,
+        known=explorer.visited,
+        turn_cost=turn_cost,
+    )
+    if not path:
+        log.warning("最速経路なし: 観測済みセルだけではゴールへ繋がっていない "
+                    "(訪問 %d セル)。探索を続ける必要がある。", len(explorer.visited))
+        return
+    legs = path_to_legs(path, Direction.N)
+    turns = sum(abs(leg.turn) for leg in legs)
+    log.info("最速経路: %d セル / 旋回 %d 回 / コスト %.1f (旋回コスト %.2f)",
+             len(path) - 1, turns, path_cost(path, Direction.N, turn_cost), turn_cost)
+    log.info("  %s", describe_legs(legs))
+    log.info("  セル列: %s", " -> ".join(str(c) for c in path))
 
 
 if __name__ == "__main__":

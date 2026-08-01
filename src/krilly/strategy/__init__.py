@@ -17,6 +17,16 @@ from .flood_fill import (
     flood_fill,
     next_direction,
 )
+from .shortest_path import (
+    DEFAULT_TURN_COST,
+    Leg,
+    describe_legs,
+    direction_between,
+    path_cost,
+    path_to_legs,
+    route,
+    shortest_path,
+)
 
 __all__ = [
     "Explorer",
@@ -29,4 +39,12 @@ __all__ = [
     "accessible_directions",
     "flood_fill",
     "next_direction",
+    "DEFAULT_TURN_COST",
+    "Leg",
+    "describe_legs",
+    "direction_between",
+    "path_cost",
+    "path_to_legs",
+    "route",
+    "shortest_path",
 ]
