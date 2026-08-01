@@ -36,10 +36,14 @@ def main() -> None:
     p.add_argument("--duration", type=float, default=4.0, help="旋回秒数")
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--gyro-sign", type=float, default=1.0, help="ジャイロz符号 (+1/-1)")
+    p.add_argument("--gyro-scale", type=float, default=None,
+                   help="ジャイロzスケール補正 (既定 robot.yaml の gyro_scale_z)")
     args = p.parse_args()
 
     setup_logging()
     kin = KiwiKinematics()
+    # ジャイロzは実機で約1.6%過大なのでスケール補正を掛ける (#17, robot.yaml)
+    gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
 
     with L6470Chain(num_devices=args.devices) as chain, Bno055Imu() as imu:
         statuses = chain.configure_all(L6470Profile())
@@ -49,7 +53,7 @@ def main() -> None:
         imu.begin()
         log.info("静止のままジャイロバイアス計測中…")
         bias = imu.measure_gyro_bias()
-        log.info("ジャイロバイアス z=%.3f deg/s", bias[2])
+        log.info("ジャイロバイアス z=%.3f deg/s / スケール %.4f", bias[2], gyro_scale)
 
         driver = VelocityDriver(chain, kin)
         est_odom = DeadReckoning(kin)   # 車輪オドメトリのみ
@@ -66,7 +70,7 @@ def main() -> None:
             last = now
             cur = driver.update(dt)
             wheel_mps = kin.body_to_wheels(*cur)
-            gz = math.radians(imu.gyro[2] - bias[2]) * args.gyro_sign  # rad/s
+            gz = math.radians(imu.gyro[2] - bias[2]) * args.gyro_sign * gyro_scale  # rad/s
             est_odom.update_wheel_speeds(wheel_mps, dt)
             est_gyro.update_with_gyro_rate(wheel_mps, gz, dt)
 
@@ -76,7 +80,7 @@ def main() -> None:
             now = time.monotonic(); dt = now - last; last = now
             cur = driver.update(dt)
             wheel_mps = kin.body_to_wheels(*cur)
-            gz = math.radians(imu.gyro[2] - bias[2]) * args.gyro_sign
+            gz = math.radians(imu.gyro[2] - bias[2]) * args.gyro_sign * gyro_scale
             est_odom.update_wheel_speeds(wheel_mps, dt)
             est_gyro.update_with_gyro_rate(wheel_mps, gz, dt)
 
