@@ -110,8 +110,19 @@ def calibrated_rois() -> dict[str, Roi]:
     }
 
 
-def calibrated_config(threshold: float = 0.15) -> "WallDetectorConfig":
-    """実機校正済みの WallDetectorConfig を返す (ROI + 緩めた赤しきい値)。"""
+def calibrated_config(threshold: float = 0.08) -> "WallDetectorConfig":
+    """実機校正済みの WallDetectorConfig を返す (ROI + 緩めた赤しきい値 + 帯探索)。
+
+    しきい値 0.08 は #56 の全セル調査 (``scripts/wall_survey.py``、9セル×4向き=
+    160 ラベル) の実測分布から決めた:
+
+    - 壁あり 80 件: 中央値 0.432 / 最小 0.102 (最小は自機の写り込みで隠れた例)
+    - 壁なし 64 件: 中央値 0.000 / 最大 0.033
+    - 分離ギャップ 0.033..0.102 → しきい値 0.08 で見落とし 0・誤検出 0
+
+    中点 (0.067) よりやや上だが、**壁の見落とし (衝突) の方が偽陽性 (回り道) より
+    高くつく**ので、迷ったら下げる側に振ること。
+    """
     return WallDetectorConfig(
         rois=calibrated_rois(), threshold=threshold, red=CALIBRATED_RED
     )
@@ -125,6 +136,55 @@ class WallDetectorConfig:
     # 固定の自己遮蔽領域 (Pi 基板・カメラケーブル等) を赤マスクから除外する矩形。
     # ケーブルの赤誤検出を消すために実機で位置を合わせる。
     exclude: list[Roi] = field(default_factory=list)
+    # ROI を帯に直交する方向へ ±search_px ずらして最大の赤割合を採る (#56)。
+    # セル内の位置ずれ (実機で最大 25mm ≒ 40px) で帯が ROI から外れるのを吸収する。
+    # 0 で固定 ROI (従来の挙動)。隣のセルの帯は 292px 先なので 40px 程度なら
+    # 取り違えない。
+    search_px: int = 40
+    search_step: int = 2
+
+
+def _band_profile(mask: np.ndarray, roi: Roi, vertical: bool) -> np.ndarray:
+    """ROI の長手方向に平均した赤割合プロファイル (探索軸に沿った 1 次元)。
+
+    ``vertical`` は帯が縦 (LEFT/RIGHT) かどうか。縦帯なら列方向、横帯なら行方向。
+    """
+    if vertical:
+        strip = mask[roi.y : roi.y + roi.h, :]
+        return (strip > 0).mean(axis=0)
+    strip = mask[:, roi.x : roi.x + roi.w]
+    return (strip > 0).mean(axis=1)
+
+
+def best_roi_red_fraction(
+    mask: np.ndarray, roi: Roi, vertical: bool, search_px: int, step: int = 2
+) -> tuple[float, int]:
+    """ROI を探索軸方向にずらして最大の赤割合と、そのオフセット[px]を返す。
+
+    帯が ROI より細いと最大値は**平坦**になる (帯を含む位置はどれも同じ割合) ので、
+    オフセットは平坦部の**中心**を返す。すると「ROI を帯に乗せるのに必要な移動量」
+    = ほぼ「帯が校正位置からずれた量」になり、セル内の位置ずれの観測値としても
+    使える (#54 の画素->mm 投影の足がかり)。
+    """
+    prof = _band_profile(mask, roi, vertical)
+    start, length = (roi.x, roi.w) if vertical else (roi.y, roi.h)
+    limit = len(prof) - length
+    if limit < 0:
+        return (0.0, 0)
+    best_value = -1.0
+    best_offsets: list[int] = []
+    for offset in range(-search_px, search_px + 1, max(1, step)):
+        s = start + offset
+        if s < 0 or s > limit:
+            continue
+        value = float(prof[s : s + length].mean())
+        if value > best_value + 1e-12:
+            best_value, best_offsets = value, [offset]
+        elif value > best_value - 1e-12:
+            best_offsets.append(offset)
+    if best_value < 0:
+        return (0.0, 0)
+    return (best_value, best_offsets[len(best_offsets) // 2])
 
 
 class WallDetector:
@@ -133,11 +193,32 @@ class WallDetector:
     def __init__(self, config: WallDetectorConfig) -> None:
         self.cfg = config
 
-    def red_fractions(self, bgr: np.ndarray) -> dict[str, float]:
+    def _mask(self, bgr: np.ndarray) -> np.ndarray:
         mask = red_mask(bgr, self.cfg.red)
         for r in self.cfg.exclude:                              # 自己遮蔽領域を除外
             mask[r.y : r.y + r.h, r.x : r.x + r.w] = 0
-        return {d: roi_red_fraction(mask, roi) for d, roi in self.cfg.rois.items()}
+        return mask
+
+    def measure(self, bgr: np.ndarray) -> dict[str, tuple[float, int]]:
+        """各辺の (赤割合, 帯のずれ[px])。``search_px=0`` なら固定 ROI。"""
+        mask = self._mask(bgr)
+        out = {}
+        for d, roi in self.cfg.rois.items():
+            vertical = d in (LEFT, RIGHT)
+            if self.cfg.search_px <= 0:
+                out[d] = (roi_red_fraction(mask, roi), 0)
+            else:
+                out[d] = best_roi_red_fraction(
+                    mask, roi, vertical, self.cfg.search_px, self.cfg.search_step
+                )
+        return out
+
+    def red_fractions(self, bgr: np.ndarray) -> dict[str, float]:
+        return {d: v[0] for d, v in self.measure(bgr).items()}
+
+    def band_offsets(self, bgr: np.ndarray) -> dict[str, int]:
+        """各辺の帯が校正位置からずれていた量[px] (壁が無い辺の値は無意味)。"""
+        return {d: v[1] for d, v in self.measure(bgr).items()}
 
     def detect(self, bgr: np.ndarray) -> dict[str, bool]:
         """機体相対 (front/back/left/right) の壁有無。"""
@@ -156,6 +237,22 @@ def body_walls_to_maze(
         Direction((facing + 2) % 4): walls_body[BACK],
         Direction((facing - 1) % 4): walls_body[LEFT],
         Direction((facing + 1) % 4): walls_body[RIGHT],
+    }
+
+
+def maze_walls_to_body(
+    walls_maze: dict[Direction, bool], facing: Direction
+) -> dict[str, bool]:
+    """:func:`body_walls_to_maze` の逆写像 (迷路方角 -> 機体相対)。
+
+    既知の迷路から「その姿勢でカメラに見えるはずの壁」を作れるので、シミュレーション
+    と**校正データのラベル付け** (既知形状を走って撮る、#56) に使う。
+    """
+    return {
+        FRONT: walls_maze[facing],
+        BACK: walls_maze[Direction((facing + 2) % 4)],
+        LEFT: walls_maze[Direction((facing - 1) % 4)],
+        RIGHT: walls_maze[Direction((facing + 1) % 4)],
     }
 
 

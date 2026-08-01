@@ -53,8 +53,10 @@ python -m scripts.search_run --size 3 --dry-run   # walls + next move only, no d
 python -m scripts.search_run --size 3             # flood-fill search on a 3×3 practice maze
 python -m scripts.search_run                      # 16×16 (config/maze.yaml)
 
-# perception tuning (works off-Pi on a saved photo)
-python -m scripts.wall_detect --image shot.png --out walls.png   # per-edge ROI red fraction + verdict
+# perception tuning
+python -m scripts.wall_detect --image shot.png --out walls.png   # off-Pi: per-edge red fraction + verdict
+python -m scripts.wall_survey --maze maze3.txt --out-dir survey  # on the Pi: tour a KNOWN maze, save labelled frames
+python -m scripts.wall_survey --maze maze3.txt --dry-run          # off-Pi: just print the planned tour
 ```
 
 ## Architecture
@@ -97,7 +99,9 @@ Layered under `src/krilly/` (low → high level; each layer is independently tes
   - The **camera ribbon cable reads as red** in the lower part of the frame → the BACK ROI is offset left to dodge it (`WallDetectorConfig.exclude` can mask fixed self-occlusion too).
   - The right-hand wall is **washed out, not shadowed** (#56): its red-hue pixels measure S≈46–54 / V≈174–203 (the left wall is S≈179) — pale pink, not dark maroon. So `CALIBRATED_RED` loosens **saturation** to `s_min=50, v_min=40`; `red_wall`'s stricter defaults miss it entirely. Don't "fix" this by lowering `v_min` (the pixels are bright) or by switching to a redness metric like `R − max(G,B)` (washed-out red scores low there too — measured *worse* than the current mask). The root cause is exposure: the frame is mostly black floor, so AE opens up and blows out the bright wall tops (#21).
   - **ROIs must sit on the red bands, and the bands moved when closed-loop motion arrived** (#56). `CALIBRATED_BANDS` records the band positions measured from frames where `CellMotion` parked the robot (±1 mm): FRONT y=126–143, BACK y=425–445, LEFT x=176–194, RIGHT x=464–490. #16's ROIs came from hand-placed shots and were ~15–20 px off for RIGHT and BACK, so a real wall only filled half the ROI → red fraction 0.08–0.15 → **the machine drove into a wall it had judged absent**. To re-check, take the column (or row) profile of `red_mask` and see where the band actually is; `tests/test_wall_detect.py` asserts each ROI contains its band.
-  - Calibrated separation after #56: wall present ≈ 0.36–0.55 red fraction, absent 0.00 (threshold 0.15). Re-tune offline with `scripts/wall_detect.py --image <photo>` against labelled shots — and label them against a **known maze layout**, since frames from a run whose layout you can't reconstruct are worthless as ground truth.
+  - **A fixed ROI is not enough: the detector searches for the band** (`search_px=40`, `best_roi_red_fraction`). The dominant error source is *geometric, not chromatic* — the machine's real position inside a cell wanders up to ~25 mm (≈40 px), which slides a 26 px band clean out of a 46 px ROI. Sliding the ROI ±40 px and taking the max fixed 30 of 31 misses in the survey below. The returned offset (centre of the max plateau) doubles as an intra-cell position measurement — the seed for #54. The nearest *other* band is 292 px away, so ±40 px cannot grab the wrong wall.
+  - **Odometry cannot see that drift.** Straight moves are good (≤1 mm over 2 cells, #17) but each in-place rotation slips a little, and `CellMotion` holds position during a turn using odometry, which is blind to slip. A survey with 4 rotations per cell accumulated 5–25 mm of real position error while the estimate still read "cell centre to 0.1 mm". Any perception that assumes the robot is centred must tolerate this until #54 lands.
+  - **Calibrate against a full-maze survey, not a few photos** (`scripts/wall_survey.py`). It takes a *known* layout (`Maze.from_ascii`), plans a tour with `flood_fill` over the true map — so it drives without depending on the detector it is calibrating — and writes every frame plus ground-truth labels per edge. Room lighting changes per cell *and* per heading (glossy wall tops reflect the ceiling lamp), so one cell's thresholds do not generalise: the same wall read 0.00 facing east and 0.38 facing west. Measured over 9 cells × 4 headings = 144 labels: walls 0.102–0.55 (median 0.43), open edges 0.000–0.033 → **threshold 0.08, zero misses, zero false positives**. When in doubt lower the threshold: a missed wall is a collision, a false wall is a detour.
 - **`l6470.decode_status()`**: all-`0x0000`/all-`0xFFFF` ⇒ no SPI communication (wiring/power/CS), not a real fault; fault bits are active-low; UVLO on the first read after power-up is the normal power-up latch.
 
 ## Contributing workflow
