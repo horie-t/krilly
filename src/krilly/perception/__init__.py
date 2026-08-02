@@ -3,6 +3,11 @@
 M1 (issue #7) と M4 (issues #16, #17) で実装する。
 """
 
+from .cell_pose import (
+    CellOffset,
+    body_offset_to_world,
+    cell_offset,
+)
 from .axis_yaw import (
     AxisYaw,
     AxisYawConfig,
@@ -32,6 +37,9 @@ from .wall_detect import (
 )
 
 __all__ = [
+    "CellOffset",
+    "body_offset_to_world",
+    "cell_offset",
     "AxisYaw",
     "AxisYawConfig",
     "axis_yaw",
