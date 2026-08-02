@@ -36,6 +36,7 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion, CellMotionConfig
+from krilly.motion.emergency_stop import emergency_stop
 from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.axis_yaw import (
     AxisYaw,
@@ -105,6 +106,10 @@ def main() -> None:
     with contextlib.ExitStack() as stack:
         chain = stack.enter_context(
             L6470Chain(num_devices=args.devices, bus=args.bus, device=args.device)
+        )
+        stack.enter_context(
+            emergency_stop(chain, on_stop=lambda sig: log.warning(
+                "シグナル %s を受信。モーターを解放した。", sig))
         )
         statuses = chain.configure_all(L6470Profile())
         if any(s in (0x0000, 0xFFFF) for s in statuses):
