@@ -39,8 +39,10 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion, CellMotionConfig
+from krilly.localization.grid import apply_cell_offset
 from krilly.motion.emergency_stop import emergency_stop
 from krilly.motion.velocity_driver import VelocityDriver
+from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
     WallDetector,
@@ -48,7 +50,7 @@ from krilly.perception.wall_detect import (
     maze_walls_to_body,
 )
 from krilly.solver.maze import Direction, Maze
-from krilly.strategy.explorer import Step, heading_rad, quarter_turns
+from krilly.strategy.explorer import Step, cell_center, heading_rad, quarter_turns
 from krilly.strategy.flood_fill import UNREACHABLE, flood_fill, next_direction
 
 log = get_logger("krilly.wall_survey")
@@ -115,6 +117,8 @@ def main() -> None:
     p.add_argument("--gyro-sign", type=float, default=1.0)
     p.add_argument("--gyro-scale", type=float, default=None)
     p.add_argument("--dry-run", action="store_true", help="走行せず順路だけ表示")
+    p.add_argument("--no-correct", action="store_true",
+                   help="カメラによるセル内位置の絶対補正を無効にする (#54 の前後比較用)")
     args = p.parse_args()
 
     setup_logging()
@@ -202,11 +206,26 @@ def main() -> None:
                 {d: maze.has_wall(cell[0], cell[1], d) for d in Direction}, facing
             )
             fractions = detector.red_fractions(frame)
+            # セル内の位置ずれを測って記録し (#54)、有効なら推定位置を補正する
+            off = cell_offset(frame, detector)
+            center = cell_center(cell, maze_cfg.cell_pitch_m)
+            applied = (not args.no_correct) and apply_cell_offset(
+                est, center, off.forward_m, off.left_m, phi=heading_rad(facing)
+            )
+
+            def _mm(value):
+                return "-" if value is None else f"{value * 1000:+.1f}"
+
+            log.info("    位置ずれ 前後=%smm 左右=%smm (壁 %d/%d 枚) %s",
+                     _mm(off.forward_m), _mm(off.left_m), off.walls_y, off.walls_x,
+                     "-> 補正した" if applied else "-> 補正なし")
             for edge in BODY_DIRS:
                 rows.append({
                     "file": name, "x": cell[0], "y": cell[1], "facing": facing.name,
                     "edge": edge, "wall": int(truth[edge]),
                     "fraction": f"{fractions[edge]:.4f}",
+                    "off_fwd_mm": "" if off.forward_m is None else f"{off.forward_m*1000:.1f}",
+                    "off_left_mm": "" if off.left_m is None else f"{off.left_m*1000:.1f}",
                 })
             log.info("  %s: 正解 %s / 赤割合 %s", name,
                      {e: int(truth[e]) for e in BODY_DIRS},
@@ -244,7 +263,8 @@ def main() -> None:
         csv_path = out / f"{args.prefix}_labels.csv"
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
-                f, fieldnames=["file", "x", "y", "facing", "edge", "wall", "fraction"]
+                f, fieldnames=["file", "x", "y", "facing", "edge", "wall", "fraction",
+                            "off_fwd_mm", "off_left_mm"]
             )
             writer.writeheader()
             writer.writerows(rows)

@@ -35,8 +35,10 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion, CellMotionConfig
+from krilly.localization.grid import apply_cell_offset
 from krilly.motion.emergency_stop import emergency_stop
 from krilly.motion.velocity_driver import VelocityDriver
+from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
     FRONT,
@@ -44,7 +46,13 @@ from krilly.perception.wall_detect import (
     calibrated_config,
 )
 from krilly.solver.maze import Direction, Maze
-from krilly.strategy.explorer import Explorer, Step, Unreachable, heading_rad
+from krilly.strategy.explorer import (
+    Explorer,
+    Step,
+    Unreachable,
+    cell_center,
+    heading_rad,
+)
 from krilly.strategy.shortest_path import (
     DEFAULT_TURN_COST,
     describe_legs,
@@ -84,6 +92,10 @@ def main() -> None:
     p.add_argument("--verbose", action="store_true", help="毎ステップ ASCII 迷路を表示")
     p.add_argument("--turn-cost", type=float, default=DEFAULT_TURN_COST,
                    help="最速経路の旋回コスト [セル換算] (既定 1.0 = 実測の 90°ターン≒1セル)")
+    p.add_argument("--no-correct", action="store_true",
+                   help="カメラによるセル内位置の絶対補正を無効にする (#54)")
+    p.add_argument("--correct-weight", type=float, default=1.0,
+                   help="位置補正の引き込み率 0..1 (既定 1.0 = 測定値をそのまま採用)")
     p.add_argument("--no-front-check", action="store_true",
                    help="前進直前の前方壁チェックを無効にする (既定は有効)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
@@ -174,18 +186,39 @@ def main() -> None:
                 motion.update(dt, gyro_rate=gyro_rate())
 
         def observe_here() -> None:
-            """カメラ1枚から現在セルの壁を判定して迷路へ反映する。"""
+            """カメラ1枚から壁を判定して迷路へ反映し、セル内位置も補正する (#54)。"""
             frame = camera.capture()
-            fractions = detector.red_fractions(frame)
-            walls_body = {d: fractions[d] >= detector.cfg.threshold for d in BODY_DIRS}
+            measured = detector.measure(frame)
+            walls_body = {d: measured[d][0] >= detector.cfg.threshold for d in BODY_DIRS}
             walls_maze = explorer.observe(walls_body)
             if args.save_frames:
                 import cv2
 
                 cv2.imwrite(f"{args.save_frames}_{explorer.steps:03d}.png", frame)
             log.info("  壁 赤割合 %s -> 迷路 %s",
-                     {d: f"{fractions[d]:.2f}" for d in BODY_DIRS},
+                     {d: f"{measured[d][0]:.2f}" for d in BODY_DIRS},
                      {d.name: p for d, p in sorted(walls_maze.items())})
+            # 帯のずれからセル内の位置ずれを測り、推定位置を絶対補正する
+            off = cell_offset(frame, detector)
+            if not off.measured:
+                log.info("  位置補正: 壁が無く測定不能")
+                return
+
+            def mm(value):
+                return "-" if value is None else f"{value * 1000:+.1f}mm"
+
+            center = cell_center(explorer.cell, maze_cfg.cell_pitch_m)
+            before = est.pose[:2]
+            applied = (
+                not args.no_correct
+                and motion is not None
+                and apply_cell_offset(est, center, off.forward_m, off.left_m,
+                                      weight=args.correct_weight)
+            )
+            log.info("  位置ずれ 実測 前後=%s 左右=%s (壁 %d/%d 枚) -> %s",
+                     mm(off.forward_m), mm(off.left_m), off.walls_y, off.walls_x,
+                     f"補正 X{est.pose[0] - before[0]:+.4f} Y{est.pose[1] - before[1]:+.4f}"
+                     if applied else "補正なし")
 
         def front_is_clear() -> bool:
             """前進の直前に、いま見えている前方の壁を確認する。

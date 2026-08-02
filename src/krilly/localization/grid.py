@@ -15,6 +15,8 @@ offset=0、セル中心基準なら offset=pitch/2 を使う。
 
 from __future__ import annotations
 
+import math
+
 from krilly.config import MazeConfig
 from krilly.localization.estimator import DeadReckoning
 
@@ -67,3 +69,48 @@ class GridCorrector:
             return False
         est.correct_y(target, weight)
         return True
+
+
+def apply_cell_offset(
+    est: DeadReckoning,
+    cell_center: tuple[float, float],
+    forward_m: float | None,
+    left_m: float | None,
+    phi: float | None = None,
+    weight: float = 1.0,
+    max_error: float | None = 0.05,
+) -> bool:
+    """カメラで測ったセル内のずれで推定位置を補正する (issue #54)。
+
+    ``forward_m`` / ``left_m`` は :func:`krilly.perception.cell_pose.cell_offset` が
+    返す**車体フレーム**のずれ (None の軸は補正しない)。``cell_center`` は理想格子上の
+    セル中央の世界座標、``phi`` は機体方位 (省略時は ``est.phi``)。
+
+    「真の位置 = セル中央 + 回転(ずれ)」を推定値へ引き込む。並進のオドメトリは
+    絶対の拠り所を持たないので、これが唯一の絶対補正になる。
+
+    補正は**測れた車体軸に沿った成分だけ**に掛ける。壁が無い軸は帯が無くてずれが
+    分からないので、そこを 0 扱いで補正すると測ってもいない方向へ引っ張ってしまう。
+    ``max_error`` を超える補正量は誤測定として棄却し False を返す (既定 50mm)。
+    """
+    if forward_m is None and left_m is None:
+        return False
+    heading = est.phi if phi is None else phi
+    c, s = math.cos(heading), math.sin(heading)
+    cx, cy = cell_center
+    axes = []
+    if forward_m is not None:
+        axes.append(((c, s), forward_m))         # 車体 +x (前) の世界方向
+    if left_m is not None:
+        axes.append(((-s, c), left_m))           # 車体 +y (左) の世界方向
+    deltas = []
+    for (ux, uy), offset in axes:
+        current = (est.x - cx) * ux + (est.y - cy) * uy   # いまの推定のずれ
+        error = offset - current                          # その軸の補正量
+        if max_error is not None and abs(error) > max_error:
+            return False
+        deltas.append(((ux, uy), error))
+    for (ux, uy), error in deltas:
+        est.x += weight * error * ux
+        est.y += weight * error * uy
+    return True
