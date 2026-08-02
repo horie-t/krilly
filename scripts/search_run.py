@@ -35,8 +35,14 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion, CellMotionConfig
+from krilly.motion.emergency_stop import emergency_stop
 from krilly.motion.velocity_driver import VelocityDriver
-from krilly.perception.wall_detect import BODY_DIRS, WallDetector, calibrated_config
+from krilly.perception.wall_detect import (
+    BODY_DIRS,
+    FRONT,
+    WallDetector,
+    calibrated_config,
+)
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import Explorer, Step, Unreachable, heading_rad
 from krilly.strategy.shortest_path import (
@@ -78,6 +84,8 @@ def main() -> None:
     p.add_argument("--verbose", action="store_true", help="毎ステップ ASCII 迷路を表示")
     p.add_argument("--turn-cost", type=float, default=DEFAULT_TURN_COST,
                    help="最速経路の旋回コスト [セル換算] (既定 1.0 = 実測の 90°ターン≒1セル)")
+    p.add_argument("--no-front-check", action="store_true",
+                   help="前進直前の前方壁チェックを無効にする (既定は有効)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
     args = p.parse_args()
 
@@ -103,11 +111,17 @@ def main() -> None:
             chain = stack.enter_context(
                 L6470Chain(num_devices=args.devices, bus=args.bus, device=args.device)
             )
+            stack.enter_context(
+                emergency_stop(chain, on_stop=lambda sig: log.warning(
+                    "シグナル %s を受信。モーターを解放した。", sig))
+            )
             statuses = chain.configure_all(L6470Profile())
             if any(s in (0x0000, 0xFFFF) for s in statuses):
                 log.error("SPI 応答異常 (STATUS=%s)。配線/電源を確認。中止。",
                           [f"0x{s:04X}" for s in statuses])
                 return
+            log.info("停止は Ctrl-C (ESC は効かない)。"
+                     "強制終了して回り続けたら python -m scripts.motor_stop")
             if not args.no_imu:
                 imu = stack.enter_context(Bno055Imu())
                 imu.begin()
@@ -173,14 +187,33 @@ def main() -> None:
                      {d: f"{fractions[d]:.2f}" for d in BODY_DIRS},
                      {d.name: p for d, p in sorted(walls_maze.items())})
 
-        def execute(step: Step) -> None:
+        def front_is_clear() -> bool:
+            """前進の直前に、いま見えている前方の壁を確認する。
+
+            計画は地図に基づくので、地図が正しければ前方は空いている。ここで壁が
+            見えたら**自機の姿勢がずれている**サインなので、突っ込む前に止める。
+            """
+            if args.no_front_check:
+                return True
+            fraction = detector.red_fractions(camera.capture())[FRONT]
+            if fraction >= detector.cfg.threshold:
+                log.error("前進中止: 前方に壁が見える (赤割合 %.2f)。"
+                          "姿勢がずれている可能性が高い。", fraction)
+                return False
+            return True
+
+        def execute(step: Step) -> bool:
+            """1 手を実行する。安全チェックで中止したら False。"""
             if step.turn:
                 motion.start_turn_left(step.turn)
                 run_primitive(turn_label(step.turn))
                 coast(args.pause)
+            if not front_is_clear():
+                return False
             motion.start_forward_cells(1)
             run_primitive("1セル前進")
             coast(args.pause)
+            return True
 
         # -- 探索ラン本体 ---------------------------------------------------
         for _ in range(args.max_steps):
@@ -202,7 +235,10 @@ def main() -> None:
             if args.dry_run:
                 log.info("dry-run のため走行しない。終了。")
                 break
-            execute(step)
+            if not execute(step):
+                log.error("安全チェックで中止した (セル %s 向き %s)。",
+                          explorer.cell, explorer.facing.name)
+                break
             explorer.advance(step)
             x, y = est.pose[0], est.pose[1]
             log.info("  推定 X=%.4f Y=%.4f φ=%+.1f° (セル %s の中心は %s)",
