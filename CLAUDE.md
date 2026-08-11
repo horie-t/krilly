@@ -57,6 +57,10 @@ python -m scripts.search_run --size 3 --dry-run   # walls + next move only, no d
 python -m scripts.search_run --size 3             # flood-fill search on a 3×3 practice maze
 python -m scripts.search_run                      # 16×16 (config/maze.yaml)
 
+# full competition cycle: search → return → speed ×N (run on the Pi)
+python -m scripts.speed_run --size 5 --omega 1.0   # 10-min / 5-run budget, multi-cell straights
+python -m scripts.speed_run --size 5 --max-runs 2  # search + one speed run only
+
 # perception tuning
 python -m scripts.wall_detect --image shot.png --out walls.png   # off-Pi: per-edge red fraction + verdict
 python -m scripts.wall_survey --maze maze5.txt --out-dir survey  # on the Pi: tour a KNOWN maze, save labelled frames
@@ -76,7 +80,7 @@ Layered under `src/krilly/` (low → high level; each layer is independently tes
 - `perception/` — `red_wall.py` (red wall-top detection: two-range HSV mask → contour centroids), `wall_detect.py` (`WallDetector`: per-edge ROI red *fraction* → walls present front/back/left/right, then `body_walls_to_maze()` → `Maze`), `axis_yaw.py` (`axis_yaw`: yaw from the *orientation* of the red wall-top edges — gyro-independent heading truth, see below) and `cell_pose.py` (`cell_offset`: where the machine sits *inside* the cell, from how far the red bands moved — the absolute position fix odometry cannot provide).
 - `solver/maze.py` — `Maze` / `Direction`: 16×16 grid with **shared-edge walls** (cell A's east wall *is* cell B's west wall, so they can never disagree), outer walls, centre-2×2 goal, `to_ascii()`.
 - `strategy/` — `flood_fill.py` (`flood_fill`: 4-neighbour BFS distances from the goal cells, `UNREACHABLE` for walled-off cells; `next_direction`: descend the gradient, tie-broken by *unvisited → fewest quarter-turns → N/E/S/W* so it's deterministic), `explorer.py` (`Explorer`: observe walls → re-flood → next `Step` (quarter-turns + direction), plus the maze↔world bridge `heading_rad` / `cell_center` / `quarter_turns`) and `shortest_path.py` (`shortest_path`: turn-weighted Dijkstra over *(cell, facing)* restricted to `known` cells; `path_to_legs` run-length-encodes it into `Leg(turn, cells)` for the speed run). All discrete and hardware-free, so a whole search run can be simulated off-Pi against a ground-truth `Maze` (see `tests/test_explorer.py`).
-- `app/` — stub pending M6.
+- `app/` — `run_manager.py` (`RunManager` / `RunPhase`: the WAIT → SEARCH → RETURN_HOME → SPEED → … state machine under the classic **10-minute / 5-run** budget (M5 #20). Counts a *run* as a departure from the start square toward the goal — the search is run 1, returns are free. It only *starts* a run when the remaining time covers the (return + speed) estimate × `time_margin`; the estimate uses the measured 1.75 s/cell and 1.64 s/turn, so re-measure those if speeds change. Pure logic — `now` is passed in, so the whole 10-minute session simulates in tests. `scripts/speed_run.py` drives it: search like `search_run`, then executes `Leg(turn, cells)` lists with **multi-cell straights in one motion**, front-check + confidence-gated position correction at every leg boundary).
 - `config/` — `robot.yaml` / `maze.yaml` + typed loader (`RobotConfig`, `MazeConfig`).
 - `logging_config.py` — `setup_logging` / `get_logger`.
 
