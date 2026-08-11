@@ -67,14 +67,25 @@ class CellOffset:
         return self.forward_m is not None or self.left_m is not None
 
 
-def cell_offset(bgr: np.ndarray, detector: WallDetector) -> CellOffset:
+# 位置測定に使う帯の最低赤割合。壁の有無判定 (threshold=0.08) より厳しくする。
+# 実測 (#65) では実壁の帯は >=0.30、ケーブル等の偽帯は <=0.15 なので 0.25 で分離
+# できる。位置補正は機体を物理的に動かすため、弱い証拠で動いてはいけない
+# (偽帯の -24mm を信じて壁へ突進した)。壁判定の方は見落とし=衝突なので低いまま。
+OFFSET_MIN_FRACTION = 0.25
+
+
+def cell_offset(
+    bgr: np.ndarray,
+    detector: WallDetector,
+    min_fraction: float = OFFSET_MIN_FRACTION,
+) -> CellOffset:
     """フレームから、セル中央に対する機体のずれを推定する。
 
-    ``detector`` は :class:`WallDetector` (帯探索が有効なもの)。壁と判定できた辺の
-    帯ずれだけを使う。
+    ``detector`` は :class:`WallDetector` (帯探索が有効なもの)。**確実に壁と言える
+    帯 (赤割合 >= min_fraction)** のずれだけを使う。
     """
     measured = detector.measure(bgr)
-    threshold = detector.cfg.threshold
+    threshold = max(detector.cfg.threshold, min_fraction)
     dx_px = [
         float(measured[e][1]) for e in (LEFT, RIGHT) if measured[e][0] >= threshold
     ]
