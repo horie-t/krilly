@@ -127,20 +127,23 @@ def calibrated_rois() -> dict[str, Roi]:
 
 
 def calibrated_config(threshold: float = 0.08) -> "WallDetectorConfig":
-    """実機校正済みの WallDetectorConfig を返す (ROI + 緩めた赤しきい値 + 帯探索)。
+    """実機校正済みの WallDetectorConfig を返す (ROI + 赤しきい値 + 帯探索)。
 
-    しきい値 0.08 は #56 の全セル調査 (``scripts/wall_survey.py``、9セル×4向き=
-    160 ラベル) の実測分布から決めた:
+    しきい値は #65 の 5x5 手動調査 (``scripts/survey_shot.py``、113 枚 = 452 ラベル、
+    木の床・3D プリント柱) の辺別分布から決めた:
 
-    - 壁あり 80 件: 中央値 0.432 / 最小 0.102 (最小は自機の写り込みで隠れた例)
-    - 壁なし 64 件: 中央値 0.000 / 最大 0.033
-    - 分離ギャップ 0.033..0.102 → しきい値 0.08 で見落とし 0・誤検出 0
+    - front: 開 max 0.000 / 壁 min 0.302
+    - back : 開 max 0.121 / 壁 min 0.509 (開側の 0.09-0.12 はリボンケーブルの偽帯)
+    - left : 開 max 0.036 / 壁 min 0.344
+    - right: 開 max 0.016 / 壁 min 0.379
 
-    中点 (0.067) よりやや上だが、**壁の見落とし (衝突) の方が偽陽性 (回り道) より
-    高くつく**ので、迷ったら下げる側に振ること。
+    BACK だけ 0.25 に上げる (ケーブルと実壁の完全分離)。他は 0.08 のまま。
+    **壁の見落とし (衝突) の方が偽陽性 (回り道) より高くつく**ので、迷ったら
+    下げる側に振ること。
     """
     return WallDetectorConfig(
-        rois=calibrated_rois(), threshold=threshold, red=CALIBRATED_RED
+        rois=calibrated_rois(), threshold=threshold,
+        thresholds={BACK: 0.25}, red=CALIBRATED_RED,
     )
 
 
@@ -148,6 +151,10 @@ def calibrated_config(threshold: float = 0.08) -> "WallDetectorConfig":
 class WallDetectorConfig:
     rois: dict[str, Roi]
     threshold: float = 0.15                                     # 壁ありとみなす赤割合
+    # 辺別のしきい値上書き (#65)。BACK はリボンケーブル (オレンジ、柔軟で写る位置が
+    # 動くため固定除外できない) が偽帯 <=0.12 を作るが、実壁の帯は太く >=0.51 で
+    # 写るので、しきい値を上げるだけで完全に分離できる。
+    thresholds: dict[str, float] = field(default_factory=dict)
     red: RedDetectorConfig = field(default_factory=RedDetectorConfig)
     # 固定の自己遮蔽領域 (Pi 基板・カメラケーブル等) を赤マスクから除外する矩形。
     # ケーブルの赤誤検出を消すために実機で位置を合わせる。
@@ -158,6 +165,10 @@ class WallDetectorConfig:
     # 取り違えない。
     search_px: int = 40
     search_step: int = 2
+
+    def threshold_for(self, edge: str) -> float:
+        """この辺の壁判定しきい値 (辺別の上書きが無ければ共通値)。"""
+        return self.thresholds.get(edge, self.threshold)
 
 
 def _band_profile(mask: np.ndarray, roi: Roi, vertical: bool) -> np.ndarray:
@@ -238,7 +249,10 @@ class WallDetector:
 
     def detect(self, bgr: np.ndarray) -> dict[str, bool]:
         """機体相対 (front/back/left/right) の壁有無。"""
-        return {d: f >= self.cfg.threshold for d, f in self.red_fractions(bgr).items()}
+        return {
+            d: f >= self.cfg.threshold_for(d)
+            for d, f in self.red_fractions(bgr).items()
+        }
 
 
 def body_walls_to_maze(

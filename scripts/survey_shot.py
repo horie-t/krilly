@@ -129,7 +129,7 @@ def main() -> None:
             mismatches = []
             for edge in BODY_DIRS:
                 fraction, band_off = measured[edge]
-                verdict = fraction >= detector.cfg.threshold
+                verdict = fraction >= detector.cfg.threshold_for(edge)
                 ok = verdict == truth[edge]
                 if not ok:
                     mismatches.append(edge)

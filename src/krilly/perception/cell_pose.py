@@ -85,13 +85,12 @@ def cell_offset(
     帯 (赤割合 >= min_fraction)** のずれだけを使う。
     """
     measured = detector.measure(bgr)
-    threshold = max(detector.cfg.threshold, min_fraction)
-    dx_px = [
-        float(measured[e][1]) for e in (LEFT, RIGHT) if measured[e][0] >= threshold
-    ]
-    dy_px = [
-        float(measured[e][1]) for e in (FRONT, BACK) if measured[e][0] >= threshold
-    ]
+
+    def usable(e: str) -> bool:
+        return measured[e][0] >= max(detector.cfg.threshold_for(e), min_fraction)
+
+    dx_px = [float(measured[e][1]) for e in (LEFT, RIGHT) if usable(e)]
+    dy_px = [float(measured[e][1]) for e in (FRONT, BACK) if usable(e)]
     # 帯が画像上でずれる向きと機体がずれる向きは同じ符号になる:
     # 機体が左 (+y) へずれると、世界の特徴は機体の右へ動く = 画像の右 (+x) へ動く。
     left_m = (sum(dx_px) / len(dx_px)) / PX_PER_MM_X / 1000.0 if dx_px else None
