@@ -232,7 +232,12 @@ def main() -> None:
                      {e: f"{fractions[e]:.2f}" for e in BODY_DIRS})
 
         def shoot_all_facings(cell: tuple[int, int], facing: Direction) -> Direction:
-            """その場で 1 周しながら撮る (facings=1 なら 1 枚)。戻り値は最終の向き。"""
+            """その場で 4 向き撮る (facings=1 なら 1 枚)。戻り値は撮影終了時の向き。
+
+            元の向きへ戻す旋回はしない。次の移動方向へは呼び出し側が実際の向きから
+            直接回る (quarter_turns)。無駄な旋回は滑り = 位置ずれ = 壁接触の機会を
+            増やすだけなので、旋回数は最小にする (#65: 自立壁はかすっただけで倒れる)。
+            """
             shoot(cell, facing)
             if args.facings == 1:
                 return facing
@@ -241,18 +246,41 @@ def main() -> None:
                 run_primitive("左90°")
                 facing = Direction((facing - 1) % 4)   # CCW = 反時計回り
                 shoot(cell, facing)
-            motion.start_turn_left(1)                  # 元の向きへ戻す
-            run_primitive("左90°")
-            return Direction((facing - 1) % 4)
+            return facing
+
+        def correct_before_move(cell: tuple[int, int], facing: Direction) -> None:
+            """前進の直前に 1 枚撮って位置を補正する (#65)。
+
+            旋回中の滑りはオドメトリに見えないまま前進に持ち込まれ、通路の
+            クリアランス (片側 ~20mm) を食い潰して壁に接触する。移動前に絶対補正を
+            入れておけば、CellMotion の横ずれ保持が正しい位置を基準に働く。
+            """
+            if args.no_correct:
+                return
+            off = cell_offset(camera.capture(), detector)
+            if not off.measured:
+                return
+            applied = apply_cell_offset(
+                est, cell_center(cell, maze_cfg.cell_pitch_m),
+                off.forward_m, off.left_m, phi=heading_rad(facing),
+            )
+            def _mm(value):
+                return "-" if value is None else f"{value * 1000:+.1f}"
+            log.info("    移動前補正 前後=%smm 左右=%smm %s",
+                     _mm(off.forward_m), _mm(off.left_m),
+                     "-> 補正した" if applied else "-> 棄却")
 
         cell, facing = (0, 0), Direction.N
         log.info("[1/%d] セル %s", len(tour) + 1, cell)
         facing = shoot_all_facings(cell, facing)
         for i, step in enumerate(tour, 2):
-            if step.turn:
-                motion.start_turn_left(step.turn)
-                run_primitive(TURN_LABEL.get(step.turn, str(step.turn)))
+            # 撮影終了時の実際の向きから、次の移動方向へ最短で回る
+            turn = quarter_turns(facing, step.direction)
+            if turn:
+                motion.start_turn_left(turn)
+                run_primitive(TURN_LABEL.get(turn, str(turn)))
                 facing = step.direction
+            correct_before_move(cell, facing)
             motion.start_forward_cells(1)
             run_primitive("1セル前進")
             cell = step.to_cell
