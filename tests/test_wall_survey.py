@@ -117,3 +117,27 @@ def test_plan_tour_skips_isolated_cells():
     cells = {(0, 0)} | {s.to_cell for s in tour}
     assert (2, 2) not in cells
     assert len(cells) == 8
+
+
+# --- 手動 survey (survey_shot #65) ------------------------------------------
+def test_parse_pose_accepts_both_notations():
+    from scripts.survey_shot import parse_pose
+    assert parse_pose("0 0 N", 5) == (0, 0, Direction.N)
+    assert parse_pose("4,3,e", 5) == (4, 3, Direction.E)
+    assert parse_pose("2  1  w", 5) == (2, 1, Direction.W)
+
+
+def test_parse_pose_rejects_bad_input():
+    from scripts.survey_shot import parse_pose
+    assert parse_pose("5 0 N", 5) is None      # 範囲外
+    assert parse_pose("0 0 X", 5) is None      # 不正な向き
+    assert parse_pose("0 0", 5) is None        # 要素不足
+    assert parse_pose("a b N", 5) is None
+
+
+def test_next_shot_number_skips_existing(tmp_path):
+    from scripts.survey_shot import next_shot_number
+    assert next_shot_number(tmp_path, "shot") == 1
+    (tmp_path / "shot07_c00_N.png").touch()
+    (tmp_path / "shot12_c11_E.png").touch()
+    assert next_shot_number(tmp_path, "shot") == 13

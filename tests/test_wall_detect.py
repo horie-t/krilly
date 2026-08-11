@@ -187,3 +187,19 @@ def test_update_maze_walls_sets_and_shares():
     assert m.has_wall(1, 2, Direction.S) is True     # 共有エッジ
     assert m.has_wall(1, 1, Direction.E) is True
     assert m.has_wall(1, 1, Direction.S) is False
+
+
+def test_per_edge_threshold_override():
+    """辺別しきい値 (#65): BACK はケーブルの偽帯 (<=0.12) と実壁 (>=0.51) を分離する。"""
+    cfg = calibrated_config()
+    assert cfg.threshold_for(BACK) == pytest.approx(0.25)
+    for edge in (FRONT, LEFT, RIGHT):
+        assert cfg.threshold_for(edge) == pytest.approx(cfg.threshold)
+    # detect() が辺別しきい値を使うこと: BACK に薄い赤 (0.12 相当) を置いても壁なし
+    rois = calibrated_rois()
+    img = _blank_bgr()
+    r = rois[BACK]
+    img[r.y : r.y + int(r.h * 0.12) + 1, r.x : r.x + r.w] = (0, 0, 255)
+    det = WallDetector(WallDetectorConfig(rois=rois, threshold=0.08,
+                                          thresholds={BACK: 0.25}, search_px=0))
+    assert det.detect(img)[BACK] is False

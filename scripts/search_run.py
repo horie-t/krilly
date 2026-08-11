@@ -189,7 +189,7 @@ def main() -> None:
             """カメラ1枚から壁を判定して迷路へ反映し、セル内位置も補正する (#54)。"""
             frame = camera.capture()
             measured = detector.measure(frame)
-            walls_body = {d: measured[d][0] >= detector.cfg.threshold for d in BODY_DIRS}
+            walls_body = {d: measured[d][0] >= detector.cfg.threshold_for(d) for d in BODY_DIRS}
             walls_maze = explorer.observe(walls_body)
             if args.save_frames:
                 import cv2
