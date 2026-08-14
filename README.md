@@ -4,7 +4,11 @@ Krilly はオムニホイールを備えたマイクロマウスです。Raspber
 **ホロノミック（3輪オムニ・kiwi ドライブ）** マイクロマウスで、クラシック 16×16
 マイクロマウス競技への出場を目標としています。
 
-![krilly](docs/images/krilly.jpg)
+<img src="docs/images/krilly.jpg" alt="krilly" width="400"/>
+
+<video width="640" controls>
+  <source src="docs/images/krilly-fastest-run.mp4" type="video/mp4">
+</video>
 
 ## ハードウェア
 
