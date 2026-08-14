@@ -132,7 +132,10 @@ def main() -> None:
                 return None
             return math.radians(imu.gyro[2] - bias_z) * args.gyro_sign * gyro_scale
 
-        def run_primitive(label: str, timeout: float) -> None:
+        timings: dict[str, list[float]] = {}
+
+        def run_primitive(label: str, timeout: float, kind: str = "") -> None:
+            """1 動作を回し、所要時間を記録する (RunManager の見積もり定数の実測用)。"""
             t0 = last = time.monotonic()
             while True:
                 time.sleep(args.dt)
@@ -143,6 +146,12 @@ def main() -> None:
                     log.warning("%s: %.1fs で打ち切り (残量 %.4f)", label, timeout, motion.remaining)
                     motion.abort()
                     break
+            elapsed = time.monotonic() - t0
+            if kind:
+                timings.setdefault(kind, []).append(elapsed)
+            along, cross, dphi = motion.residual()
+            log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°",
+                     label, elapsed, along, cross, math.degrees(dphi))
             deadline = time.monotonic() + args.pause
             while time.monotonic() < deadline:
                 time.sleep(args.dt)
@@ -184,7 +193,8 @@ def main() -> None:
             turn = quarter_turns(facing, target)
             if turn:
                 motion.start_turn_left(turn)
-                run_primitive(TURN_LABEL.get(turn, str(turn)), args.timeout)
+                run_primitive(TURN_LABEL.get(turn, str(turn)), args.timeout,
+                              kind=f"turn{abs(turn)}")
             return target
 
         # -- 探索ラン (search_run と同じ閉ループ) ------------------------------
@@ -209,7 +219,7 @@ def main() -> None:
                 if not front_is_clear():
                     return None
                 motion.start_forward_cells(1)
-                run_primitive("1セル前進", args.timeout)
+                run_primitive("1セル前進", args.timeout, kind="cells1")
                 explorer.advance(step)
             log.error("探索が %d 手で終わらなかった", args.max_steps)
             return None
@@ -225,7 +235,8 @@ def main() -> None:
                 if not front_is_clear():
                     return None
                 motion.start_forward_cells(leg.cells)
-                run_primitive(f"直進{leg.cells}", max(args.timeout, leg.cells * 3.0))
+                run_primitive(f"直進{leg.cells}", max(args.timeout, leg.cells * 3.0),
+                              kind=f"cells{leg.cells}")
                 for _ in range(leg.cells):
                     cell = maze.neighbor(*cell, facing)
             correct_at(cell, facing)
@@ -262,6 +273,16 @@ def main() -> None:
             log.info("[走行 %d] 最速ラン %.1fs", manager.runs_used, time.monotonic() - t_run)
 
         log.info("終了: %s", manager.summary(time.monotonic()))
+        if timings:
+            log.info("動作あたりの実測時間 (RunManager の見積もり定数の校正用):")
+            for kind in sorted(timings):
+                vals = timings[kind]
+                per = ""
+                if kind.startswith("cells"):
+                    n = int(kind[5:])
+                    per = f" / 1セルあたり {sum(vals) / len(vals) / n:.2f}s"
+                log.info("  %-8s n=%2d 平均 %.2fs (最小 %.2f 最大 %.2f)%s",
+                         kind, len(vals), sum(vals) / len(vals), min(vals), max(vals), per)
         log.info("判明した迷路:\n%s", maze.to_ascii())
 
 

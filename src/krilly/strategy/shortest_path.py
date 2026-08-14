@@ -8,11 +8,11 @@
   見えない壁に突っ込む事故になる。``known`` に観測済みセル
   (:attr:`krilly.strategy.explorer.Explorer.visited`) を渡すことで表現する。
 
-また、最短は**セル数だけでは決まらない**。実機の実測 (M4 #17) では
+また、最短は**セル数だけでは決まらない**。実機の実測 (5x5 通しラン、--omega 1.0) では
 
-    1 セル前進 ≈ 1.75 s / 90° ターン ≈ 1.64 s
+    直進 1 セルあたり ≈ 1.50 s / 90° ターン ≈ 2.56 s (整定・停止込み)
 
-で、**旋回 1 回はほぼ 1 セル分の時間**を食う。そのためセル数の BFS ではなく
+で、**旋回 1 回は 1.7 セル分の時間**を食う。そのためセル数の BFS ではなく
 **(セル, 向き) を状態にした Dijkstra** で「セル数 + turn_cost × 旋回回数」を
 最小化する (``turn_cost`` の既定 1.0 はこの実測に由来)。``turn_cost=0`` にすれば
 純粋なセル数最短 (BFS 相当) になる。
@@ -33,8 +33,9 @@ from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import quarter_turns
 from krilly.strategy.flood_fill import accessible_directions
 
-# 実機実測 (#17): 1セル前進 1.75s / 90°ターン 1.64s -> 旋回 1 回 ≈ 0.94 セル
-DEFAULT_TURN_COST = 1.0
+# 実機実測: 直進 1 セルあたり 1.50s / 90°ターン 2.56s -> 旋回 1 回 ≈ 1.7 セル。
+# 速度設定 (CellMotionConfig / --omega) を変えたら測り直すこと。
+DEFAULT_TURN_COST = 1.7
 
 
 @dataclass(frozen=True)

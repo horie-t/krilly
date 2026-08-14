@@ -10,8 +10,8 @@
   壁情報が確定した経路が手に入る。
 - 以降は 復帰 → 最速 (確定した壁情報のみで :func:`shortest_path`) を繰り返す。
 - **次の走行を始めるのは、残り時間が (復帰+最速) の見積もりに間に合うときだけ**。
-  見積もりは実測由来の 1 セル ≈ 1.75 s / 90° ≈ 1.64 s (#17) に安全率を掛ける。
-  途中で時間切れになるより、確実に完走できる走行だけを始める方が良い。
+  見積もりは実測由来の定数 (下記) に安全率を掛ける。途中で時間切れになるより、
+  確実に完走できる走行だけを始める方が良い。
 
 時刻は ``now`` [s] (monotonic) を呼び出し側が渡す。内部で時計を読まないので、
 シミュレーションで任意の時間経過をテストできる。ハードウェアには触らない。
@@ -66,8 +66,14 @@ class RunManager:
     explorer: Explorer
     time_limit_s: float = 600.0        # 持ち時間 (10 分)
     max_runs: int = 5                  # 最大走行回数
-    cell_time_s: float = 1.75          # 1 セル前進の実測時間 (#17)
-    turn_time_s: float = 1.64          # 90° 旋回の実測時間 (#17)
+    # 実測 (5x5 通しラン、--omega 1.0、n=66/12/18/81/7):
+    #   直進 1/2/3 セル = 1.76 / 3.28 / 4.75 s -> 1 セルあたり 1.50s + 1 回あたり 0.26s
+    #   (連続直進はランプの固定費が償却されて 1 セルあたりが安くなる)
+    #   90° 旋回 2.12s / 180° 3.76s、動作間の停止 (--pause) が 1 回あたり +0.44s
+    # 固定費を分離しないと連続直進の多い経路で見積もりが外れる (旧定数では +25%)。
+    cell_time_s: float = 1.50          # 直進の 1 セルあたり増分
+    straight_time_s: float = 0.70      # 直進 1 回あたりの固定費 (ランプ + 整定 + 停止)
+    turn_time_s: float = 2.56          # 90° 旋回 1 回 (整定 + 停止込み)
     time_margin: float = 1.5           # 見積もりに掛ける安全率
     turn_cost: float = DEFAULT_TURN_COST
 
@@ -84,10 +90,19 @@ class RunManager:
         return self.time_limit_s - self.elapsed_s(now)
 
     def estimate_s(self, legs: list[Leg]) -> float:
-        """Leg 列の所要時間の見積もり (安全率は掛けない素の値)。"""
+        """Leg 列の所要時間の見積もり (安全率は掛けない素の値)。
+
+        セル数・旋回数だけでなく**直進の回数**も数える。連続直進はランプの固定費を
+        償却するので、同じセル数でも区間が細切れなほど時間がかかる。
+        """
         cells = sum(leg.cells for leg in legs)
         turns = sum(abs(leg.turn) for leg in legs)
-        return cells * self.cell_time_s + turns * self.turn_time_s
+        straights = sum(1 for leg in legs if leg.cells)
+        return (
+            cells * self.cell_time_s
+            + straights * self.straight_time_s
+            + turns * self.turn_time_s
+        )
 
     # -- 経路 -----------------------------------------------------------------
     def _route(

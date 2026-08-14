@@ -112,8 +112,28 @@ def test_time_budget_blocks_at_home_too(manager):
 
 
 def test_estimate_uses_measured_times(manager):
-    legs = [Leg(0, 3), Leg(-1, 2)]                 # 5 セル + 旋回 1 回
-    assert manager.estimate_s(legs) == pytest.approx(5 * 1.75 + 1 * 1.64)
+    """セル数・旋回数に加えて**直進の回数**も数える (ランプの固定費)。"""
+    legs = [Leg(0, 3), Leg(-1, 2)]                 # 5 セル / 直進 2 回 / 旋回 1 回
+    assert manager.estimate_s(legs) == pytest.approx(
+        5 * manager.cell_time_s + 2 * manager.straight_time_s + 1 * manager.turn_time_s
+    )
+
+
+def test_estimate_prefers_fewer_straights_for_the_same_cells(manager):
+    """同じ 4 セルでも、区間が細切れなほど見積もりは大きい (固定費が効く)。"""
+    one_leg = manager.estimate_s([Leg(0, 4)])
+    four_legs = manager.estimate_s([Leg(0, 1)] * 4)
+    assert four_legs > one_leg
+    assert four_legs - one_leg == pytest.approx(3 * manager.straight_time_s)
+
+
+def test_estimate_matches_the_measured_speed_run(manager):
+    """実機の最速ラン (20 セル / 直進 12 回 / 旋回 13 回) は実測 70.9s だった。"""
+    legs = [Leg(2, 3), Leg(-1, 1), Leg(1, 1), Leg(-1, 3), Leg(-1, 2), Leg(-1, 1),
+            Leg(1, 1), Leg(1, 1), Leg(-1, 1), Leg(-1, 3), Leg(-1, 2), Leg(-1, 1)]
+    assert sum(leg.cells for leg in legs) == 20
+    assert sum(abs(leg.turn) for leg in legs) == 13
+    assert manager.estimate_s(legs) == pytest.approx(70.9, abs=1.5)
 
 
 def test_elapsed_starts_at_first_departure(manager):
