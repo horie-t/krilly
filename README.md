@@ -6,9 +6,7 @@ Krilly はオムニホイールを備えたマイクロマウスです。Raspber
 
 <img src="docs/images/krilly.jpg" alt="krilly" width="400"/>
 
-<video width="640" controls>
-  <source src="docs/images/krilly-fastest-run.mp4" type="video/mp4">
-</video>
+https://github.com/user-attachments/assets/f9e897da-61f6-41a8-bfa9-4333550319e2
 
 ## ハードウェア
 
