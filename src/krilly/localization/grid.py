@@ -71,6 +71,36 @@ class GridCorrector:
         return True
 
 
+def apply_axis_heading(
+    est: DeadReckoning,
+    axis_rad: float,
+    weight: float = 1.0,
+    max_error: float | None = math.radians(15.0),
+) -> bool:
+    """カメラで測った迷路軸からの方位ずれで、推定方位を補正する。
+
+    ``axis_rad`` は :func:`krilly.perception.axis_yaw.axis_yaw` が返す
+    **(-45°, 45°] に折り返した軸角** (+ = 機体が CCW にずれている)。迷路走行中の
+    機体の向きは常に 90° の倍数なので、この値がそのまま「最寄りの軸からのずれ」
+    = 絶対方位になる。
+
+    方位はジャイロで閉じているが、その基準は**走行開始時の機体の向き**であって
+    迷路の軸ではない。1 走行あたり 0.3-0.5° ずつ基準がずれ、それが次の走行の基準に
+    なるので、走行を重ねるほど迷路軸から傾く (実機で 4 セルあたり 10mm 横に流れ、
+    壁を押した)。位置の絶対補正 (:func:`apply_cell_offset`) と対になる、方位側の
+    絶対補正がこれ。
+
+    推定 φ から測定値を引いた値を 90° 格子へスナップし、測定値を足し戻したものを
+    目標とする。``max_error`` (既定 15°) を超える補正は誤測定として棄却する。
+    """
+    quarter = math.pi / 2.0
+    target = snap_to_grid(est.phi - axis_rad, quarter) + axis_rad
+    if max_error is not None and abs(target - est.phi) > max_error:
+        return False
+    est.correct_heading(target, weight)
+    return True
+
+
 def apply_cell_offset(
     est: DeadReckoning,
     cell_center: tuple[float, float],
