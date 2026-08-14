@@ -28,11 +28,12 @@ from krilly.hal.l6470 import L6470Profile
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
-from krilly.localization.grid import apply_cell_offset
+from krilly.localization.grid import apply_axis_heading, apply_cell_offset
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion, CellMotionConfig
 from krilly.motion.emergency_stop import emergency_stop
 from krilly.motion.velocity_driver import VelocityDriver
+from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
@@ -86,6 +87,7 @@ def main() -> None:
     explorer = Explorer(maze)
     manager = RunManager(explorer, time_limit_s=args.time_limit, max_runs=args.max_runs)
     detector = WallDetector(calibrated_config())
+    yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
     log.info("迷路 %dx%d / ゴール %s / 持ち時間 %.0fs / 最大 %d 走",
              maze.size, maze.size, maze.goal_cells(), args.time_limit, args.max_runs)
@@ -155,10 +157,15 @@ def main() -> None:
             return frame
 
         def correct_at(cell: tuple[int, int], facing: Direction, frame=None) -> None:
-            """停止中に位置を絶対補正する (強い帯のみ、#54/#65)。"""
+            """停止中に方位と位置を絶対補正する (強い帯のみ、#54/#65)。"""
             if args.no_correct:
                 return
-            off = cell_offset(capture() if frame is None else frame, detector)
+            frame = capture() if frame is None else frame
+            # 方位: ジャイロの基準は走行開始時の向きなので、迷路軸へ引き戻す
+            yaw = axis_yaw(frame, yaw_cfg)
+            if yaw is not None:
+                apply_axis_heading(est, yaw.angle_rad)
+            off = cell_offset(frame, detector)
             if not off.measured:
                 return
             apply_cell_offset(est, cell_center(cell, maze_cfg.cell_pitch_m),

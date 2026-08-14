@@ -190,3 +190,49 @@ def test_correction_removes_accumulated_drift(est):
     apply_cell_offset(est, (0.36, 0.18), forward_m=-0.020, left_m=0.008)
     assert est.x == pytest.approx(0.36 - 0.020)        # 実際は 20mm 手前だった
     assert est.y == pytest.approx(0.18 + 0.008)        # 8mm 左 (=北) にずれていた
+
+
+# --- 方位の絶対補正 (apply_axis_heading) -----------------------------------
+def test_apply_axis_heading_snaps_to_the_maze_axis(est):
+    """推定 91° / カメラ実測 +0.8° -> 真の方位は 90.8°。"""
+    from krilly.localization.grid import apply_axis_heading
+    est.reset(0.0, 0.0, math.radians(91.0))
+    assert apply_axis_heading(est, math.radians(0.8))
+    assert math.degrees(est.phi) == pytest.approx(90.8, abs=1e-6)
+
+
+def test_apply_axis_heading_is_a_noop_when_already_correct(est):
+    from krilly.localization.grid import apply_axis_heading
+    est.reset(0.0, 0.0, math.radians(89.0))
+    apply_axis_heading(est, math.radians(-1.0))
+    assert math.degrees(est.phi) == pytest.approx(89.0, abs=1e-6)
+
+
+def test_apply_axis_heading_handles_accumulated_phi(est):
+    """推定φは積算値 (何周もする)。450° = 5x90° の格子にスナップされる。"""
+    from krilly.localization.grid import apply_axis_heading
+    est.reset(0.0, 0.0, math.radians(451.5))
+    apply_axis_heading(est, math.radians(0.5))
+    assert math.degrees(est.phi) == pytest.approx(450.5, abs=1e-6)
+
+
+def test_apply_axis_heading_weight(est):
+    from krilly.localization.grid import apply_axis_heading
+    est.reset(0.0, 0.0, math.radians(92.0))
+    apply_axis_heading(est, 0.0, weight=0.5)          # 目標 90° へ半分だけ
+    assert math.degrees(est.phi) == pytest.approx(91.0, abs=1e-6)
+
+
+def test_apply_axis_heading_rejects_large_corrections(est):
+    """軸から大きく外れている (旋回途中など) 測定は棄却する。"""
+    from krilly.localization.grid import apply_axis_heading
+    est.reset(0.0, 0.0, math.radians(70.0))
+    assert not apply_axis_heading(est, math.radians(20.0), max_error=math.radians(15.0))
+    assert math.degrees(est.phi) == pytest.approx(70.0)
+
+
+def test_apply_axis_heading_does_not_touch_position(est):
+    from krilly.localization.grid import apply_axis_heading
+    est.reset(0.12, 0.34, math.radians(91.0))
+    apply_axis_heading(est, 0.0)
+    assert (est.x, est.y) == pytest.approx((0.12, 0.34))

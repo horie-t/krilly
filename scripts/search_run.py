@@ -35,9 +35,10 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion, CellMotionConfig
-from krilly.localization.grid import apply_cell_offset
+from krilly.localization.grid import apply_axis_heading, apply_cell_offset
 from krilly.motion.emergency_stop import emergency_stop
 from krilly.motion.velocity_driver import VelocityDriver
+from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
@@ -108,6 +109,7 @@ def main() -> None:
     maze.set_outer_walls()
     explorer = Explorer(maze)
     detector = WallDetector(calibrated_config())
+    yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
 
     log.info("迷路 %dx%d / ゴール %s / スタート %s 北向き",
@@ -198,6 +200,18 @@ def main() -> None:
             log.info("  壁 赤割合 %s -> 迷路 %s",
                      {d: f"{measured[d][0]:.2f}" for d in BODY_DIRS},
                      {d.name: p for d, p in sorted(walls_maze.items())})
+            # 迷路軸に対する方位を測って絶対補正する。ジャイロの基準は「走行開始時の
+            # 機体の向き」なので、放置すると走行のたびに迷路軸から傾いていく。
+            if not args.no_correct:
+                yaw = axis_yaw(frame, yaw_cfg)
+                if yaw is not None:
+                    before = est.phi
+                    if apply_axis_heading(est, yaw.angle_rad, weight=args.correct_weight):
+                        log.info("  方位補正: 軸から %+.2f° -> φ %+.2f°",
+                                 yaw.angle_deg, math.degrees(est.phi - before))
+                    else:
+                        log.info("  方位補正: 軸から %+.2f° は大きすぎるので棄却",
+                                 yaw.angle_deg)
             # 帯のずれからセル内の位置ずれを測り、推定位置を絶対補正する
             off = cell_offset(frame, detector)
             if not off.measured:

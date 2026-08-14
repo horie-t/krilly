@@ -4,6 +4,17 @@
 """
 
 from .estimator import DeadReckoning
-from .grid import GridCorrector, apply_cell_offset, snap_to_grid
+from .grid import (
+    GridCorrector,
+    apply_axis_heading,
+    apply_cell_offset,
+    snap_to_grid,
+)
 
-__all__ = ["DeadReckoning", "GridCorrector", "apply_cell_offset", "snap_to_grid"]
+__all__ = [
+    "DeadReckoning",
+    "GridCorrector",
+    "apply_axis_heading",
+    "apply_cell_offset",
+    "snap_to_grid",
+]
