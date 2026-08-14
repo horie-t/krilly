@@ -50,7 +50,7 @@ V = FreeCAD.Vector
 HERE = os.path.dirname(os.path.abspath(__file__))
 CAD_DIR = os.path.normpath(os.path.join(HERE, ".."))
 EXPORT = os.path.join(CAD_DIR, "export")
-DATE = "2026-07-25"
+DATE = "2026-08-14"
 
 PARTS = [
     ("krilly-chassis.FCStd", "Body", "krilly-chassis",
