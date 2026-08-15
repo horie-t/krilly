@@ -9,7 +9,7 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.velocity_driver import VelocityDriver
-from scripts.cell_move_demo import Move, parse_seq, wrapped_deg
+from scripts.cell_move_demo import Move, parse_seq, world_components, wrapped_deg
 
 ROBOT = RobotConfig(
     wheel_diameter_m=0.048,
@@ -96,3 +96,23 @@ def test_token_moves_reference_as_expected(motion, text, expect_ref):
     x, y, phi = motion.reference
     assert (x, y) == pytest.approx(expect_ref[:2])
     assert math.cos(phi - expect_ref[2]) == pytest.approx(1.0, abs=1e-12)  # ±π を同一視
+
+
+# --- カメラ実測の世界成分 (#21) --------------------------------------------
+def test_world_components_maps_body_axes_to_maze_axes():
+    """理想格子上の方位は 90° の倍数なので、車体軸はそのまま世界軸になる。"""
+    # 北向き: 前 = 北、左 = 西 (= 東の負)
+    assert world_components(0.01, 0.002, math.pi / 2) == pytest.approx(
+        {"北": 0.01, "東": -0.002})
+    # 東向き: 前 = 東、左 = 北
+    assert world_components(0.01, 0.002, 0.0) == pytest.approx({"東": 0.01, "北": 0.002})
+    # 南向き: 前 = 南 (北の負)、左 = 東
+    assert world_components(0.01, 0.002, -math.pi / 2) == pytest.approx(
+        {"北": -0.01, "東": 0.002})
+
+
+def test_world_components_drops_unmeasured_axes():
+    """測れなかった軸はキーごと落とす (差分で「測っていない方向」を混ぜないため)。"""
+    assert world_components(0.01, None, math.pi / 2) == {"北": 0.01}
+    assert world_components(None, 0.01, math.pi / 2) == {"東": -0.01}
+    assert world_components(None, None, 0.0) == {}

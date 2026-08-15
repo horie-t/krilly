@@ -53,6 +53,8 @@ from krilly.perception.axis_yaw import (
     median_axis_yaw,
     yaw_delta_rad,
 )
+from krilly.perception.cell_pose import CellOffset, cell_offset
+from krilly.perception.wall_detect import WallDetector, calibrated_config
 
 log = get_logger("krilly.cell_move_demo")
 
@@ -81,6 +83,30 @@ class Move:
 
     def start(self, motion) -> None:
         TOKENS[self.token][1](motion, self.count)
+
+
+# 車体軸の世界方向 (理想格子上の phi は 90° の倍数) -> (軸名, 符号)
+WORLD_AXIS = {(1, 0): ("東", 1), (-1, 0): ("東", -1), (0, 1): ("北", 1), (0, -1): ("北", -1)}
+
+
+def world_components(
+    forward_m: float | None, left_m: float | None, phi: float
+) -> dict[str, float]:
+    """車体フレームのずれ (m) を世界成分 ``{"東": …, "北": …}`` に直す。
+
+    ``phi`` は**理想格子上の**方位なので必ず 90° の倍数で、車体軸はそのまま
+    世界軸に対応する (成分が混ざらない)。測れなかった軸はキーごと落とすので、
+    動作の前後で共通する軸だけを引き算すれば「測ってもいない方向」を混ぜずに
+    済む。
+    """
+    c, s = round(math.cos(phi)), round(math.sin(phi))
+    out: dict[str, float] = {}
+    for value, vec in ((forward_m, (c, s)), (left_m, (-s, c))):
+        if value is None:
+            continue
+        name, sign = WORLD_AXIS[vec]
+        out[name] = value * sign
+    return out
 
 
 def wrapped_deg(rad: float) -> float:
@@ -130,6 +156,8 @@ def main() -> None:
     p.add_argument("--timeout", type=float, default=10.0, help="1プリミティブの上限秒数")
     p.add_argument("--camera-yaw", action="store_true",
                    help="動作前後の方位をカメラで実測してジャイロ推定と突き合わせる")
+    p.add_argument("--camera-pose", action="store_true",
+                   help="動作前後のセル内位置をカメラで実測し、理想量とのズレを出す")
     p.add_argument("--yaw-samples", type=int, default=5, help="カメラ実測のフレーム数 (中央値)")
     p.add_argument("--save-frames", default=None,
                    help="カメラ実測フレームの保存先プレフィクス 例: /tmp/yaw")
@@ -168,11 +196,12 @@ def main() -> None:
             log.info("ジャイロバイアス z=%.3f deg/s / スケール %.4f", bias_z, gyro_scale)
 
         camera = None
-        if args.camera_yaw:
+        if args.camera_yaw or args.camera_pose:
             from krilly.hal.camera import Camera   # 遅延 import (実機専用の依存)
 
             camera = stack.enter_context(Camera())
         yaw_cfg = calibrated_axis_yaw_config()
+        detector = WallDetector(calibrated_config())
 
         driver = VelocityDriver(chain, kin, limits=tuning.limits)
         est = DeadReckoning(kin)
@@ -203,6 +232,22 @@ def main() -> None:
                 log.info("カメラ実測 (%s): 軸角 %+.3f° (線分 %d 本, 総長 %.0fpx)",
                          tag, result.angle_deg, result.segments, result.total_length_px)
             return result
+
+        def measure_pose(tag: str) -> tuple[CellOffset, float] | None:
+            """カメラでセル内の位置ずれを実測する (そのときの理想方位と一緒に返す)。"""
+            if camera is None or not args.camera_pose:
+                return None
+            off = cell_offset(camera.capture(), detector)
+            if not off.measured:
+                log.warning("カメラ実測 (%s): 位置測定に足る赤帯が無い "
+                            "(壁の無いセルでは測れない)", tag)
+                return None
+            log.info("カメラ実測 (%s): セル内のずれ 前後=%s 左右=%s (根拠の壁 前後%d枚/左右%d枚)",
+                     tag,
+                     "測定不能" if off.forward_m is None else "%+.1fmm" % (off.forward_m * 1e3),
+                     "測定不能" if off.left_m is None else "%+.1fmm" % (off.left_m * 1e3),
+                     off.walls_y, off.walls_x)
+            return (off, motion.reference[2])
 
         def run_primitive(label: str, timeout: float) -> None:
             """完了 (または timeout) までループを回す。update は純計算なので寝るのはここ。"""
@@ -248,6 +293,7 @@ def main() -> None:
                  " ".join(m.label for m in seq), motion.cell_pitch_m)
         chain.get_status_all()   # 電源投入時の UVLO ラッチを捨てて以降の差分を見る
         yaw_before = measure_yaw("before")
+        pose_before = measure_pose("before")
         phi_before = est.phi
         for i, move in enumerate(seq, 1):
             log.info("[%d/%d] %s 開始", i, len(seq), move.label)
@@ -256,10 +302,28 @@ def main() -> None:
             run_primitive(f"[{i}/{len(seq)}] {move.label}", args.timeout * move.count)
             coast(args.pause)
         yaw_after = measure_yaw("after")
+        pose_after = measure_pose("after")
 
         along, cross, dphi = motion.residual()
         log.info("完了。理想との総残差: 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°",
                  along, cross, math.degrees(dphi))
+        if pose_before is not None and pose_after is not None:
+            # セル内のずれを世界成分に直して引き算する。理想格子上の移動量は
+            # 定義どおり正確なので、差分がそのまま「理想との差 = 実機の誤差」になる。
+            # 前後で共通して測れた軸だけを比べる (片方しか無い軸は根拠が無い)。
+            before = world_components(pose_before[0].forward_m, pose_before[0].left_m,
+                                      pose_before[1])
+            after = world_components(pose_after[0].forward_m, pose_after[0].left_m,
+                                     pose_after[1])
+            common = [k for k in ("東", "北") if k in before and k in after]
+            if common:
+                log.info("理想格子からのずれ (カメラ実測の差分): %s",
+                         " ".join("%s %+.1fmm" % (k, (after[k] - before[k]) * 1e3)
+                                  for k in common))
+            missing = [k for k in ("東", "北") if k not in common]
+            if missing:
+                log.info("  %s 方向は前後どちらかで測れなかったので比較しない",
+                         "/".join(missing))
         if yaw_before is not None and yaw_after is not None:
             # 軸は 90° 周期なので、ジャイロ側の総回転も同じ折り返しで比べる
             gyro_delta = fold_deg(math.degrees(est.phi - phi_before))
