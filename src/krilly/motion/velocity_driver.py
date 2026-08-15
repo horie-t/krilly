@@ -24,10 +24,15 @@ from krilly.kinematics.kiwi import KiwiKinematics
 
 @dataclass(frozen=True)
 class RampLimits:
-    """加減速の上限 (脱調を防ぐため保守的な既定値)。"""
+    """加減速の上限 (#21 の実機ラダーで決めた採用点)。
 
-    max_linear_accel_mps2: float = 0.5      # vx, vy の加速度上限 [m/s^2]
-    max_angular_accel_radps2: float = 5.0   # omega の角加速度上限 [rad/s^2]
+    L6470 の ACC/DEC register より緩くないと、実際の加減速はドライバ側に律速される
+    (:func:`krilly.motion.tuning.check_limits` が検算する)。この値には
+    ``L6470Profile.acc_steps_s2 = 2000`` が要る。
+    """
+
+    max_linear_accel_mps2: float = 0.9      # vx, vy の加速度上限 [m/s^2]
+    max_angular_accel_radps2: float = 8.0   # omega の角加速度上限 [rad/s^2]
 
 
 def _rate_limit(current: float, target: float, max_delta: float) -> float:
@@ -65,6 +70,21 @@ class VelocityDriver:
     def stop(self) -> None:
         """目標を 0 にする (ランプで減速。即時停止ではない)。"""
         self._target = (0.0, 0.0, 0.0)
+
+    def energize(self) -> None:
+        """静止したまま励磁だけ掛ける (速度 0 の Run 指令)。
+
+        L6470 はリセット後 **HiZ** (出力停止) で、最初の駆動指令で初めてコイルに
+        電流が流れる。その瞬間に 3 つのロータはそれぞれ**最寄りの磁気的な谷へ
+        スナップ**する。1 個あたり最大 ±0.9° (半フルステップ) = 車輪表面で 0.37mm
+        なので、車体の向きは最大 0.5° ほど跳ねる。
+
+        機体を手で置いた時点では無通電で、車体と車輪の関係は機械的なガタの範囲内で
+        不定なので、この跳ねは避けられない。避けられるのは**カメラで初期姿勢を測る
+        より後に跳ねること**で、それをやると跳ねが「走行中に回った量」に化ける。
+        計測の前にこれを呼んで、静止したまま励磁を済ませておくこと。
+        """
+        self._command(0.0, 0.0, 0.0)
 
     @property
     def current_velocity(self) -> tuple[float, float, float]:

@@ -52,10 +52,11 @@ def test_rate_limit_up_down_and_clamp():
 
 # --- ランプ挙動 ------------------------------------------------------------
 def test_update_ramps_instead_of_jumping(driver):
-    # 既定の線形加速 0.5 m/s^2, dt=0.1 -> 1 tick 0.05 m/s まで
-    driver.set_velocity(1.0, 0.0, 0.0)
+    """1 tick で目標へ飛ばず、レート制限どおりの増分で近づく。"""
+    step = driver.limits.max_linear_accel_mps2 * 0.1
+    driver.set_velocity(10 * step, 0.0, 0.0)
     vx, vy, w = driver.update(0.1)
-    assert (vx, vy, w) == pytest.approx((0.05, 0.0, 0.0))
+    assert (vx, vy, w) == pytest.approx((step, 0.0, 0.0))
     assert not driver.at_target()
 
 
@@ -68,10 +69,11 @@ def test_reaches_target_after_enough_updates(driver):
 
 
 def test_angular_ramp(driver):
-    # 既定の角加速 5 rad/s^2, dt=0.1 -> 0.5 rad/s/tick
-    driver.set_velocity(0.0, 0.0, 1.0)
-    assert driver.update(0.1)[2] == pytest.approx(0.5)
-    assert driver.update(0.1)[2] == pytest.approx(1.0)
+    """角加速のレート制限どおりに 1 tick ずつ増える (既定値は直書きしない)。"""
+    step = driver.limits.max_angular_accel_radps2 * 0.1
+    driver.set_velocity(0.0, 0.0, 4 * step)
+    assert driver.update(0.1)[2] == pytest.approx(step)
+    assert driver.update(0.1)[2] == pytest.approx(2 * step)
 
 
 def test_stop_targets_zero(driver):
@@ -88,8 +90,8 @@ def test_stop_targets_zero(driver):
 # --- 運動学との結線 --------------------------------------------------------
 def test_command_matches_kinematics(driver, kin):
     driver.set_velocity(1.0, 0.0, 0.0)
-    driver.update(0.1)  # current = (0.05, 0, 0)
-    wheel_mps = kin.body_to_wheels(0.05, 0.0, 0.0)
+    ramped = driver.update(0.1)[0]      # レート制限された 1 tick 分
+    wheel_mps = kin.body_to_wheels(ramped, 0.0, 0.0)
     exp_dirs = [FWD if s >= 0 else REV for s in wheel_mps]
     exp_hz = [abs(kin.wheel_speed_to_step_hz(s)) for s in wheel_mps]
     dirs, hz = driver.chain.calls[-1]
@@ -115,3 +117,17 @@ def test_pure_rotation_all_same_speed_and_dir(driver):
     assert dirs == [FWD, FWD, FWD]           # +omega=CCW は 3 輪とも正回転
     assert hz[1] == pytest.approx(hz[0])
     assert hz[2] == pytest.approx(hz[0])
+
+
+def test_energize_commands_zero_without_moving():
+    """励磁だけ掛ける: 3輪へ速度 0 の Run を出し、ランプ状態は変えない (#21)。"""
+    chain = FakeChain()
+    driver = VelocityDriver(chain, KiwiKinematics(config=CFG))
+    driver.set_velocity(0.2, 0.0, 0.0)
+    driver.energize()
+    assert chain.calls, "run_all が呼ばれていない"
+    _dirs, speeds = chain.calls[-1]
+    assert speeds == pytest.approx([0.0, 0.0, 0.0])
+    # 目標も現在値も触らない (次の update から通常どおりランプする)
+    assert driver.current_velocity == (0.0, 0.0, 0.0)
+    assert driver.target_velocity == (0.2, 0.0, 0.0)

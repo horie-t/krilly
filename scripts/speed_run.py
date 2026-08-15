@@ -24,14 +24,14 @@ import time
 from krilly.app.run_manager import RunManager, RunPhase
 from krilly.config import load_maze_config
 from krilly.hal.imu import Bno055Imu
-from krilly.hal.l6470 import L6470Profile
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.localization.grid import apply_axis_heading, apply_cell_offset
 from krilly.logging_config import get_logger, setup_logging
-from krilly.motion.cell_motion import CellMotion, CellMotionConfig
+from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
+from krilly.motion.tuning import add_tuning_args, build_tuning, check_limits, describe_faults
 from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
@@ -63,8 +63,7 @@ def main() -> None:
     p.add_argument("--device", type=int, default=0)
     p.add_argument("--size", type=int, default=None,
                    help="迷路サイズ (既定 maze.yaml の grid_size=16)")
-    p.add_argument("--v", type=float, default=0.12, help="前進の最大速度 [m/s]")
-    p.add_argument("--omega", type=float, default=1.0, help="旋回の最大角速度 [rad/s]")
+    add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.4, help="動作の前後で止まる秒数")
     p.add_argument("--time-limit", type=float, default=600.0, help="持ち時間 [s]")
@@ -81,6 +80,7 @@ def main() -> None:
 
     setup_logging()
     kin = KiwiKinematics()
+    tuning = build_tuning(args)
     maze_cfg = load_maze_config()
     maze = Maze(args.size) if args.size else Maze.from_config(maze_cfg)
     maze.set_outer_walls()
@@ -91,6 +91,9 @@ def main() -> None:
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
     log.info("迷路 %dx%d / ゴール %s / 持ち時間 %.0fs / 最大 %d 走",
              maze.size, maze.size, maze.goal_cells(), args.time_limit, args.max_runs)
+    log.info("チューニング: %s", tuning.describe())
+    for warning in check_limits(tuning, kin):
+        log.warning("%s", warning)
 
     with contextlib.ExitStack() as stack:
         import cv2
@@ -105,7 +108,7 @@ def main() -> None:
             emergency_stop(chain, on_stop=lambda sig: log.warning(
                 "シグナル %s を受信。モーターを解放した。", sig))
         )
-        statuses = chain.configure_all(L6470Profile())
+        statuses = chain.configure_all(tuning.profile)
         if any(s in (0x0000, 0xFFFF) for s in statuses):
             log.error("SPI 応答異常 (STATUS=%s)。中止。", [f"0x{s:04X}" for s in statuses])
             return
@@ -122,10 +125,15 @@ def main() -> None:
 
         est = DeadReckoning(kin, x=0.0, y=0.0, phi=heading_rad(Direction.N))
         motion = CellMotion(
-            VelocityDriver(chain, kin), est,
-            config=CellMotionConfig(v_max=args.v, omega_max=args.omega), maze=maze_cfg,
+            VelocityDriver(chain, kin, limits=tuning.limits), est,
+            config=tuning.motion, maze=maze_cfg,
         )
         frame_no = [0]
+
+        # 最初の駆動指令でロータが谷へスナップし車体が最大 0.5° 跳ねる。
+        # カメラで壁・位置を測る前に済ませておく (VelocityDriver.energize 参照)。
+        motion.driver.energize()
+        time.sleep(0.3)
 
         def gyro_rate() -> float | None:
             if imu is None:
@@ -149,9 +157,14 @@ def main() -> None:
             elapsed = time.monotonic() - t0
             if kind:
                 timings.setdefault(kind, []).append(elapsed)
+            faults = describe_faults(chain.get_status_all(), ignore=("UVLO",))
+            if faults:
+                log.warning("    %s: L6470 フォールト %s (トルク不足の疑い)", label, faults)
             along, cross, dphi = motion.residual()
-            log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°",
-                     label, elapsed, along, cross, math.degrees(dphi))
+            log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°%s",
+                     label, elapsed, along, cross, math.degrees(dphi),
+                     "" if motion.retries == 0 else " / やり直し %d 回 (判定時の残量 %+.4f)"
+                     % (motion.retries, motion.retry_remaining))
             deadline = time.monotonic() + args.pause
             while time.monotonic() < deadline:
                 time.sleep(args.dt)
@@ -175,6 +188,9 @@ def main() -> None:
             if yaw is not None:
                 apply_axis_heading(est, yaw.angle_rad)
             off = cell_offset(frame, detector)
+            if off.saturated:
+                log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
+                         "/".join(off.saturated))
             if not off.measured:
                 return
             apply_cell_offset(est, cell_center(cell, maze_cfg.cell_pitch_m),

@@ -92,8 +92,8 @@ def test_envelope_shape():
 
 
 def test_envelope_decel_is_clamped_to_driver_ramp(motion):
-    # 既定 decel 0.4 <= driver ランプ 0.5 なのでそのまま
-    assert motion._decel == pytest.approx(0.4)
+    # 既定の decel は driver ランプ以下なのでそのまま通る
+    assert motion._decel == pytest.approx(motion.cfg.decel_mps2)
     # driver のランプより大きい減速度を指定したらランプ側に丸められる
     kin = KiwiKinematics(config=ROBOT)
     driver = VelocityDriver(FakeChain(), kinematics=kin)
@@ -171,7 +171,9 @@ def test_forward_corrects_lateral_and_heading_disturbance(motion):
     run_until_done(motion)
     along, cross, heading = motion.residual()
     assert abs(along) <= motion.cfg.pos_tol_m
-    assert abs(cross) < 1e-3
+    # 注入した 10mm / 5° に対して十分戻っている。横ずれの上限は「保持の速度上限で
+    # 1 セル走る間に詰められる量」で決まるので、v_max を上げると残りも増える。
+    assert abs(cross) < 0.010 / 4
     assert abs(heading) < math.radians(0.5)
 
 
@@ -251,7 +253,9 @@ def test_turn_absorbs_initial_heading_error(motion):
     motion.est.phi = math.radians(-4.0)         # 基準 0° に対して -4° ずれている
     motion.start_turn_left()
     run_until_done(motion)
-    assert motion.est.phi == pytest.approx(math.pi / 2, abs=motion.cfg.angle_tol_rad)
+    # 終端は許容値で切るが、その後の惰行が乗るので不感帯の幅で見る
+    assert motion.est.phi == pytest.approx(
+        math.pi / 2, abs=motion.cfg.retry_angle_tol_rad)
 
 
 # --- 連結シーケンス --------------------------------------------------------
@@ -286,7 +290,11 @@ def test_gyro_rate_is_used_for_heading(motion):
     else:
         pytest.fail("完了しなかった")
     assert phi_moved                                        # ジャイロ入力が効いている
-    assert abs(motion.residual()[2]) < math.radians(1.0)    # 定常偏差 ≈ drift/k_heading
+    # 定常偏差 ≈ drift/k_heading。整定後の待ち (settle_dwell_s) の間は 0 指令なので
+    # P 制御が効かず、バイアス残りがそのまま積み上がる分も足して見積もる。
+    cfg = motion.cfg
+    bound = drift / cfg.k_heading + drift * cfg.settle_dwell_s
+    assert abs(motion.residual()[2]) < bound * 1.5
     assert abs(motion.residual()[1]) < 2e-3                 # 横ずれも抑えられている
 
 
@@ -295,15 +303,20 @@ def test_turn_compensates_rotational_slip_via_gyro(motion):
     slip = 0.8
     motion.start_turn_left()
     ticks = 0
+    commanded = 0.0
     for _ in range(MAX_TICKS):
         gz = motion.driver.current_velocity[2] * slip   # 実際の回転 = 指令 × slip
+        commanded += motion.driver.current_velocity[2] * DT
         ticks += 1
         if motion.update(DT, gyro_rate=gz):
             break
     else:
         pytest.fail("完了しなかった")
-    assert motion.est.phi == pytest.approx(math.pi / 2, abs=motion.cfg.angle_tol_rad)
-    assert ticks > 67   # スリップ分だけ時間が伸びる (理想は約 67 tick)
+    # 終端は許容値で切るが、その後の惰行が乗るので不感帯の幅で見る
+    assert motion.est.phi == pytest.approx(
+        math.pi / 2, abs=motion.cfg.retry_angle_tol_rad)
+    # 補償の証拠: 実回転を 90° にするために、指令はその 1/slip 倍を出している
+    assert commanded == pytest.approx(math.pi / 2 / slip, rel=0.1)
 
 
 # --- 基準姿勢の操作・中断 --------------------------------------------------
@@ -345,3 +358,55 @@ def test_idle_update_keeps_wheels_stopped(motion):
 
 def _wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+# --- 機械の不感帯 (ガタ) の中はやり直さないこと (#21) ------------------------
+def _turn_settling_into_play(cfg: CellMotionConfig, offset_rad: float):
+    """旋回させ、停止時に機体がガタの帯のどこかへ落ち着く様子を注入する。
+
+    実機 (#21): 旋回を止めると機体はガタの帯 (1.6-2°) の中のどこかに落ち着いて
+    **そこに留まる**。往復して 0 に戻る振動ではないので待っても消えず、車輪を
+    動かしてやり直しても、車輪が動いた先でまた帯のどこかに落ちるだけで詰まらない。
+    どの角速度でも残差 0.9-1.45°、やり直し 12/12 回、改善 0 回だった。
+    """
+    kin = KiwiKinematics(config=ROBOT)
+    motion = CellMotion(VelocityDriver(FakeChain(), kinematics=kin),
+                        DeadReckoning(kin), config=cfg, maze=MAZE)
+    motion.start_turn_left()
+    dropped = False
+    ticks = 0
+    for i in range(MAX_TICKS):
+        gz = motion.driver.current_velocity[2]
+        if motion.phase is not Phase.RUN and not dropped:
+            gz -= offset_rad / DT      # 主軸が終わった瞬間に帯の端へ落ちる (1 tick 分)
+            dropped = True
+        ticks = i + 1
+        if motion.update(DT, gyro_rate=gz):
+            break
+    else:
+        pytest.fail("完了しなかった")
+    return motion, ticks
+
+
+def test_retry_deadband_skips_the_residual_the_play_makes_unfixable():
+    """ガタの帯の内側の残差はやり直さない (追いかけても詰まらないため)。"""
+    play = math.radians(1.2)          # 実機で観測された 0.9-1.45° の真ん中あたり
+    cfg = CellMotionConfig(retry_angle_tol_rad=math.radians(1.6))
+    motion, ticks = _turn_settling_into_play(cfg, play)
+    assert motion.retries == 0
+    # 許容値は超えているが不感帯の内側、という状態で完了している
+    residual = abs(motion.residual()[2])
+    assert cfg.angle_tol_rad < residual <= cfg.retry_angle_tol_rad
+
+    # 不感帯を狭めると (従来の挙動) 追いかけに入り、時間を捨てたうえで詰まらない
+    chasing = CellMotionConfig(retry_angle_tol_rad=cfg.angle_tol_rad)
+    slow, slow_ticks = _turn_settling_into_play(chasing, play)
+    assert slow.retries == 1
+    assert slow_ticks > ticks
+
+
+def test_retry_still_fires_for_a_real_overrun():
+    """不感帯より大きく行き過ぎたら、従来どおりやり直す (安全側は殺さない)。"""
+    cfg = CellMotionConfig()
+    motion, _ticks = _turn_settling_into_play(cfg, math.radians(5.0))
+    assert motion.retries == 1

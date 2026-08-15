@@ -4,11 +4,25 @@
 各辺の ROI と、その中の赤割合・壁有無を画像に重ねて保存する。保存済み画像
 (--image) に対してオフラインで ROI 位置や閾値を追い込める。実機ではライブ取得。
 
+``--measure N`` は**走らせずに機体の姿勢を読む**モード (#21)。機体を止めたまま
+N フレーム撮り、辺ごとの赤割合と帯のずれ、そこから出る前後・左右のずれ、車体の
+軸角を並べる。静止しているのだから値は動いてはいけない。動くならその辺の帯探索が
+別のもの (ケーブルなど) を掴んでいる。定規で機体を既知量ずらして前後で撮れば、
+絶対量の確認にもなる。
+
+**モータ・ホイールの遊びの測り方**: 別端末で ``python -m scripts.teleop`` を
+起動して保持トルクを掛けたまま、車体を手で左いっぱい/右いっぱいに捻り、それぞれで
+``--measure 1`` を撮る。軸角の差が遊びの総量。カメラが測るのは**車体**の向きで、
+実際に進む方向を決めるのは**車輪**なので、この差はどんな方位測定にも乗ってくる
+(1 回の測定では消せないので、校正は必ず複数回の平均で決めること)。
+
 例:
     # 保存画像に対して ROI と判定を可視化
     python -m scripts.wall_detect --image ~/Documents/krilly/red_detect_20260730.png --out /tmp/walls.png
     # ライブ (カメラ)
     python -m scripts.wall_detect --out walls.png --thickness 70 --span 0.5
+    # 位置測定の再現性 (実機・静止のまま 10 フレーム)
+    python -m scripts.wall_detect --measure 10
 
 ROI (front/back/left/right) を自機・ケーブル・支柱の外へ、壁が写る辺に合わせて
 --thickness / --span / --threshold で調整する。カメラ取付の回転に応じて画像の
@@ -23,19 +37,108 @@ import cv2
 import numpy as np
 
 from krilly.logging_config import get_logger, setup_logging
+from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
+from krilly.perception.cell_pose import (
+    OFFSET_MIN_FRACTION,
+    PX_PER_MM_X,
+    PX_PER_MM_Y,
+    CellOffset,
+    cell_offset,
+)
 from krilly.perception.red_wall import RedDetectorConfig, red_mask
 from krilly.perception.wall_detect import (
+    BACK,
     CALIBRATED_RED,
+    FRONT,
+    LEFT,
+    RIGHT,
     WallDetector,
     WallDetectorConfig,
+    calibrated_config,
     calibrated_rois,
 )
 
 log = get_logger("krilly.wall_detect")
 
 
+def measure_repeatability(count: int, interval: float, save_prefix: str | None) -> None:
+    """静止したまま N フレーム撮り、位置測定のばらつきを表にする (#21)。
+
+    帯探索は ROI を ±40px スライドして赤割合が最大の位置を採るので、本物の帯の
+    近くに別の赤 (カメラのリボンケーブルなど) があると、フレームによって掴む対象が
+    入れ替わり、測定値が跳ぶ。静止中のばらつきがそのまま「位置補正がどれだけ嘘を
+    つきうるか」になる。
+    """
+    import time
+
+    from krilly.hal.camera import Camera
+
+    det = WallDetector(calibrated_config())
+    yaw_cfg = calibrated_axis_yaw_config()
+    px_per_mm = {FRONT: PX_PER_MM_Y, BACK: PX_PER_MM_Y,
+                 LEFT: PX_PER_MM_X, RIGHT: PX_PER_MM_X}
+    edges = (FRONT, BACK, LEFT, RIGHT)
+    rows: list[tuple[dict[str, tuple[float, float, bool]], CellOffset]] = []
+    yaws: list[float] = []
+    with Camera() as cam:
+        for i in range(count):
+            if i:
+                time.sleep(interval)
+            frame = cam.capture()
+            measured = det.measure(frame)
+            off = cell_offset(frame, det)
+            yaw = axis_yaw(frame, yaw_cfg)
+            if yaw is not None:
+                yaws.append(yaw.angle_deg)
+            rows.append((
+                {e: (measured[e][0], measured[e][1] / px_per_mm[e], measured[e][2])
+                 for e in edges}, off))
+            if save_prefix:
+                cv2.imwrite(f"{save_prefix}_{i + 1:02d}.png", frame)
+            log.info(
+                "#%02d %s | 前後=%s 左右=%s", i + 1,
+                " ".join("%s %.2f/%+.1fmm%s" % (e, rows[-1][0][e][0], rows[-1][0][e][1],
+                                                "!" if rows[-1][0][e][2] else "")
+                         for e in edges),
+                "--" if off.forward_m is None else "%+.1fmm" % (off.forward_m * 1e3),
+                "--" if off.left_m is None else "%+.1fmm" % (off.left_m * 1e3),
+            )
+            log.info("      軸角 %s (+ = 迷路の軸より CCW)",
+                     "測定不能" if yaw is None else "%+.3f°" % yaw.angle_deg)
+
+    def spread(values: list[float]) -> str:
+        if not values:
+            return "測定なし"
+        lo, hi = min(values), max(values)
+        mean = sum(values) / len(values)
+        return "平均 %+.1fmm 幅 %.1fmm (%.1f〜%.1f)" % (mean, hi - lo, lo, hi)
+
+    log.info("--- 静止中のばらつき (動いていないので幅は 0 であるべき。! = フレーム端で飽和) ---")
+    for e in edges:
+        used = [row[0][e][1] for row in rows
+                if not row[0][e][2]
+                and row[0][e][0] >= max(det.cfg.threshold_for(e), OFFSET_MIN_FRACTION)]
+        saturated = sum(1 for row in rows if row[0][e][2])
+        log.info("%-6s 位置測定に使えたフレーム %d/%d%s  %s",
+                 e, len(used), len(rows),
+                 " (うち飽和で捨てた %d)" % saturated if saturated else "", spread(used))
+    log.info("%-6s %s", "前後", spread([r[1].forward_m * 1e3 for r in rows
+                                        if r[1].forward_m is not None]))
+    log.info("%-6s %s", "左右", spread([r[1].left_m * 1e3 for r in rows
+                                        if r[1].left_m is not None]))
+    if yaws:
+        # 車体の向き。モータ・ホイールの遊びを測るときは、モータに保持トルクを掛けた
+        # まま (別端末で teleop を起動しておく) 車体を左右いっぱいに捻り、その差を読む。
+        log.info("%-6s 平均 %+.3f° 幅 %.3f° (%.3f〜%.3f)  ※迷路の軸に対する車体の向き",
+                 "軸角", sum(yaws) / len(yaws), max(yaws) - min(yaws), min(yaws), max(yaws))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="セル壁判定の可視化")
+    p.add_argument("--measure", type=int, default=0, metavar="N",
+                   help="静止したまま N フレーム撮り、位置測定の再現性を表示する")
+    p.add_argument("--interval", type=float, default=0.3, help="--measure のフレーム間隔 [s]")
+    p.add_argument("--save-prefix", default=None, help="--measure のフレーム保存先プレフィクス")
     p.add_argument("--image", default=None, help="入力画像 (未指定ならカメラ取得)")
     p.add_argument("--out", default="walls.png", help="注釈画像の保存先")
     p.add_argument("--threshold", type=float, default=0.15, help="壁ありとみなす赤割合")
@@ -44,6 +147,9 @@ def main() -> None:
     args = p.parse_args()
 
     setup_logging()
+    if args.measure:
+        measure_repeatability(args.measure, args.interval, args.save_prefix)
+        return
     if args.image:
         frame = cv2.imread(args.image)
         if frame is None:

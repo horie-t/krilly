@@ -33,9 +33,10 @@ from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import quarter_turns
 from krilly.strategy.flood_fill import accessible_directions
 
-# 実機実測: 直進 1 セルあたり 1.50s / 90°ターン 2.56s -> 旋回 1 回 ≈ 1.7 セル。
+# 実機実測 (#21 の採用点): 直進 1 セルあたり 0.75s / 90°ターン 2.18s -> 旋回 1 回 ≈ 2.9 セル。
+# 直進を速くしたぶん旋回が相対的に高くつくようになった (#20 時点は 1.7)。
 # 速度設定 (CellMotionConfig / --omega) を変えたら測り直すこと。
-DEFAULT_TURN_COST = 1.7
+DEFAULT_TURN_COST = 2.9
 
 
 @dataclass(frozen=True)

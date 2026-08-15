@@ -150,6 +150,44 @@ def accel_to_register(steps_per_sec2: float) -> int:
     return _clamp(round(steps_per_sec2 * _ACC_COEF), 12)
 
 
+# STATUS のフォールトビット (すべて active-low: 0 = イベント発生)。表示順に並べる。
+FAULT_BITS: tuple[tuple[int, str], ...] = (
+    (9, "UVLO"),
+    (10, "TH_WRN"),
+    (11, "TH_SD"),
+    (12, "OCD"),
+    (13, "STEP_LOSS_A"),
+    (14, "STEP_LOSS_B"),
+)
+
+# SPI が通っていないときに :func:`fault_flags` が返す擬似フラグ。
+NO_SPI = "NO_SPI"
+
+_FAULT_LABEL = {
+    "UVLO": "UVLO(低電圧)",
+    "TH_WRN": "TH_WRN(熱警告)",
+    "TH_SD": "TH_SD(熱遮断)",
+    "OCD": "OCD(過電流)",
+    "STEP_LOSS_A": "STEP_LOSS_A",
+    "STEP_LOSS_B": "STEP_LOSS_B",
+}
+
+
+def fault_flags(status: int) -> set[str]:
+    """STATUS に立っているフォールト名の集合を返す (active-low を解釈済み)。
+
+    GetStatus はフラグを**読み出しでクリアする**ので、動作の前後で読めば
+    「その動作の間に起きたか」を切り分けられる (#21 の速度・トルク調整で、
+    速度を上げたときに STEP_LOSS/OCD が出ないかを動作ごとに見るのに使う)。
+
+    STEP_LOSS_A/B は L6470 の BEMF によるストール検出で、低速では感度が低く
+    見逃しもある。「出たら確実に異常」だが「出なければ無事」とは言い切れない。
+    """
+    if status in (0x0000, 0xFFFF):
+        return {NO_SPI}
+    return {name for bit, name in FAULT_BITS if not (status >> bit) & 1}
+
+
 def decode_status(status: int, first_read: bool = False) -> str:
     """16-bit の STATUS register を人間が読める形に要約する。
 
@@ -163,20 +201,15 @@ def decode_status(status: int, first_read: bool = False) -> str:
         return ("★SPI通信不可の可能性 (応答が全ビット %s)。正常なら 0x7C03 付近。"
                 "配線(MISO/MOSI/SCK/CS/GND)・電源(VDD/VS)・SPI有効化・CE番号を確認"
                 % ("0" if status == 0x0000 else "1"))
+    raised = fault_flags(status)
     flags = []
-    if not (status >> 9) & 1:
-        flags.append("UVLO(初回読み出しなら電源投入時の正常フラグ)"
-                     if first_read else "UVLO(低電圧)")
-    if not (status >> 10) & 1:
-        flags.append("TH_WRN(熱警告)")
-    if not (status >> 11) & 1:
-        flags.append("TH_SD(熱遮断)")
-    if not (status >> 12) & 1:
-        flags.append("OCD(過電流)")
-    if not (status >> 13) & 1:
-        flags.append("STEP_LOSS_A")
-    if not (status >> 14) & 1:
-        flags.append("STEP_LOSS_B")
+    for _, name in FAULT_BITS:
+        if name not in raised:
+            continue
+        if name == "UVLO" and first_read:
+            flags.append("UVLO(初回読み出しなら電源投入時の正常フラグ)")
+        else:
+            flags.append(_FAULT_LABEL[name])
     if status & 1:
         flags.append("HiZ(出力停止)")
     return ", ".join(flags) if flags else "フォールトなし"
@@ -192,8 +225,10 @@ class L6470Profile:
 
     step_mode: int = STEP_MODE_1_16
     max_speed_steps_s: float = 400.0      # 200 step/rev で約 2 rev/s
-    acc_steps_s2: float = 1000.0
-    dec_steps_s2: float = 1000.0
+    # ソフト側のランプ (RampLimits) より緩くしておく。0.9 m/s^2 + 8 rad/s^2 の
+    # ピークは約 1640 step/s^2 なので 2000 (#21)。
+    acc_steps_s2: float = 2000.0
+    dec_steps_s2: float = 2000.0
     kval_hold: int = 0x20                 # Vs の約 12.5 %
     kval_run: int = 0x40                  # 約 25 %
     kval_acc: int = 0x40

@@ -81,11 +81,17 @@ class Kind(Enum):
 class CellMotionConfig:
     """1セル動作のチューニング定数 (既定値は脱調しにくい保守的な値)。"""
 
-    # 主軸の速度上限と減速エンベロープ
-    v_max: float = 0.12                    # 前進の最大速度 [m/s]
-    omega_max: float = 1.5                 # 旋回の最大角速度 [rad/s]
-    decel_mps2: float = 0.4                # 前進の減速度 [m/s^2] (driver ランプ以下に丸める)
-    angular_decel_radps2: float = 4.0      # 旋回の角減速度 [rad/s^2] (同上)
+    # 主軸の速度上限と減速エンベロープ (#21 の実機ラダーで決めた採用点)。
+    # 直進: v=0.12/0.18/0.24/0.30 を 4 セル直進で比較。所要は理論値どおり縮み
+    # (6.25/4.27/3.29/2.69s)、距離誤差は v>=0.24 で 720mm あたり平均 -5mm・幅 ±4mm、
+    # v<=0.18 では ±2mm。0.30 は 0.24 に対し 4 セルで 0.5s しか稼げず MAX_SPEED の
+    # 余裕も衝突エネルギーも悪くなるので 0.24 を採る。
+    # 旋回: omega=1.5/2.0/2.5 で 1 回あたり 1.83/1.56/1.67s、方位誤差 (4 回転計) は
+    # -0.60/-0.36/-0.50°。2.0 が最速かつ最も正確で、2.5 は速くならずやり直しも増える。
+    v_max: float = 0.24                    # 前進の最大速度 [m/s]
+    omega_max: float = 2.0                 # 旋回の最大角速度 [rad/s]
+    decel_mps2: float = 0.8                # 前進の減速度 [m/s^2] (driver ランプ以下に丸める)
+    angular_decel_radps2: float = 7.0      # 旋回の角減速度 [rad/s^2] (同上)
 
     # 主軸以外の保持ゲイン (P 制御)
     k_cross: float = 3.0                   # 横ずれ[m] -> vy [1/s]
@@ -107,6 +113,27 @@ class CellMotionConfig:
     angle_tol_rad: float = math.radians(0.3)   # 旋回の残角許容 [rad]
     settled_v: float = 1e-3                # 整定判定の速度しきい値 [m/s]
     settled_omega: float = 1e-2            # 整定判定の角速度しきい値 [rad/s]
+    # 指令が 0 になってから残差を判定するまで待つ秒数。整定判定が見ているのは
+    # **指令値**なので、指令が 0 になった時点では機体はまだ動いている。指令のランプが
+    # 実際に効き終わるまでの分だけ待つ。
+    # (#21: 当初これを 0.25s にして「ガタの揺れ戻りを残量と誤読している」仮説を試したが、
+    #  実機ではやり直しが 12/12 回そのまま発生し時間だけ悪化した。揺れは往復して 0 に
+    #  戻る振動ではなく、機体がガタの帯のどこかに落ち着いて留まる。待っても消えない。)
+    settle_dwell_s: float = 0.10
+
+    # **やり直し**の判定に使う残量。上の許容値より緩くする。
+    #
+    # オムニホイールのローラーは、ホイールの回転方向に 0.5-1.0mm の遊びを持つ (実測)。
+    # 接地点は機体中心から center_to_wheel_m = 45.07mm なので、車体は制御と無関係に
+    #     θ = 遊び / 45.07mm = 0.64° (0.5mm) 〜 1.27° (1.0mm)
+    # だけ自由に回れる。この帯の中では、車輪を動かしても車体は帯のどこかへ落ちるだけで
+    # 残差は詰まらない。実測もそのとおりで、旋回はどの角速度でも残差 0.9-1.45° に
+    # 落ち着き (= 片側 0.64-1.27° の中)、やり直しは 12/12 回発生して 1 回も改善せず、
+    # 1 旋回あたり 0.8s を捨てていた。既定値は片側の上限 1.27° のすぐ外側に置く。
+    # 遊びは 1 動作あたりの精度の下限を決めるだけで、方位は apply_axis_heading、位置は
+    # apply_cell_offset が毎セル絶対補正するので累積はしない (issue #72)。
+    retry_pos_tol_m: float = 0.004                 # 前進のやり直し判定 [m]
+    retry_angle_tol_rad: float = math.radians(1.6)  # 旋回のやり直し判定 [rad]
     retry_v_max: float = 0.03              # やり直し時の速度上限 [m/s]
     retry_omega_max: float = 0.4           # やり直し時の角速度上限 [rad/s]
     max_retries: int = 1                   # 整定後に残っていた場合のやり直し回数
@@ -144,6 +171,22 @@ class CellMotion:
         self._angle_remaining = 0.0   # 旋回の残角 [rad] (実回転分を差し引いていく)
         self._phi_prev = estimator.phi
         self._retries = 0
+        self._settle_elapsed = 0.0    # 指令が 0 になってからの経過 [s]
+        self._retry_remaining = 0.0   # やり直しを決めた時点の残量 (不感帯の調整用)
+
+    @property
+    def retries(self) -> int:
+        """このプリミティブでやり直した回数 (0 が正常。増えるなら整定が足りない)。"""
+        return self._retries
+
+    @property
+    def retry_remaining(self) -> float:
+        """やり直しを決めた時点の残量 (最後の 1 回)。不感帯を決めるための実測値。
+
+        完了時の残差はやり直し**後**の値なので、これを見ないと
+        ``retry_pos_tol_m`` / ``retry_angle_tol_rad`` を実測から詰められない。
+        """
+        return self._retry_remaining
 
     # -- 基準姿勢 -----------------------------------------------------------
     @property
@@ -273,7 +316,7 @@ class CellMotion:
             self.est.update_wheel_speeds(wheel_mps, dt)
         else:
             self.est.update_with_gyro_rate(wheel_mps, gyro_rate, dt)
-        self._advance_phase(cur)
+        self._advance_phase(cur, dt)
         return self.done
 
     def _command(self, dt: float) -> None:
@@ -310,7 +353,7 @@ class CellMotion:
             return v
         return math.copysign(max(abs(v), floor), remaining)
 
-    def _advance_phase(self, cur: tuple[float, float, float]) -> None:
+    def _advance_phase(self, cur: tuple[float, float, float], dt: float = 0.0) -> None:
         """残量・整定状況から状態遷移する (旋回の残角もここで減らす)。"""
         # 実回転分を残角から差し引く (180°以上の旋回でも符号が反転しないように
         # 絶対方位の差ではなく積算で持つ)
@@ -322,6 +365,7 @@ class CellMotion:
         if self._phase is Phase.RUN:
             if abs(self.remaining) <= self._tolerance():
                 self._phase = Phase.SETTLE
+                self._settle_elapsed = 0.0
                 self.driver.stop()
             return
         if self._phase is Phase.SETTLE:
@@ -331,13 +375,28 @@ class CellMotion:
                 and abs(omega) <= self.cfg.settled_omega
             )
             if not settled:
+                self._settle_elapsed = 0.0
+                return
+            # 指令が 0 でも機体はしばらく揺れている。揺れが収まるまで残差を見ない
+            # (見るとガタの弾性的な戻りを「残量」と誤読してやり直しに入る)。
+            self._settle_elapsed += dt
+            if self._settle_elapsed < self.cfg.settle_dwell_s:
                 return
             # 整定後にまだ残っていれば低速でやり直す (惰行分の詰め直し)
-            if abs(self.remaining) > self._tolerance() and self._retries < self.cfg.max_retries:
+            if (abs(self.remaining) > self._retry_tolerance()
+                    and self._retries < self.cfg.max_retries):
+                self._retry_remaining = self.remaining
                 self._retries += 1
+                self._settle_elapsed = 0.0
                 self._phase = Phase.RUN
             else:
                 self._phase = Phase.DONE
 
     def _tolerance(self) -> float:
+        """主軸を詰めるのをやめる (整定へ移る) 残量。"""
         return self.cfg.pos_tol_m if self._kind is Kind.FORWARD else self.cfg.angle_tol_rad
+
+    def _retry_tolerance(self) -> float:
+        """やり直すかどうかの残量。機械の不感帯より内側は追いかけない。"""
+        return (self.cfg.retry_pos_tol_m if self._kind is Kind.FORWARD
+                else self.cfg.retry_angle_tol_rad)
