@@ -98,21 +98,27 @@ def test_token_moves_reference_as_expected(motion, text, expect_ref):
     assert math.cos(phi - expect_ref[2]) == pytest.approx(1.0, abs=1e-12)  # ±π を同一視
 
 
-# --- カメラ実測の世界成分 (#21) --------------------------------------------
-def test_world_components_maps_body_axes_to_maze_axes():
-    """理想格子上の方位は 90° の倍数なので、車体軸はそのまま世界軸になる。"""
-    # 北向き: 前 = 北、左 = 西 (= 東の負)
+# --- カメラ実測の格子成分 (#21) --------------------------------------------
+def test_world_components_uses_the_base_pose_axes():
+    """成分名は base_phi から見た前後/左右。迷路の東西南北ではない。"""
+    # 基準と同じ向き: 前後・左右がそのまま
+    assert world_components(0.01, 0.002, 0.0) == pytest.approx({"前後": 0.01, "左右": 0.002})
+    # 基準から左 90° を向いている: 機体の前 = 基準の左
     assert world_components(0.01, 0.002, math.pi / 2) == pytest.approx(
-        {"北": 0.01, "東": -0.002})
-    # 東向き: 前 = 東、左 = 北
-    assert world_components(0.01, 0.002, 0.0) == pytest.approx({"東": 0.01, "北": 0.002})
-    # 南向き: 前 = 南 (北の負)、左 = 東
-    assert world_components(0.01, 0.002, -math.pi / 2) == pytest.approx(
-        {"北": -0.01, "東": 0.002})
+        {"左右": 0.01, "前後": -0.002})
+    # 基準から 180°: 両軸が反転する
+    assert world_components(0.01, 0.002, math.pi) == pytest.approx(
+        {"前後": -0.01, "左右": -0.002})
+
+
+def test_world_components_base_phi_is_relative():
+    """φ=0 始まりでない推定器でも、基準との相対だけで決まる。"""
+    assert world_components(0.01, 0.002, math.pi / 2, math.pi / 2) == pytest.approx(
+        {"前後": 0.01, "左右": 0.002})
 
 
 def test_world_components_drops_unmeasured_axes():
     """測れなかった軸はキーごと落とす (差分で「測っていない方向」を混ぜないため)。"""
-    assert world_components(0.01, None, math.pi / 2) == {"北": 0.01}
-    assert world_components(None, 0.01, math.pi / 2) == {"東": -0.01}
+    assert world_components(0.01, None, 0.0) == {"前後": 0.01}
+    assert world_components(None, 0.01, 0.0) == {"左右": 0.01}
     assert world_components(None, None, 0.0) == {}

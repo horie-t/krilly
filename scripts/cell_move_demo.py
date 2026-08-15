@@ -85,26 +85,34 @@ class Move:
         TOKENS[self.token][1](motion, self.count)
 
 
-# 車体軸の世界方向 (理想格子上の phi は 90° の倍数) -> (軸名, 符号)
-WORLD_AXIS = {(1, 0): ("東", 1), (-1, 0): ("東", -1), (0, 1): ("北", 1), (0, -1): ("北", -1)}
+ALONG, CROSS = "前後", "左右"
+
+# 基準姿勢から見た車体軸の向き (理想格子上なので 90° の倍数) -> (軸名, 符号)
+GRID_AXIS = {(1, 0): (ALONG, 1), (-1, 0): (ALONG, -1),
+             (0, 1): (CROSS, 1), (0, -1): (CROSS, -1)}
 
 
 def world_components(
-    forward_m: float | None, left_m: float | None, phi: float
+    forward_m: float | None, left_m: float | None, phi: float, base_phi: float = 0.0
 ) -> dict[str, float]:
-    """車体フレームのずれ (m) を世界成分 ``{"東": …, "北": …}`` に直す。
+    """車体フレームのずれ (m) を ``base_phi`` の車体軸へ直す。
 
-    ``phi`` は**理想格子上の**方位なので必ず 90° の倍数で、車体軸はそのまま
-    世界軸に対応する (成分が混ざらない)。測れなかった軸はキーごと落とすので、
-    動作の前後で共通する軸だけを引き算すれば「測ってもいない方向」を混ぜずに
-    済む。
+    軸名は ``base_phi`` (ふつうはシーケンス開始時の姿勢) から見た **前後 / 左右**。
+    このスクリプトの推定器は φ=0 で始まる (基準は迷路の北ではなく**置いたときの
+    機体の向き**) ので、迷路の東西南北で呼ぶと意味が逆になる。
+
+    ``phi`` は**理想格子上の**方位なので ``base_phi`` との差は必ず 90° の倍数で、
+    車体軸はそのまま基準軸に対応する (成分が混ざらない)。測れなかった軸はキーごと
+    落とすので、動作の前後で共通する軸だけを引き算すれば「測ってもいない方向」の
+    誤差をでっち上げずに済む。
     """
-    c, s = round(math.cos(phi)), round(math.sin(phi))
+    rel = phi - base_phi
+    c, s = round(math.cos(rel)), round(math.sin(rel))
     out: dict[str, float] = {}
     for value, vec in ((forward_m, (c, s)), (left_m, (-s, c))):
         if value is None:
             continue
-        name, sign = WORLD_AXIS[vec]
+        name, sign = GRID_AXIS[vec]
         out[name] = value * sign
     return out
 
@@ -311,18 +319,20 @@ def main() -> None:
             # セル内のずれを世界成分に直して引き算する。理想格子上の移動量は
             # 定義どおり正確なので、差分がそのまま「理想との差 = 実機の誤差」になる。
             # 前後で共通して測れた軸だけを比べる (片方しか無い軸は根拠が無い)。
+            base_phi = pose_before[1]
             before = world_components(pose_before[0].forward_m, pose_before[0].left_m,
-                                      pose_before[1])
+                                      base_phi, base_phi)
             after = world_components(pose_after[0].forward_m, pose_after[0].left_m,
-                                     pose_after[1])
-            common = [k for k in ("東", "北") if k in before and k in after]
+                                     pose_after[1], base_phi)
+            common = [k for k in (ALONG, CROSS) if k in before and k in after]
             if common:
-                log.info("理想格子からのずれ (カメラ実測の差分): %s",
+                log.info("理想格子からのずれ (カメラ実測の差分、開始時の機体軸で): %s"
+                         "  (前後 + = 行き過ぎ / 左右 + = 左へずれた)",
                          " ".join("%s %+.1fmm" % (k, (after[k] - before[k]) * 1e3)
                                   for k in common))
-            missing = [k for k in ("東", "北") if k not in common]
+            missing = [k for k in (ALONG, CROSS) if k not in common]
             if missing:
-                log.info("  %s 方向は前後どちらかで測れなかったので比較しない",
+                log.info("  %s 方向は動作の前後どちらかで測れなかったので比較しない",
                          "/".join(missing))
         if yaw_before is not None and yaw_after is not None:
             # 軸は 90° 周期なので、ジャイロ側の総回転も同じ折り返しで比べる
