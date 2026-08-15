@@ -115,3 +115,17 @@ def test_pure_rotation_all_same_speed_and_dir(driver):
     assert dirs == [FWD, FWD, FWD]           # +omega=CCW は 3 輪とも正回転
     assert hz[1] == pytest.approx(hz[0])
     assert hz[2] == pytest.approx(hz[0])
+
+
+def test_energize_commands_zero_without_moving():
+    """励磁だけ掛ける: 3輪へ速度 0 の Run を出し、ランプ状態は変えない (#21)。"""
+    chain = FakeChain()
+    driver = VelocityDriver(chain, KiwiKinematics(config=CFG))
+    driver.set_velocity(0.2, 0.0, 0.0)
+    driver.energize()
+    assert chain.calls, "run_all が呼ばれていない"
+    _dirs, speeds = chain.calls[-1]
+    assert speeds == pytest.approx([0.0, 0.0, 0.0])
+    # 目標も現在値も触らない (次の update から通常どおりランプする)
+    assert driver.current_velocity == (0.0, 0.0, 0.0)
+    assert driver.target_velocity == (0.2, 0.0, 0.0)

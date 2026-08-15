@@ -130,6 +130,11 @@ def main() -> None:
         )
         frame_no = [0]
 
+        # 最初の駆動指令でロータが谷へスナップし車体が最大 0.5° 跳ねる。
+        # カメラで壁・位置を測る前に済ませておく (VelocityDriver.energize 参照)。
+        motion.driver.energize()
+        time.sleep(0.3)
+
         def gyro_rate() -> float | None:
             if imu is None:
                 return None

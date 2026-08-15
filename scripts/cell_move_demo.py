@@ -157,6 +157,8 @@ def main() -> None:
     add_tuning_args(p, omega=1.5)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.5, help="プリミティブ間の停止秒数")
+    p.add_argument("--settle", type=float, default=0.3,
+                   help="励磁してから初期姿勢を測るまでの待ち [s]")
     p.add_argument("--no-imu", action="store_true", help="ジャイロ融合せずオドメトリのみ")
     p.add_argument("--gyro-sign", type=float, default=1.0, help="ジャイロz符号 (+1/-1)")
     p.add_argument("--gyro-scale", type=float, default=None,
@@ -304,6 +306,10 @@ def main() -> None:
         log.info("シーケンス %s を実行 (1セル=%.3fm)",
                  " ".join(m.label for m in seq), motion.cell_pitch_m)
         chain.get_status_all()   # 電源投入時の UVLO ラッチを捨てて以降の差分を見る
+        # 姿勢を測る前に励磁を済ませる。最初の駆動指令でロータが谷へスナップし車体が
+        # 最大 0.5° 跳ねるので、測ってから跳ねると「走行中の回転」に化ける。
+        driver.energize()
+        time.sleep(args.settle)
         yaw_before = measure_yaw("before")
         pose_before = measure_pose("before")
         phi_before = est.phi
