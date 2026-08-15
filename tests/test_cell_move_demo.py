@@ -9,7 +9,7 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.velocity_driver import VelocityDriver
-from scripts.cell_move_demo import TOKENS, parse_seq, wrapped_deg
+from scripts.cell_move_demo import Move, parse_seq, wrapped_deg
 
 ROBOT = RobotConfig(
     wheel_diameter_m=0.048,
@@ -45,9 +45,29 @@ def motion():
 
 # --- シーケンス解析 --------------------------------------------------------
 def test_parse_seq_accepts_both_notations():
-    assert parse_seq("F,L,F") == ["F", "L", "F"]
-    assert parse_seq("FLF") == ["F", "L", "F"]
-    assert parse_seq("f, l ,r") == ["F", "L", "R"]
+    assert parse_seq("F,L,F") == [Move("F"), Move("L"), Move("F")]
+    assert parse_seq("FLF") == [Move("F"), Move("L"), Move("F")]
+    assert parse_seq("f, l ,r") == [Move("F"), Move("L"), Move("R")]
+
+
+def test_parse_seq_counts():
+    """数字は「1 動作で何セル/何回転」。U は L2 の別名 (#21)。"""
+    assert parse_seq("F4") == [Move("F", 4)]
+    assert parse_seq("F4,L,B2") == [Move("F", 4), Move("L"), Move("B", 2)]
+    assert parse_seq("U") == [Move("L", 2)]
+    assert parse_seq("U2") == [Move("L", 4)]
+
+
+def test_move_labels():
+    assert Move("F", 4).label == "4セル前進"
+    assert Move("R").label == "右90°"
+    assert Move("L", 2).label == "左180°"
+
+
+@pytest.mark.parametrize("text", ["F0", "4F", "F,X", ""])
+def test_parse_seq_rejects_bad_input(text):
+    with pytest.raises(SystemExit):
+        parse_seq(text)
 
 
 def test_wrapped_deg_normalises_accumulated_heading():
@@ -57,25 +77,22 @@ def test_wrapped_deg_normalises_accumulated_heading():
     assert wrapped_deg(math.radians(450.0)) == pytest.approx(90.0)
 
 
-def test_parse_seq_rejects_unknown_token():
-    with pytest.raises(SystemExit):
-        parse_seq("F,X")
-
-
 # --- トークン -> 基準姿勢の進み方 ------------------------------------------
 @pytest.mark.parametrize(
-    "token, expect_ref",
+    "text, expect_ref",
     [
         ("F", (0.180, 0.0, 0.0)),
         ("B", (-0.180, 0.0, 0.0)),
         ("L", (0.0, 0.0, math.pi / 2)),
         ("R", (0.0, 0.0, -math.pi / 2)),
         ("U", (0.0, 0.0, math.pi)),
+        ("F4", (0.720, 0.0, 0.0)),
+        ("R2", (0.0, 0.0, math.pi)),
     ],
 )
-def test_token_moves_reference_as_expected(motion, token, expect_ref):
-    _label, start = TOKENS[token]
-    start(motion)
+def test_token_moves_reference_as_expected(motion, text, expect_ref):
+    (move,) = parse_seq(text)
+    move.start(motion)
     x, y, phi = motion.reference
     assert (x, y) == pytest.approx(expect_ref[:2])
     assert math.cos(phi - expect_ref[2]) == pytest.approx(1.0, abs=1e-12)  # ±π を同一視

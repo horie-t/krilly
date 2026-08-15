@@ -17,8 +17,14 @@
     python -m scripts.cell_move_demo --seq U --no-imu      # 180°ターンをオドメトリのみで
     python -m scripts.cell_move_demo --v 0.08 --omega 1.0  # ゆっくり
     python -m scripts.cell_move_demo --seq L --camera-yaw   # 90°ターンの方位をカメラで実測
+    python -m scripts.cell_move_demo --seq F4               # 4セルを 1 動作で (速度調整用)
+    python -m scripts.cell_move_demo --v 0.24 --accel 0.8 --decel 0.8 --max-speed 600
 
-シーケンスのトークン: F=1セル前進 / B=1セル後退 / L=左90° / R=右90° / U=180°
+シーケンスのトークン: F=前進 / B=後退 / L=左90° / R=右90° / U=180°。
+数字を付けると 1 動作でその回数ぶん動く (``F4``=4セルを 1 動作、``L2``=180°)。
+``F,F,F,F`` (4 動作) と ``F4`` (1 動作) の比較が、距離誤差がスケール由来か
+動作あたりの固定オーバーラン由来かの切り分けになる (#21)。
+
 配線: L6470×3 デイジーチェーン + BNO055 (I2C 0x28)。座標系 +x前 / +y左 / +omega=CCW。
 """
 
@@ -27,16 +33,18 @@ from __future__ import annotations
 import argparse
 import contextlib
 import math
+import re
 import time
+from dataclasses import dataclass
 
 from krilly.hal.imu import Bno055Imu
-from krilly.hal.l6470 import L6470Profile
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.logging_config import get_logger, setup_logging
-from krilly.motion.cell_motion import CellMotion, CellMotionConfig
+from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
+from krilly.motion.tuning import add_tuning_args, build_tuning, check_limits, describe_faults
 from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.axis_yaw import (
     AxisYaw,
@@ -49,12 +57,30 @@ from krilly.perception.axis_yaw import (
 log = get_logger("krilly.cell_move_demo")
 
 TOKENS = {
-    "F": ("1セル前進", lambda m: m.start_forward_cells(1)),
-    "B": ("1セル後退", lambda m: m.start_forward_cells(-1)),
-    "L": ("左90°", lambda m: m.start_turn_left()),
-    "R": ("右90°", lambda m: m.start_turn_right()),
-    "U": ("180°", lambda m: m.start_turn_left(2)),
+    "F": ("%dセル前進", lambda m, n: m.start_forward_cells(n)),
+    "B": ("%dセル後退", lambda m, n: m.start_forward_cells(-n)),
+    "L": ("左%d°", lambda m, n: m.start_turn_left(n)),
+    "R": ("右%d°", lambda m, n: m.start_turn_right(n)),
 }
+# U は L2 (180°) の別名。過去のシーケンス表記との互換のため残す。
+ALIASES = {"U": ("L", 2)}
+
+
+@dataclass(frozen=True)
+class Move:
+    """1 動作 (トークンと回数)。``F4`` なら 4 セルを **1 動作で** 進む。"""
+
+    token: str
+    count: int = 1
+
+    @property
+    def label(self) -> str:
+        fmt = TOKENS[self.token][0]
+        # 回転は角度で書いた方が読みやすい (L2 -> 左180°)
+        return fmt % (self.count * 90 if self.token in ("L", "R") else self.count)
+
+    def start(self, motion) -> None:
+        TOKENS[self.token][1](motion, self.count)
 
 
 def wrapped_deg(rad: float) -> float:
@@ -66,13 +92,26 @@ def wrapped_deg(rad: float) -> float:
     return math.degrees((rad + math.pi) % (2 * math.pi) - math.pi)
 
 
-def parse_seq(text: str) -> list[str]:
-    """"F,L,F" / "FLF" いずれの書き方も受け付けてトークン列にする。"""
-    tokens = [t.strip().upper() for t in text.replace(",", "") if not t.isspace()]
-    bad = [t for t in tokens if t not in TOKENS]
-    if bad:
-        raise SystemExit(f"未知のトークン {bad} (使えるのは {'/'.join(TOKENS)})")
-    return tokens
+def parse_seq(text: str) -> list[Move]:
+    """"F,L,F" / "FLF" / "F4,L" いずれの書き方も受け付けて動作列にする。"""
+    cleaned = "".join(text.upper().split()).replace(",", "")
+    if not re.fullmatch(r"(?:[A-Z]\d*)+", cleaned):
+        raise SystemExit(f"シーケンスの書式が不正: {text!r} (例: F,L,F / FLF / F4,L)")
+    moves: list[Move] = []
+    for token, digits in re.findall(r"([A-Z])(\d*)", cleaned):
+        token, factor = ALIASES.get(token, (token, 1))
+        if token not in TOKENS:
+            raise SystemExit(
+                f"未知のトークン {token!r} "
+                f"(使えるのは {'/'.join(TOKENS)}{'/' + '/'.join(ALIASES)})"
+            )
+        count = (int(digits) if digits else 1) * factor
+        if count < 1:
+            raise SystemExit(f"回数は 1 以上にすること: {token}{digits}")
+        moves.append(Move(token, count))
+    if not moves:
+        raise SystemExit(f"シーケンスが空: {text!r}")
+    return moves
 
 
 def main() -> None:
@@ -80,9 +119,8 @@ def main() -> None:
     p.add_argument("--devices", type=int, default=3, help="連結台数")
     p.add_argument("--bus", type=int, default=0, help="SPI バス (既定 0)")
     p.add_argument("--device", type=int, default=0, help="SPI デバイス/CE (既定 0)")
-    p.add_argument("--seq", default="F,L,F,R", help="動作シーケンス (F/B/L/R/U)")
-    p.add_argument("--v", type=float, default=0.12, help="前進の最大速度 [m/s]")
-    p.add_argument("--omega", type=float, default=1.5, help="旋回の最大角速度 [rad/s]")
+    p.add_argument("--seq", default="F,L,F,R", help="動作シーケンス (F/B/L/R/U、数字で回数)")
+    add_tuning_args(p, omega=1.5)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.5, help="プリミティブ間の停止秒数")
     p.add_argument("--no-imu", action="store_true", help="ジャイロ融合せずオドメトリのみ")
@@ -100,8 +138,11 @@ def main() -> None:
     setup_logging()
     seq = parse_seq(args.seq)
     kin = KiwiKinematics()
-    cfg = CellMotionConfig(v_max=args.v, omega_max=args.omega)
+    tuning = build_tuning(args)
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
+    log.info("チューニング: %s", tuning.describe())
+    for warning in check_limits(tuning, kin):
+        log.warning("%s", warning)
 
     with contextlib.ExitStack() as stack:
         chain = stack.enter_context(
@@ -111,7 +152,7 @@ def main() -> None:
             emergency_stop(chain, on_stop=lambda sig: log.warning(
                 "シグナル %s を受信。モーターを解放した。", sig))
         )
-        statuses = chain.configure_all(L6470Profile())
+        statuses = chain.configure_all(tuning.profile)
         if any(s in (0x0000, 0xFFFF) for s in statuses):
             log.error("SPI 応答異常 (STATUS=%s)。配線/電源を確認。中止。",
                       [f"0x{s:04X}" for s in statuses])
@@ -133,9 +174,9 @@ def main() -> None:
             camera = stack.enter_context(Camera())
         yaw_cfg = calibrated_axis_yaw_config()
 
-        driver = VelocityDriver(chain, kin)
+        driver = VelocityDriver(chain, kin, limits=tuning.limits)
         est = DeadReckoning(kin)
-        motion = CellMotion(driver, est, config=cfg)
+        motion = CellMotion(driver, est, config=tuning.motion)
 
         def gyro_rate() -> float | None:
             """バイアス減算・符号・スケール補正を掛けた角速度 [rad/s]。"""
@@ -163,7 +204,7 @@ def main() -> None:
                          tag, result.angle_deg, result.segments, result.total_length_px)
             return result
 
-        def run_primitive(label: str) -> None:
+        def run_primitive(label: str, timeout: float) -> None:
             """完了 (または timeout) までループを回す。update は純計算なので寝るのはここ。"""
             t0 = time.monotonic()
             last = t0
@@ -174,11 +215,16 @@ def main() -> None:
                 last = now
                 if motion.update(dt, gyro_rate=gyro_rate()):
                     break
-                if now - t0 > args.timeout:
+                if now - t0 > timeout:
                     log.warning("%s: %.1fs で終わらず打ち切り (残量 %.4f)",
-                                label, args.timeout, motion.remaining)
+                                label, timeout, motion.remaining)
                     motion.abort()
                     break
+            faults = describe_faults(chain.get_status_all(), ignore=("UVLO",))
+            if faults:
+                log.warning("%s: L6470 フォールト %s "
+                            "(STEP_LOSS/OCD なら速度・加速度に対してトルクが不足)",
+                            label, faults)
             x, y, phi = est.pose
             rx, ry, rphi = motion.reference
             along, cross, dphi = motion.residual()
@@ -198,14 +244,16 @@ def main() -> None:
                 now = time.monotonic(); dt = now - last; last = now
                 motion.update(dt, gyro_rate=gyro_rate())
 
-        log.info("シーケンス %s を実行 (1セル=%.3fm)", "".join(seq), motion.cell_pitch_m)
+        log.info("シーケンス %s を実行 (1セル=%.3fm)",
+                 " ".join(m.label for m in seq), motion.cell_pitch_m)
+        chain.get_status_all()   # 電源投入時の UVLO ラッチを捨てて以降の差分を見る
         yaw_before = measure_yaw("before")
         phi_before = est.phi
-        for i, token in enumerate(seq, 1):
-            label, start = TOKENS[token]
-            log.info("[%d/%d] %s 開始", i, len(seq), label)
-            start(motion)
-            run_primitive(f"[{i}/{len(seq)}] {label}")
+        for i, move in enumerate(seq, 1):
+            log.info("[%d/%d] %s 開始", i, len(seq), move.label)
+            move.start(motion)
+            # 複数セル・複数回転を 1 動作で回すぶんだけ打ち切り時間も延ばす
+            run_primitive(f"[{i}/{len(seq)}] {move.label}", args.timeout * move.count)
             coast(args.pause)
         yaw_after = measure_yaw("after")
 
