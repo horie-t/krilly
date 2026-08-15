@@ -220,6 +220,10 @@ def main() -> None:
                                  yaw.angle_deg)
             # 帯のずれからセル内の位置ずれを測り、推定位置を絶対補正する
             off = cell_offset(frame, detector)
+            if off.saturated:
+                # フレーム端で頭打ちになった辺は「中央寄り」の嘘を返す (#21)
+                log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
+                         "/".join(off.saturated))
             if not off.measured:
                 log.info("  位置補正: 壁が無く測定不能")
                 return

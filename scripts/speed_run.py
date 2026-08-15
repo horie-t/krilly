@@ -181,6 +181,9 @@ def main() -> None:
             if yaw is not None:
                 apply_axis_heading(est, yaw.angle_rad)
             off = cell_offset(frame, detector)
+            if off.saturated:
+                log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
+                         "/".join(off.saturated))
             if not off.measured:
                 return
             apply_cell_offset(est, cell_center(cell, maze_cfg.cell_pitch_m),

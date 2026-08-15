@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from krilly.perception.cell_pose import cell_offset
 from krilly.perception.red_wall import red_mask
 from krilly.perception.wall_detect import (
     BACK,
@@ -64,12 +65,13 @@ def test_best_roi_red_fraction_finds_a_shifted_band():
     roi = calibrated_rois()[LEFT]
     shifted = _frame_with_vertical_band(roi.x + 30)
     mask = red_mask(shifted, CALIBRATED_RED)
-    fixed, off0 = best_roi_red_fraction(mask, roi, vertical=True, search_px=0)
-    found, off = best_roi_red_fraction(mask, roi, vertical=True, search_px=40)
+    fixed, off0, _ = best_roi_red_fraction(mask, roi, vertical=True, search_px=0)
+    found, off, saturated = best_roi_red_fraction(mask, roi, vertical=True, search_px=40)
     assert off0 == 0
     assert found > fixed                      # 探索すれば拾える
     # 帯 (幅26) の中心は ROI 中心から +21px。平坦部の中心を返すのでこれに一致する
     assert 15 <= off <= 27
+    assert not saturated                      # 端で頭打ちにはなっていない
 
 
 def test_search_does_not_pick_up_the_opposite_wall():
@@ -77,8 +79,8 @@ def test_search_does_not_pick_up_the_opposite_wall():
     rois = calibrated_rois()
     only_right = _frame_with_vertical_band(rois[RIGHT].x)
     mask = red_mask(only_right, CALIBRATED_RED)
-    left, _ = best_roi_red_fraction(mask, rois[LEFT], vertical=True, search_px=40)
-    right, _ = best_roi_red_fraction(mask, rois[RIGHT], vertical=True, search_px=40)
+    left, _, _ = best_roi_red_fraction(mask, rois[LEFT], vertical=True, search_px=40)
+    right, _, _ = best_roi_red_fraction(mask, rois[RIGHT], vertical=True, search_px=40)
     assert left == pytest.approx(0.0)
     assert right > 0.4
 
@@ -203,3 +205,49 @@ def test_per_edge_threshold_override():
     det = WallDetector(WallDetectorConfig(rois=rois, threshold=0.08,
                                           thresholds={BACK: 0.25}, search_px=0))
     assert det.detect(img)[BACK] is False
+
+
+# --- 帯探索がフレーム端で頭打ちになる場合 (#21) -----------------------------
+def _frame_with_horizontal_band(y: int, h: int = 26) -> np.ndarray:
+    """指定の行位置に赤い横帯 (前後の壁上面) を描いた合成フレーム。"""
+    img = np.zeros((480, 640, 3), dtype=np.uint8)
+    img[y : y + h, 100:540] = (0, 0, 255)
+    return img
+
+
+def test_back_search_saturates_at_the_bottom_of_the_frame():
+    """BACK ROI は下端まで +25px しか動かせない。その先の帯は頭打ちになる (#21)。
+
+    実機で機体を 20mm (=34px) 前進させたのに読みは 7mm しか動かなかった事例。
+    頭打ちの値は「小さめのもっともらしいずれ」に化けるので、飽和を知らせる。
+    """
+    roi = calibrated_rois()[BACK]
+    limit = 480 - roi.h                          # ROI 開始位置の上限
+    far = _frame_with_horizontal_band(roi.y + 34)   # 34px 先 = 20mm 前進相当
+    mask = red_mask(far, CALIBRATED_RED)
+    _fraction, off, saturated = best_roi_red_fraction(
+        mask, roi, vertical=False, search_px=40)
+    assert saturated
+    assert roi.y + off == limit or off % 2 == 0   # 端まで寄せて打ち切られている
+    assert off < 34                               # 本当のずれより小さく出る
+
+
+def test_saturated_edge_is_dropped_from_the_position_measurement():
+    """飽和した辺は位置測定に使わない (中央寄りに居ると誤解させないため)。"""
+    roi = calibrated_rois()[BACK]
+    frame = _frame_with_horizontal_band(roi.y + 34)
+    det = WallDetector(calibrated_config())
+    off = cell_offset(frame, det)
+    assert BACK in off.saturated
+    assert off.forward_m is None                  # 前後は測れなかった扱いになる
+    assert off.walls_y == 0
+
+
+def test_unsaturated_band_still_measures():
+    """フレーム端から遠い側 (後退方向) は従来どおり測れる。"""
+    roi = calibrated_rois()[BACK]
+    frame = _frame_with_horizontal_band(roi.y - 20)
+    det = WallDetector(calibrated_config())
+    off = cell_offset(frame, det)
+    assert off.saturated == ()
+    assert off.forward_m is not None and off.forward_m < 0

@@ -70,7 +70,7 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
     px_per_mm = {FRONT: PX_PER_MM_Y, BACK: PX_PER_MM_Y,
                  LEFT: PX_PER_MM_X, RIGHT: PX_PER_MM_X}
     edges = (FRONT, BACK, LEFT, RIGHT)
-    rows: list[tuple[dict[str, tuple[float, float]], CellOffset]] = []
+    rows: list[tuple[dict[str, tuple[float, float, bool]], CellOffset]] = []
     with Camera() as cam:
         for i in range(count):
             if i:
@@ -79,12 +79,14 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
             measured = det.measure(frame)
             off = cell_offset(frame, det)
             rows.append((
-                {e: (measured[e][0], measured[e][1] / px_per_mm[e]) for e in edges}, off))
+                {e: (measured[e][0], measured[e][1] / px_per_mm[e], measured[e][2])
+                 for e in edges}, off))
             if save_prefix:
                 cv2.imwrite(f"{save_prefix}_{i + 1:02d}.png", frame)
             log.info(
                 "#%02d %s | 前後=%s 左右=%s", i + 1,
-                " ".join("%s %.2f/%+.1fmm" % (e, rows[-1][0][e][0], rows[-1][0][e][1])
+                " ".join("%s %.2f/%+.1fmm%s" % (e, rows[-1][0][e][0], rows[-1][0][e][1],
+                                                "!" if rows[-1][0][e][2] else "")
                          for e in edges),
                 "--" if off.forward_m is None else "%+.1fmm" % (off.forward_m * 1e3),
                 "--" if off.left_m is None else "%+.1fmm" % (off.left_m * 1e3),
@@ -97,12 +99,15 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
         mean = sum(values) / len(values)
         return "平均 %+.1fmm 幅 %.1fmm (%.1f〜%.1f)" % (mean, hi - lo, lo, hi)
 
-    log.info("--- 静止中のばらつき (動いていないので幅は 0 であるべき) ---")
+    log.info("--- 静止中のばらつき (動いていないので幅は 0 であるべき。! = フレーム端で飽和) ---")
     for e in edges:
         used = [row[0][e][1] for row in rows
-                if row[0][e][0] >= max(det.cfg.threshold_for(e), OFFSET_MIN_FRACTION)]
-        log.info("%-6s 位置測定に使えたフレーム %d/%d  %s",
-                 e, len(used), len(rows), spread(used))
+                if not row[0][e][2]
+                and row[0][e][0] >= max(det.cfg.threshold_for(e), OFFSET_MIN_FRACTION)]
+        saturated = sum(1 for row in rows if row[0][e][2])
+        log.info("%-6s 位置測定に使えたフレーム %d/%d%s  %s",
+                 e, len(used), len(rows),
+                 " (うち飽和で捨てた %d)" % saturated if saturated else "", spread(used))
     log.info("%-6s %s", "前後", spread([r[1].forward_m * 1e3 for r in rows
                                         if r[1].forward_m is not None]))
     log.info("%-6s %s", "左右", spread([r[1].left_m * 1e3 for r in rows

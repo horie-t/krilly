@@ -61,6 +61,7 @@ class CellOffset:
     left_m: float | None      # +y (左) 方向のずれ
     walls_x: int              # 左右方向の根拠 (LEFT/RIGHT のうち壁だった枚数)
     walls_y: int              # 前後方向の根拠 (FRONT/BACK のうち壁だった枚数)
+    saturated: tuple[str, ...] = ()   # 帯探索がフレーム端で頭打ちになり捨てた辺
 
     @property
     def measured(self) -> bool:
@@ -83,19 +84,26 @@ def cell_offset(
 
     ``detector`` は :class:`WallDetector` (帯探索が有効なもの)。**確実に壁と言える
     帯 (赤割合 >= min_fraction)** のずれだけを使う。
+
+    帯探索がフレーム端で頭打ちになった辺 (飽和) も捨てる。頭打ちの値は「小さめの
+    もっともらしいずれ」に化けるので、そのまま使うと**実際より中央寄りに居ると
+    誤解した補正**を掛けてしまう (#21: BACK は前方向へ +14.7mm までしか測れない)。
     """
     measured = detector.measure(bgr)
 
     def usable(e: str) -> bool:
-        return measured[e][0] >= max(detector.cfg.threshold_for(e), min_fraction)
+        fraction, _offset, saturated = measured[e]
+        return (not saturated
+                and fraction >= max(detector.cfg.threshold_for(e), min_fraction))
 
     dx_px = [float(measured[e][1]) for e in (LEFT, RIGHT) if usable(e)]
     dy_px = [float(measured[e][1]) for e in (FRONT, BACK) if usable(e)]
+    saturated = tuple(e for e in (FRONT, BACK, LEFT, RIGHT) if measured[e][2])
     # 帯が画像上でずれる向きと機体がずれる向きは同じ符号になる:
     # 機体が左 (+y) へずれると、世界の特徴は機体の右へ動く = 画像の右 (+x) へ動く。
     left_m = (sum(dx_px) / len(dx_px)) / PX_PER_MM_X / 1000.0 if dx_px else None
     forward_m = (sum(dy_px) / len(dy_px)) / PX_PER_MM_Y / 1000.0 if dy_px else None
-    return CellOffset(forward_m, left_m, len(dx_px), len(dy_px))
+    return CellOffset(forward_m, left_m, len(dx_px), len(dy_px), saturated)
 
 
 def body_offset_to_world(

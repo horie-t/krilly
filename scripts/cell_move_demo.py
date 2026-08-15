@@ -248,13 +248,17 @@ def main() -> None:
             off = cell_offset(camera.capture(), detector)
             if not off.measured:
                 log.warning("カメラ実測 (%s): 位置測定に足る赤帯が無い "
-                            "(壁の無いセルでは測れない)", tag)
+                            "(壁の無いセル、または %s が端で飽和)", tag,
+                            "/".join(off.saturated) or "なし")
                 return None
-            log.info("カメラ実測 (%s): セル内のずれ 前後=%s 左右=%s (根拠の壁 前後%d枚/左右%d枚)",
+            log.info("カメラ実測 (%s): セル内のずれ 前後=%s 左右=%s "
+                     "(根拠の壁 前後%d枚/左右%d枚%s)",
                      tag,
                      "測定不能" if off.forward_m is None else "%+.1fmm" % (off.forward_m * 1e3),
                      "測定不能" if off.left_m is None else "%+.1fmm" % (off.left_m * 1e3),
-                     off.walls_y, off.walls_x)
+                     off.walls_y, off.walls_x,
+                     "、%s は端で飽和したので不採用" % "/".join(off.saturated)
+                     if off.saturated else "")
             return (off, motion.reference[2])
 
         def run_primitive(label: str, timeout: float) -> None:

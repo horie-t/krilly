@@ -185,33 +185,44 @@ def _band_profile(mask: np.ndarray, roi: Roi, vertical: bool) -> np.ndarray:
 
 def best_roi_red_fraction(
     mask: np.ndarray, roi: Roi, vertical: bool, search_px: int, step: int = 2
-) -> tuple[float, int]:
-    """ROI を探索軸方向にずらして最大の赤割合と、そのオフセット[px]を返す。
+) -> tuple[float, int, bool]:
+    """ROI を探索軸方向にずらして最大の赤割合、そのオフセット[px]、飽和したかを返す。
 
     帯が ROI より細いと最大値は**平坦**になる (帯を含む位置はどれも同じ割合) ので、
     オフセットは平坦部の**中心**を返す。すると「ROI を帯に乗せるのに必要な移動量」
     = ほぼ「帯が校正位置からずれた量」になり、セル内の位置ずれの観測値としても
     使える (#54 の画素->mm 投影の足がかり)。
+
+    第 3 要素の **飽和フラグ**は「探索がフレーム端で打ち切られ、その端が最良だった」
+    ことを表す。ROI をずらした先が画像の外へ出る位置は評価できないので、帯がそこより
+    遠くへ動いていても最後に評価できた位置が返る — つまり**ずれが頭打ちになり、
+    それらしい小さい値に化ける** (#21 実測: BACK ROI は下端まで +25px しか動かせず、
+    機体を 20mm 前進させたのに読みは 7mm しか動かなかった)。位置補正に使う側は
+    このフラグが立った辺を捨てること。壁の有無判定には引き続き使ってよい。
     """
     prof = _band_profile(mask, roi, vertical)
     start, length = (roi.x, roi.w) if vertical else (roi.y, roi.h)
     limit = len(prof) - length
     if limit < 0:
-        return (0.0, 0)
+        return (0.0, 0, False)
+    offsets = [o for o in range(-search_px, search_px + 1, max(1, step))
+               if 0 <= start + o <= limit]
+    if not offsets:
+        return (0.0, 0, False)
     best_value = -1.0
     best_offsets: list[int] = []
-    for offset in range(-search_px, search_px + 1, max(1, step)):
+    for offset in offsets:
         s = start + offset
-        if s < 0 or s > limit:
-            continue
         value = float(prof[s : s + length].mean())
         if value > best_value + 1e-12:
             best_value, best_offsets = value, [offset]
         elif value > best_value - 1e-12:
             best_offsets.append(offset)
-    if best_value < 0:
-        return (0.0, 0)
-    return (best_value, best_offsets[len(best_offsets) // 2])
+    chosen = best_offsets[len(best_offsets) // 2]
+    # 端が最良で、かつその端が「フレームに切られた端」なら飽和 (もっと先を見たかった)
+    saturated = ((chosen == offsets[-1] and offsets[-1] < search_px)
+                 or (chosen == offsets[0] and offsets[0] > -search_px))
+    return (best_value, chosen, saturated)
 
 
 class WallDetector:
@@ -226,14 +237,14 @@ class WallDetector:
             mask[r.y : r.y + r.h, r.x : r.x + r.w] = 0
         return mask
 
-    def measure(self, bgr: np.ndarray) -> dict[str, tuple[float, int]]:
-        """各辺の (赤割合, 帯のずれ[px])。``search_px=0`` なら固定 ROI。"""
+    def measure(self, bgr: np.ndarray) -> dict[str, tuple[float, int, bool]]:
+        """各辺の (赤割合, 帯のずれ[px], 飽和したか)。``search_px=0`` なら固定 ROI。"""
         mask = self._mask(bgr)
         out = {}
         for d, roi in self.cfg.rois.items():
             vertical = d in (LEFT, RIGHT)
             if self.cfg.search_px <= 0:
-                out[d] = (roi_red_fraction(mask, roi), 0)
+                out[d] = (roi_red_fraction(mask, roi), 0, False)
             else:
                 out[d] = best_roi_red_fraction(
                     mask, roi, vertical, self.cfg.search_px, self.cfg.search_step
