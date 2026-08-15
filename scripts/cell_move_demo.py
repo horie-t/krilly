@@ -154,7 +154,7 @@ def main() -> None:
     p.add_argument("--bus", type=int, default=0, help="SPI バス (既定 0)")
     p.add_argument("--device", type=int, default=0, help="SPI デバイス/CE (既定 0)")
     p.add_argument("--seq", default="F,L,F,R", help="動作シーケンス (F/B/L/R/U、数字で回数)")
-    add_tuning_args(p, omega=1.5)
+    add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.5, help="プリミティブ間の停止秒数")
     p.add_argument("--settle", type=float, default=0.3,
@@ -292,7 +292,8 @@ def main() -> None:
                 " / 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°%s",
                 label, time.monotonic() - t0, x, y, wrapped_deg(phi),
                 rx, ry, wrapped_deg(rphi), along, cross, math.degrees(dphi),
-                "" if motion.retries == 0 else " / やり直し %d 回" % motion.retries,
+                "" if motion.retries == 0 else " / やり直し %d 回 (判定時の残量 %+.4f)"
+                     % (motion.retries, motion.retry_remaining),
             )
 
         def coast(seconds: float) -> None:

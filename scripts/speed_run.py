@@ -63,7 +63,7 @@ def main() -> None:
     p.add_argument("--device", type=int, default=0)
     p.add_argument("--size", type=int, default=None,
                    help="迷路サイズ (既定 maze.yaml の grid_size=16)")
-    add_tuning_args(p, omega=1.0)
+    add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.4, help="動作の前後で止まる秒数")
     p.add_argument("--time-limit", type=float, default=600.0, help="持ち時間 [s]")
@@ -163,7 +163,8 @@ def main() -> None:
             along, cross, dphi = motion.residual()
             log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°%s",
                      label, elapsed, along, cross, math.degrees(dphi),
-                     "" if motion.retries == 0 else " / やり直し %d 回" % motion.retries)
+                     "" if motion.retries == 0 else " / やり直し %d 回 (判定時の残量 %+.4f)"
+                     % (motion.retries, motion.retry_remaining))
             deadline = time.monotonic() + args.pause
             while time.monotonic() < deadline:
                 time.sleep(args.dt)

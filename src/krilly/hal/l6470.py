@@ -225,8 +225,10 @@ class L6470Profile:
 
     step_mode: int = STEP_MODE_1_16
     max_speed_steps_s: float = 400.0      # 200 step/rev で約 2 rev/s
-    acc_steps_s2: float = 1000.0
-    dec_steps_s2: float = 1000.0
+    # ソフト側のランプ (RampLimits) より緩くしておく。0.9 m/s^2 + 8 rad/s^2 の
+    # ピークは約 1640 step/s^2 なので 2000 (#21)。
+    acc_steps_s2: float = 2000.0
+    dec_steps_s2: float = 2000.0
     kval_hold: int = 0x20                 # Vs の約 12.5 %
     kval_run: int = 0x40                  # 約 25 %
     kval_acc: int = 0x40

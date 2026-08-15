@@ -81,11 +81,17 @@ class Kind(Enum):
 class CellMotionConfig:
     """1セル動作のチューニング定数 (既定値は脱調しにくい保守的な値)。"""
 
-    # 主軸の速度上限と減速エンベロープ
-    v_max: float = 0.12                    # 前進の最大速度 [m/s]
-    omega_max: float = 1.5                 # 旋回の最大角速度 [rad/s]
-    decel_mps2: float = 0.4                # 前進の減速度 [m/s^2] (driver ランプ以下に丸める)
-    angular_decel_radps2: float = 4.0      # 旋回の角減速度 [rad/s^2] (同上)
+    # 主軸の速度上限と減速エンベロープ (#21 の実機ラダーで決めた採用点)。
+    # 直進: v=0.12/0.18/0.24/0.30 を 4 セル直進で比較。所要は理論値どおり縮み
+    # (6.25/4.27/3.29/2.69s)、距離誤差は v>=0.24 で 720mm あたり平均 -5mm・幅 ±4mm、
+    # v<=0.18 では ±2mm。0.30 は 0.24 に対し 4 セルで 0.5s しか稼げず MAX_SPEED の
+    # 余裕も衝突エネルギーも悪くなるので 0.24 を採る。
+    # 旋回: omega=1.5/2.0/2.5 で 1 回あたり 1.83/1.56/1.67s、方位誤差 (4 回転計) は
+    # -0.60/-0.36/-0.50°。2.0 が最速かつ最も正確で、2.5 は速くならずやり直しも増える。
+    v_max: float = 0.24                    # 前進の最大速度 [m/s]
+    omega_max: float = 2.0                 # 旋回の最大角速度 [rad/s]
+    decel_mps2: float = 0.8                # 前進の減速度 [m/s^2] (driver ランプ以下に丸める)
+    angular_decel_radps2: float = 7.0      # 旋回の角減速度 [rad/s^2] (同上)
 
     # 主軸以外の保持ゲイン (P 制御)
     k_cross: float = 3.0                   # 横ずれ[m] -> vy [1/s]
@@ -166,11 +172,21 @@ class CellMotion:
         self._phi_prev = estimator.phi
         self._retries = 0
         self._settle_elapsed = 0.0    # 指令が 0 になってからの経過 [s]
+        self._retry_remaining = 0.0   # やり直しを決めた時点の残量 (不感帯の調整用)
 
     @property
     def retries(self) -> int:
         """このプリミティブでやり直した回数 (0 が正常。増えるなら整定が足りない)。"""
         return self._retries
+
+    @property
+    def retry_remaining(self) -> float:
+        """やり直しを決めた時点の残量 (最後の 1 回)。不感帯を決めるための実測値。
+
+        完了時の残差はやり直し**後**の値なので、これを見ないと
+        ``retry_pos_tol_m`` / ``retry_angle_tol_rad`` を実測から詰められない。
+        """
+        return self._retry_remaining
 
     # -- 基準姿勢 -----------------------------------------------------------
     @property
@@ -369,6 +385,7 @@ class CellMotion:
             # 整定後にまだ残っていれば低速でやり直す (惰行分の詰め直し)
             if (abs(self.remaining) > self._retry_tolerance()
                     and self._retries < self.cfg.max_retries):
+                self._retry_remaining = self.remaining
                 self._retries += 1
                 self._settle_elapsed = 0.0
                 self._phase = Phase.RUN

@@ -92,8 +92,8 @@ def test_envelope_shape():
 
 
 def test_envelope_decel_is_clamped_to_driver_ramp(motion):
-    # 既定 decel 0.4 <= driver ランプ 0.5 なのでそのまま
-    assert motion._decel == pytest.approx(0.4)
+    # 既定の decel は driver ランプ以下なのでそのまま通る
+    assert motion._decel == pytest.approx(motion.cfg.decel_mps2)
     # driver のランプより大きい減速度を指定したらランプ側に丸められる
     kin = KiwiKinematics(config=ROBOT)
     driver = VelocityDriver(FakeChain(), kinematics=kin)
@@ -171,7 +171,9 @@ def test_forward_corrects_lateral_and_heading_disturbance(motion):
     run_until_done(motion)
     along, cross, heading = motion.residual()
     assert abs(along) <= motion.cfg.pos_tol_m
-    assert abs(cross) < 1e-3
+    # 注入した 10mm / 5° に対して十分戻っている。横ずれの上限は「保持の速度上限で
+    # 1 セル走る間に詰められる量」で決まるので、v_max を上げると残りも増える。
+    assert abs(cross) < 0.010 / 4
     assert abs(heading) < math.radians(0.5)
 
 
@@ -251,7 +253,9 @@ def test_turn_absorbs_initial_heading_error(motion):
     motion.est.phi = math.radians(-4.0)         # 基準 0° に対して -4° ずれている
     motion.start_turn_left()
     run_until_done(motion)
-    assert motion.est.phi == pytest.approx(math.pi / 2, abs=motion.cfg.angle_tol_rad)
+    # 終端は許容値で切るが、その後の惰行が乗るので不感帯の幅で見る
+    assert motion.est.phi == pytest.approx(
+        math.pi / 2, abs=motion.cfg.retry_angle_tol_rad)
 
 
 # --- 連結シーケンス --------------------------------------------------------
@@ -299,15 +303,20 @@ def test_turn_compensates_rotational_slip_via_gyro(motion):
     slip = 0.8
     motion.start_turn_left()
     ticks = 0
+    commanded = 0.0
     for _ in range(MAX_TICKS):
         gz = motion.driver.current_velocity[2] * slip   # 実際の回転 = 指令 × slip
+        commanded += motion.driver.current_velocity[2] * DT
         ticks += 1
         if motion.update(DT, gyro_rate=gz):
             break
     else:
         pytest.fail("完了しなかった")
-    assert motion.est.phi == pytest.approx(math.pi / 2, abs=motion.cfg.angle_tol_rad)
-    assert ticks > 67   # スリップ分だけ時間が伸びる (理想は約 67 tick)
+    # 終端は許容値で切るが、その後の惰行が乗るので不感帯の幅で見る
+    assert motion.est.phi == pytest.approx(
+        math.pi / 2, abs=motion.cfg.retry_angle_tol_rad)
+    # 補償の証拠: 実回転を 90° にするために、指令はその 1/slip 倍を出している
+    assert commanded == pytest.approx(math.pi / 2 / slip, rel=0.1)
 
 
 # --- 基準姿勢の操作・中断 --------------------------------------------------

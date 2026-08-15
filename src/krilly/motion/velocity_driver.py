@@ -24,10 +24,15 @@ from krilly.kinematics.kiwi import KiwiKinematics
 
 @dataclass(frozen=True)
 class RampLimits:
-    """加減速の上限 (脱調を防ぐため保守的な既定値)。"""
+    """加減速の上限 (#21 の実機ラダーで決めた採用点)。
 
-    max_linear_accel_mps2: float = 0.5      # vx, vy の加速度上限 [m/s^2]
-    max_angular_accel_radps2: float = 5.0   # omega の角加速度上限 [rad/s^2]
+    L6470 の ACC/DEC register より緩くないと、実際の加減速はドライバ側に律速される
+    (:func:`krilly.motion.tuning.check_limits` が検算する)。この値には
+    ``L6470Profile.acc_steps_s2 = 2000`` が要る。
+    """
+
+    max_linear_accel_mps2: float = 0.9      # vx, vy の加速度上限 [m/s^2]
+    max_angular_accel_radps2: float = 8.0   # omega の角加速度上限 [rad/s^2]
 
 
 def _rate_limit(current: float, target: float, max_delta: float) -> float:

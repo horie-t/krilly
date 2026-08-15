@@ -25,8 +25,13 @@ def explored(size: int = 5):
 
 
 @pytest.fixture
-def manager():
-    return RunManager(explored())
+def explorer():
+    return explored()
+
+
+@pytest.fixture
+def manager(explorer):
+    return RunManager(explorer)
 
 
 # --- facing_after -----------------------------------------------------------
@@ -127,13 +132,28 @@ def test_estimate_prefers_fewer_straights_for_the_same_cells(manager):
     assert four_legs - one_leg == pytest.approx(3 * manager.straight_time_s)
 
 
-def test_estimate_matches_the_measured_speed_run(manager):
-    """実機の最速ラン (20 セル / 直進 12 回 / 旋回 13 回) は実測 70.9s だった。"""
-    legs = [Leg(2, 3), Leg(-1, 1), Leg(1, 1), Leg(-1, 3), Leg(-1, 2), Leg(-1, 1),
-            Leg(1, 1), Leg(1, 1), Leg(-1, 1), Leg(-1, 3), Leg(-1, 2), Leg(-1, 1)]
-    assert sum(leg.cells for leg in legs) == 20
-    assert sum(abs(leg.turn) for leg in legs) == 13
-    assert manager.estimate_s(legs) == pytest.approx(70.9, abs=1.5)
+# 実機の最速ラン: 20 セル / 直進 12 回 / 旋回 13 回
+MEASURED_LEGS = [Leg(2, 3), Leg(-1, 1), Leg(1, 1), Leg(-1, 3), Leg(-1, 2), Leg(-1, 1),
+                 Leg(1, 1), Leg(1, 1), Leg(-1, 1), Leg(-1, 3), Leg(-1, 2), Leg(-1, 1)]
+
+
+def test_estimate_matches_the_measured_speed_run(explorer):
+    """3 項モデル (セル数・直進回数・旋回回数) が実測に合う。
+
+    M5 #20 の速度設定 (v=0.12, omega=1.0) でこの経路は実測 70.9s だった。
+    定数はその後 #21 で速くした側へ更新したので、モデルの検証は当時の定数で行う。
+    セル数と旋回数だけの 2 項モデルでは同じ経路が 25% 低く出ていた。
+    """
+    assert sum(leg.cells for leg in MEASURED_LEGS) == 20
+    assert sum(abs(leg.turn) for leg in MEASURED_LEGS) == 13
+    m5 = RunManager(explorer, cell_time_s=1.50, straight_time_s=0.70, turn_time_s=2.56)
+    assert m5.estimate_s(MEASURED_LEGS) == pytest.approx(70.9, abs=1.5)
+
+
+def test_current_constants_are_faster_than_the_m5_ones(explorer, manager):
+    """#21 のチューニング後の定数は、同じ経路をより速く見積もる。"""
+    m5 = RunManager(explorer, cell_time_s=1.50, straight_time_s=0.70, turn_time_s=2.56)
+    assert manager.estimate_s(MEASURED_LEGS) < m5.estimate_s(MEASURED_LEGS)
 
 
 def test_elapsed_starts_at_first_departure(manager):

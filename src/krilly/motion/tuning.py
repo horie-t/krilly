@@ -56,17 +56,20 @@ class TuningProfile:
         )
 
 
-def add_tuning_args(parser, *, v: float = 0.12, omega: float = 1.0) -> None:
+def add_tuning_args(parser, *, v: float | None = None, omega: float | None = None) -> None:
     """速度・加速度・トルクの CLI 引数を ``parser`` に追加する。
 
-    既定値は現行の実機設定 (保守的な側)。``v`` / ``omega`` だけはスクリプトごとに
-    違う既定を持たせられるようにしてある。
+    既定値は各設定クラスの既定 (= #21 で決めた採用点)。``v`` / ``omega`` を渡すと
+    そのスクリプトだけ違う既定にできる。
     """
     d_limits = RampLimits()
     d_motion = CellMotionConfig()
     d_profile = L6470Profile()
-    parser.add_argument("--v", type=float, default=v, help="前進の最大速度 [m/s]")
-    parser.add_argument("--omega", type=float, default=omega, help="旋回の最大角速度 [rad/s]")
+    parser.add_argument("--v", type=float, default=v if v is not None else d_motion.v_max,
+                        help="前進の最大速度 [m/s]")
+    parser.add_argument("--omega", type=float,
+                        default=omega if omega is not None else d_motion.omega_max,
+                        help="旋回の最大角速度 [rad/s]")
     parser.add_argument("--accel", type=float, default=d_limits.max_linear_accel_mps2,
                         help="並進のランプ上限 [m/s^2]")
     parser.add_argument("--angular-accel", type=float,

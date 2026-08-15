@@ -9,7 +9,9 @@ import pytest
 
 from krilly.hal.l6470 import NO_SPI, fault_flags
 from krilly.kinematics.kiwi import KiwiKinematics
+from krilly.hal.l6470 import L6470Profile
 from krilly.motion.cell_motion import CellMotionConfig
+from krilly.motion.velocity_driver import RampLimits
 from krilly.motion.tuning import (
     add_tuning_args,
     build_tuning,
@@ -26,12 +28,11 @@ def parse(argv: list[str]) -> argparse.Namespace:
 
 
 def test_defaults_round_trip():
-    """引数なしなら既定の設定オブジェクトと同じ値になる。"""
+    """引数なしなら各設定クラスの既定 (= #21 の採用点) がそのまま出る。"""
     tuning = build_tuning(parse([]))
-    assert tuning.motion.v_max == 0.12
-    assert tuning.motion.omega_max == 1.0
-    assert tuning.limits.max_linear_accel_mps2 == 0.5
-    assert tuning.profile.kval_run == 0x40
+    assert tuning.motion == CellMotionConfig()
+    assert tuning.limits == RampLimits()
+    assert tuning.profile == L6470Profile()
 
 
 def test_overrides_all_three_layers():
@@ -77,10 +78,10 @@ def test_ramp_over_driver_accel_warns():
 
 def test_decel_over_ramp_warns():
     """減速エンベロープはランプ上限に丸められるので、超えていたら知らせる。"""
-    warnings = check_limits(build_tuning(parse(["--decel", "0.9"])))
+    warnings = check_limits(build_tuning(parse(["--decel", "1.5"])))
     assert any("--decel" in w for w in warnings)
     assert check_limits(build_tuning(parse(
-        ["--decel", "0.9", "--accel", "1.0", "--driver-accel", "2000"]))) == []
+        ["--decel", "1.5", "--accel", "1.5", "--driver-accel", "3000"]))) == []
 
 
 def test_peak_wheel_value_matches_kinematics():
