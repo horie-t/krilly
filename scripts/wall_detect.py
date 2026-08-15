@@ -4,11 +4,17 @@
 各辺の ROI と、その中の赤割合・壁有無を画像に重ねて保存する。保存済み画像
 (--image) に対してオフラインで ROI 位置や閾値を追い込める。実機ではライブ取得。
 
-``--measure N`` は**位置測定 (cell_pose) の再現性**を見るモード (#21)。機体を止めた
-まま N フレーム撮り、辺ごとの赤割合と帯のずれ、そこから出る前後・左右のずれを並べる。
-静止しているのだから値は動いてはいけない。動くならその辺の帯探索が別のもの
-(ケーブルなど) を掴んでいる。定規で機体を既知量ずらして前後で撮れば、絶対量の
-確認にもなる。
+``--measure N`` は**走らせずに機体の姿勢を読む**モード (#21)。機体を止めたまま
+N フレーム撮り、辺ごとの赤割合と帯のずれ、そこから出る前後・左右のずれ、車体の
+軸角を並べる。静止しているのだから値は動いてはいけない。動くならその辺の帯探索が
+別のもの (ケーブルなど) を掴んでいる。定規で機体を既知量ずらして前後で撮れば、
+絶対量の確認にもなる。
+
+**モータ・ホイールの遊びの測り方**: 別端末で ``python -m scripts.teleop`` を
+起動して保持トルクを掛けたまま、車体を手で左いっぱい/右いっぱいに捻り、それぞれで
+``--measure 1`` を撮る。軸角の差が遊びの総量。カメラが測るのは**車体**の向きで、
+実際に進む方向を決めるのは**車輪**なので、この差はどんな方位測定にも乗ってくる
+(1 回の測定では消せないので、校正は必ず複数回の平均で決めること)。
 
 例:
     # 保存画像に対して ROI と判定を可視化
@@ -31,6 +37,7 @@ import cv2
 import numpy as np
 
 from krilly.logging_config import get_logger, setup_logging
+from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import (
     OFFSET_MIN_FRACTION,
     PX_PER_MM_X,
@@ -67,10 +74,12 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
     from krilly.hal.camera import Camera
 
     det = WallDetector(calibrated_config())
+    yaw_cfg = calibrated_axis_yaw_config()
     px_per_mm = {FRONT: PX_PER_MM_Y, BACK: PX_PER_MM_Y,
                  LEFT: PX_PER_MM_X, RIGHT: PX_PER_MM_X}
     edges = (FRONT, BACK, LEFT, RIGHT)
     rows: list[tuple[dict[str, tuple[float, float, bool]], CellOffset]] = []
+    yaws: list[float] = []
     with Camera() as cam:
         for i in range(count):
             if i:
@@ -78,6 +87,9 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
             frame = cam.capture()
             measured = det.measure(frame)
             off = cell_offset(frame, det)
+            yaw = axis_yaw(frame, yaw_cfg)
+            if yaw is not None:
+                yaws.append(yaw.angle_deg)
             rows.append((
                 {e: (measured[e][0], measured[e][1] / px_per_mm[e], measured[e][2])
                  for e in edges}, off))
@@ -91,6 +103,8 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
                 "--" if off.forward_m is None else "%+.1fmm" % (off.forward_m * 1e3),
                 "--" if off.left_m is None else "%+.1fmm" % (off.left_m * 1e3),
             )
+            log.info("      軸角 %s (+ = 迷路の軸より CCW)",
+                     "測定不能" if yaw is None else "%+.3f°" % yaw.angle_deg)
 
     def spread(values: list[float]) -> str:
         if not values:
@@ -112,6 +126,11 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
                                         if r[1].forward_m is not None]))
     log.info("%-6s %s", "左右", spread([r[1].left_m * 1e3 for r in rows
                                         if r[1].left_m is not None]))
+    if yaws:
+        # 車体の向き。モータ・ホイールの遊びを測るときは、モータに保持トルクを掛けた
+        # まま (別端末で teleop を起動しておく) 車体を左右いっぱいに捻り、その差を読む。
+        log.info("%-6s 平均 %+.3f° 幅 %.3f° (%.3f〜%.3f)  ※迷路の軸に対する車体の向き",
+                 "軸角", sum(yaws) / len(yaws), max(yaws) - min(yaws), min(yaws), max(yaws))
 
 
 def main() -> None:
