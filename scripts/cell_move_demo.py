@@ -289,9 +289,10 @@ def main() -> None:
             along, cross, dphi = motion.residual()
             log.info(
                 "%s 完了 %.2fs: 推定 X=%.4f Y=%.4f φ=%+.2f° / 基準 X=%.4f Y=%.4f φ=%+.2f°"
-                " / 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°",
+                " / 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°%s",
                 label, time.monotonic() - t0, x, y, wrapped_deg(phi),
                 rx, ry, wrapped_deg(rphi), along, cross, math.degrees(dphi),
+                "" if motion.retries == 0 else " / やり直し %d 回" % motion.retries,
             )
 
         def coast(seconds: float) -> None:

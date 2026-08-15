@@ -107,6 +107,13 @@ class CellMotionConfig:
     angle_tol_rad: float = math.radians(0.3)   # 旋回の残角許容 [rad]
     settled_v: float = 1e-3                # 整定判定の速度しきい値 [m/s]
     settled_omega: float = 1e-2            # 整定判定の角速度しきい値 [rad/s]
+    # 指令が 0 になってから残差を判定するまで待つ秒数。整定判定が見ているのは
+    # **指令値**なので、指令が 0 になった時点で機体はまだ揺れている。ホイールまわりの
+    # ガタ (実機 #21 で 1.6-2°) の弾性的な戻りをジャイロが積分するため、すぐ判定すると
+    # 「まだ残っている」と誤読して無駄なやり直しに入る (実機の旋回は毎回やり直しが
+    # 走り、しかも弾性的な戻りなので creep しても直らず、1 回あたり 0.4-0.8s を捨てて
+    # いた)。揺れが収まるのを待ってから判定する。
+    settle_dwell_s: float = 0.25
     retry_v_max: float = 0.03              # やり直し時の速度上限 [m/s]
     retry_omega_max: float = 0.4           # やり直し時の角速度上限 [rad/s]
     max_retries: int = 1                   # 整定後に残っていた場合のやり直し回数
@@ -144,6 +151,12 @@ class CellMotion:
         self._angle_remaining = 0.0   # 旋回の残角 [rad] (実回転分を差し引いていく)
         self._phi_prev = estimator.phi
         self._retries = 0
+        self._settle_elapsed = 0.0    # 指令が 0 になってからの経過 [s]
+
+    @property
+    def retries(self) -> int:
+        """このプリミティブでやり直した回数 (0 が正常。増えるなら整定が足りない)。"""
+        return self._retries
 
     # -- 基準姿勢 -----------------------------------------------------------
     @property
@@ -273,7 +286,7 @@ class CellMotion:
             self.est.update_wheel_speeds(wheel_mps, dt)
         else:
             self.est.update_with_gyro_rate(wheel_mps, gyro_rate, dt)
-        self._advance_phase(cur)
+        self._advance_phase(cur, dt)
         return self.done
 
     def _command(self, dt: float) -> None:
@@ -310,7 +323,7 @@ class CellMotion:
             return v
         return math.copysign(max(abs(v), floor), remaining)
 
-    def _advance_phase(self, cur: tuple[float, float, float]) -> None:
+    def _advance_phase(self, cur: tuple[float, float, float], dt: float = 0.0) -> None:
         """残量・整定状況から状態遷移する (旋回の残角もここで減らす)。"""
         # 実回転分を残角から差し引く (180°以上の旋回でも符号が反転しないように
         # 絶対方位の差ではなく積算で持つ)
@@ -322,6 +335,7 @@ class CellMotion:
         if self._phase is Phase.RUN:
             if abs(self.remaining) <= self._tolerance():
                 self._phase = Phase.SETTLE
+                self._settle_elapsed = 0.0
                 self.driver.stop()
             return
         if self._phase is Phase.SETTLE:
@@ -331,10 +345,17 @@ class CellMotion:
                 and abs(omega) <= self.cfg.settled_omega
             )
             if not settled:
+                self._settle_elapsed = 0.0
+                return
+            # 指令が 0 でも機体はしばらく揺れている。揺れが収まるまで残差を見ない
+            # (見るとガタの弾性的な戻りを「残量」と誤読してやり直しに入る)。
+            self._settle_elapsed += dt
+            if self._settle_elapsed < self.cfg.settle_dwell_s:
                 return
             # 整定後にまだ残っていれば低速でやり直す (惰行分の詰め直し)
             if abs(self.remaining) > self._tolerance() and self._retries < self.cfg.max_retries:
                 self._retries += 1
+                self._settle_elapsed = 0.0
                 self._phase = Phase.RUN
             else:
                 self._phase = Phase.DONE

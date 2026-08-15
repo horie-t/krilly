@@ -161,8 +161,9 @@ def main() -> None:
             if faults:
                 log.warning("    %s: L6470 フォールト %s (トルク不足の疑い)", label, faults)
             along, cross, dphi = motion.residual()
-            log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°",
-                     label, elapsed, along, cross, math.degrees(dphi))
+            log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°%s",
+                     label, elapsed, along, cross, math.degrees(dphi),
+                     "" if motion.retries == 0 else " / やり直し %d 回" % motion.retries)
             deadline = time.monotonic() + args.pause
             while time.monotonic() < deadline:
                 time.sleep(args.dt)

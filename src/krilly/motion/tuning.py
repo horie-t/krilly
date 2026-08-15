@@ -42,12 +42,13 @@ class TuningProfile:
     def describe(self) -> str:
         """ログ 1 行用の要約 (走行のたびに記録して実測値と結び付けるため)。"""
         return (
-            "v=%.3fm/s omega=%.2frad/s accel=%.2f/%.1f decel=%.2f/%.1f "
+            "v=%.3fm/s omega=%.2frad/s accel=%.2f/%.1f decel=%.2f/%.1f dwell=%.2fs "
             "KVAL run=0x%02X hold=0x%02X MAX_SPEED=%.0fstep/s"
             % (
                 self.motion.v_max, self.motion.omega_max,
                 self.limits.max_linear_accel_mps2, self.limits.max_angular_accel_radps2,
                 self.motion.decel_mps2, self.motion.angular_decel_radps2,
+                self.motion.settle_dwell_s,
                 self.profile.kval_run, self.profile.kval_hold,
                 self.profile.max_speed_steps_s,
             )
@@ -75,6 +76,9 @@ def add_tuning_args(parser, *, v: float = 0.12, omega: float = 1.0) -> None:
     parser.add_argument("--angular-decel", type=float,
                         default=d_motion.angular_decel_radps2,
                         help="旋回の減速エンベロープ [rad/s^2] (--angular-accel 以下に丸められる)")
+    parser.add_argument("--settle-dwell", type=float, default=d_motion.settle_dwell_s,
+                        help="動作を止めてから残差を判定するまでの待ち [s] "
+                             "(ガタの揺れ戻りを残量と誤読しないため)")
     parser.add_argument("--kval", type=lambda s: int(s, 0), default=d_profile.kval_run,
                         help="L6470 の KVAL_RUN/ACC/DEC (0x00-0xFF, 0x80=Vs の 50%%)")
     parser.add_argument("--kval-hold", type=lambda s: int(s, 0),
@@ -112,6 +116,7 @@ def build_tuning(args, motion: CellMotionConfig | None = None) -> TuningProfile:
             omega_max=args.omega,
             decel_mps2=args.decel,
             angular_decel_radps2=args.angular_decel,
+            settle_dwell_s=args.settle_dwell,
         ),
     )
 

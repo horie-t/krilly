@@ -286,7 +286,11 @@ def test_gyro_rate_is_used_for_heading(motion):
     else:
         pytest.fail("完了しなかった")
     assert phi_moved                                        # ジャイロ入力が効いている
-    assert abs(motion.residual()[2]) < math.radians(1.0)    # 定常偏差 ≈ drift/k_heading
+    # 定常偏差 ≈ drift/k_heading。整定後の待ち (settle_dwell_s) の間は 0 指令なので
+    # P 制御が効かず、バイアス残りがそのまま積み上がる分も足して見積もる。
+    cfg = motion.cfg
+    bound = drift / cfg.k_heading + drift * cfg.settle_dwell_s
+    assert abs(motion.residual()[2]) < bound * 1.5
     assert abs(motion.residual()[1]) < 2e-3                 # 横ずれも抑えられている
 
 
@@ -345,3 +349,52 @@ def test_idle_update_keeps_wheels_stopped(motion):
 
 def _wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+# --- 整定後の待ち: ガタの揺れ戻りでやり直しに入らないこと (#21) ----------------
+def _turn_with_rebound(cfg: CellMotionConfig, amplitude_rad: float, decay_s: float):
+    """旋回させ、停止後にガタの弾性的な揺れ戻り (往って復る減衰振動) を注入する。
+
+    実機の症状: 指令が 0 になっても機体はしばらく揺れており、ジャイロがそれを
+    積分するので、揺れの途中で残差を見ると「まだ 1° 残っている」と読めてしまう。
+    揺れは往復するので**収まれば正味 0**。判定を待たずに creep でやり直しても
+    直らず、時間だけを捨てる (実機の旋回残差が +0.9/-0.8 と符号まちまちなのは、
+    振動のどの位相で判定したかで決まっているため)。
+    """
+    kin = KiwiKinematics(config=ROBOT)
+    motion = CellMotion(VelocityDriver(FakeChain(), kinematics=kin),
+                        DeadReckoning(kin), config=cfg, maze=MAZE)
+    motion.start_turn_left()
+    swing_started_at = None
+    ticks = 0
+    for i in range(MAX_TICKS):
+        gz = motion.driver.current_velocity[2]
+        if motion.phase is not Phase.RUN and swing_started_at is None:
+            swing_started_at = i                      # 主軸が終わった瞬間から揺れ出す
+        if swing_started_at is not None:
+            elapsed = (i - swing_started_at) * DT
+            if elapsed < decay_s:                     # 前半は外へ、後半は戻る (正味 0)
+                rate = 2.0 * amplitude_rad / decay_s
+                gz += rate if elapsed < decay_s / 2 else -rate
+        ticks = i + 1
+        if motion.update(DT, gyro_rate=gz):
+            break
+    else:
+        pytest.fail("完了しなかった")
+    return motion, ticks
+
+
+def test_settle_dwell_ignores_the_rebound_from_mechanical_play():
+    """揺れが収まってから判定するので、やり直しに入らない (#21)。"""
+    rebound = math.radians(3.0)
+    # 惰行だけなら許容内、揺れの最中に見ると許容外、という許容値で切り分ける
+    tol = math.radians(1.0)
+    cfg = CellMotionConfig(settle_dwell_s=0.3, angle_tol_rad=tol)
+    motion, ticks = _turn_with_rebound(cfg, rebound, decay_s=0.2)
+    assert motion.retries == 0
+    assert abs(motion.residual()[2]) <= tol
+
+    # 待たないと (従来の挙動)、揺れの途中の値を「残量」と読んでやり直しに入る
+    impatient = CellMotionConfig(settle_dwell_s=0.0, angle_tol_rad=tol)
+    slow, _slow_ticks = _turn_with_rebound(impatient, rebound, decay_s=0.2)
+    assert slow.retries == 1
