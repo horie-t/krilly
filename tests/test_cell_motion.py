@@ -351,31 +351,26 @@ def _wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
-# --- 整定後の待ち: ガタの揺れ戻りでやり直しに入らないこと (#21) ----------------
-def _turn_with_rebound(cfg: CellMotionConfig, amplitude_rad: float, decay_s: float):
-    """旋回させ、停止後にガタの弾性的な揺れ戻り (往って復る減衰振動) を注入する。
+# --- 機械の不感帯 (ガタ) の中はやり直さないこと (#21) ------------------------
+def _turn_settling_into_play(cfg: CellMotionConfig, offset_rad: float):
+    """旋回させ、停止時に機体がガタの帯のどこかへ落ち着く様子を注入する。
 
-    実機の症状: 指令が 0 になっても機体はしばらく揺れており、ジャイロがそれを
-    積分するので、揺れの途中で残差を見ると「まだ 1° 残っている」と読めてしまう。
-    揺れは往復するので**収まれば正味 0**。判定を待たずに creep でやり直しても
-    直らず、時間だけを捨てる (実機の旋回残差が +0.9/-0.8 と符号まちまちなのは、
-    振動のどの位相で判定したかで決まっているため)。
+    実機 (#21): 旋回を止めると機体はガタの帯 (1.6-2°) の中のどこかに落ち着いて
+    **そこに留まる**。往復して 0 に戻る振動ではないので待っても消えず、車輪を
+    動かしてやり直しても、車輪が動いた先でまた帯のどこかに落ちるだけで詰まらない。
+    どの角速度でも残差 0.9-1.45°、やり直し 12/12 回、改善 0 回だった。
     """
     kin = KiwiKinematics(config=ROBOT)
     motion = CellMotion(VelocityDriver(FakeChain(), kinematics=kin),
                         DeadReckoning(kin), config=cfg, maze=MAZE)
     motion.start_turn_left()
-    swing_started_at = None
+    dropped = False
     ticks = 0
     for i in range(MAX_TICKS):
         gz = motion.driver.current_velocity[2]
-        if motion.phase is not Phase.RUN and swing_started_at is None:
-            swing_started_at = i                      # 主軸が終わった瞬間から揺れ出す
-        if swing_started_at is not None:
-            elapsed = (i - swing_started_at) * DT
-            if elapsed < decay_s:                     # 前半は外へ、後半は戻る (正味 0)
-                rate = 2.0 * amplitude_rad / decay_s
-                gz += rate if elapsed < decay_s / 2 else -rate
+        if motion.phase is not Phase.RUN and not dropped:
+            gz -= offset_rad / DT      # 主軸が終わった瞬間に帯の端へ落ちる (1 tick 分)
+            dropped = True
         ticks = i + 1
         if motion.update(DT, gyro_rate=gz):
             break
@@ -384,17 +379,25 @@ def _turn_with_rebound(cfg: CellMotionConfig, amplitude_rad: float, decay_s: flo
     return motion, ticks
 
 
-def test_settle_dwell_ignores_the_rebound_from_mechanical_play():
-    """揺れが収まってから判定するので、やり直しに入らない (#21)。"""
-    rebound = math.radians(3.0)
-    # 惰行だけなら許容内、揺れの最中に見ると許容外、という許容値で切り分ける
-    tol = math.radians(1.0)
-    cfg = CellMotionConfig(settle_dwell_s=0.3, angle_tol_rad=tol)
-    motion, ticks = _turn_with_rebound(cfg, rebound, decay_s=0.2)
+def test_retry_deadband_skips_the_residual_the_play_makes_unfixable():
+    """ガタの帯の内側の残差はやり直さない (追いかけても詰まらないため)。"""
+    play = math.radians(1.2)          # 実機で観測された 0.9-1.45° の真ん中あたり
+    cfg = CellMotionConfig(retry_angle_tol_rad=math.radians(1.6))
+    motion, ticks = _turn_settling_into_play(cfg, play)
     assert motion.retries == 0
-    assert abs(motion.residual()[2]) <= tol
+    # 許容値は超えているが不感帯の内側、という状態で完了している
+    residual = abs(motion.residual()[2])
+    assert cfg.angle_tol_rad < residual <= cfg.retry_angle_tol_rad
 
-    # 待たないと (従来の挙動)、揺れの途中の値を「残量」と読んでやり直しに入る
-    impatient = CellMotionConfig(settle_dwell_s=0.0, angle_tol_rad=tol)
-    slow, _slow_ticks = _turn_with_rebound(impatient, rebound, decay_s=0.2)
+    # 不感帯を狭めると (従来の挙動) 追いかけに入り、時間を捨てたうえで詰まらない
+    chasing = CellMotionConfig(retry_angle_tol_rad=cfg.angle_tol_rad)
+    slow, slow_ticks = _turn_settling_into_play(chasing, play)
     assert slow.retries == 1
+    assert slow_ticks > ticks
+
+
+def test_retry_still_fires_for_a_real_overrun():
+    """不感帯より大きく行き過ぎたら、従来どおりやり直す (安全側は殺さない)。"""
+    cfg = CellMotionConfig()
+    motion, _ticks = _turn_settling_into_play(cfg, math.radians(5.0))
+    assert motion.retries == 1

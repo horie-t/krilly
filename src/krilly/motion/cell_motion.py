@@ -108,12 +108,20 @@ class CellMotionConfig:
     settled_v: float = 1e-3                # 整定判定の速度しきい値 [m/s]
     settled_omega: float = 1e-2            # 整定判定の角速度しきい値 [rad/s]
     # 指令が 0 になってから残差を判定するまで待つ秒数。整定判定が見ているのは
-    # **指令値**なので、指令が 0 になった時点で機体はまだ揺れている。ホイールまわりの
-    # ガタ (実機 #21 で 1.6-2°) の弾性的な戻りをジャイロが積分するため、すぐ判定すると
-    # 「まだ残っている」と誤読して無駄なやり直しに入る (実機の旋回は毎回やり直しが
-    # 走り、しかも弾性的な戻りなので creep しても直らず、1 回あたり 0.4-0.8s を捨てて
-    # いた)。揺れが収まるのを待ってから判定する。
-    settle_dwell_s: float = 0.25
+    # **指令値**なので、指令が 0 になった時点では機体はまだ動いている。指令のランプが
+    # 実際に効き終わるまでの分だけ待つ。
+    # (#21: 当初これを 0.25s にして「ガタの揺れ戻りを残量と誤読している」仮説を試したが、
+    #  実機ではやり直しが 12/12 回そのまま発生し時間だけ悪化した。揺れは往復して 0 に
+    #  戻る振動ではなく、機体がガタの帯のどこかに落ち着いて留まる。待っても消えない。)
+    settle_dwell_s: float = 0.10
+
+    # **やり直し**の判定に使う残量。上の許容値より緩くする。
+    # ホイールまわりのガタ (実機 #21 で 1.6-2°、issue #72) の帯の中では、車輪を動かしても
+    # 車体は帯のどこかへ落ちるだけなので、この範囲の残差は制御では詰められない。
+    # 実測: 旋回はどの角速度でも残差 0.9-1.45° に落ち着き、やり直しは 12/12 回発生して
+    # 1 回も改善しなかった (1 旋回あたり 0.8s の浪費)。詰まらないものは追いかけない。
+    retry_pos_tol_m: float = 0.004                 # 前進のやり直し判定 [m]
+    retry_angle_tol_rad: float = math.radians(1.6)  # 旋回のやり直し判定 [rad]
     retry_v_max: float = 0.03              # やり直し時の速度上限 [m/s]
     retry_omega_max: float = 0.4           # やり直し時の角速度上限 [rad/s]
     max_retries: int = 1                   # 整定後に残っていた場合のやり直し回数
@@ -353,7 +361,8 @@ class CellMotion:
             if self._settle_elapsed < self.cfg.settle_dwell_s:
                 return
             # 整定後にまだ残っていれば低速でやり直す (惰行分の詰め直し)
-            if abs(self.remaining) > self._tolerance() and self._retries < self.cfg.max_retries:
+            if (abs(self.remaining) > self._retry_tolerance()
+                    and self._retries < self.cfg.max_retries):
                 self._retries += 1
                 self._settle_elapsed = 0.0
                 self._phase = Phase.RUN
@@ -361,4 +370,10 @@ class CellMotion:
                 self._phase = Phase.DONE
 
     def _tolerance(self) -> float:
+        """主軸を詰めるのをやめる (整定へ移る) 残量。"""
         return self.cfg.pos_tol_m if self._kind is Kind.FORWARD else self.cfg.angle_tol_rad
+
+    def _retry_tolerance(self) -> float:
+        """やり直すかどうかの残量。機械の不感帯より内側は追いかけない。"""
+        return (self.cfg.retry_pos_tol_m if self._kind is Kind.FORWARD
+                else self.cfg.retry_angle_tol_rad)
