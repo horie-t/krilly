@@ -100,6 +100,8 @@ def main() -> None:
                    help="位置補正の引き込み率 0..1 (既定 1.0 = 測定値をそのまま採用)")
     p.add_argument("--turn-in-place", action="store_true",
                    help="機体を旋回させて走る従来モード (既定は旋回レス走行 #76)")
+    p.add_argument("--max-heading-residual", type=float, default=2.5,
+                   help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true",
                    help="前進直前の前方壁チェックを無効にする (既定は有効)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
@@ -226,12 +228,15 @@ def main() -> None:
                 yaw = axis_yaw(frame, yaw_cfg)
                 if yaw is not None:
                     before = est.phi
+                    log.debug("  軸角の根拠: 線分 %d 本 / 総長 %.0fpx",
+                              yaw.segments, yaw.total_length_px)
                     if apply_axis_heading(est, yaw.angle_rad, weight=args.correct_weight):
                         log.info("  方位補正: 軸から %+.2f° -> φ %+.2f°",
                                  yaw.angle_deg, math.degrees(est.phi - before))
                     else:
-                        log.info("  方位補正: 軸から %+.2f° は大きすぎるので棄却",
-                                 yaw.angle_deg)
+                        log.warning("  方位補正: 軸から %+.2f° は大きすぎるので棄却 "
+                                    "(線分 %d 本 / 総長 %.0fpx)。誤測定の疑い。",
+                                    yaw.angle_deg, yaw.segments, yaw.total_length_px)
             # 帯のずれからセル内の位置ずれを測り、推定位置を絶対補正する
             off = cell_offset(frame, detector)
             if off.saturated:
@@ -301,6 +306,15 @@ def main() -> None:
             else:
                 motion.start_move_cells(1, axis)       # 向きは変えずにその方角へ
                 run_primitive(f"{step.direction.name}へ1セル")
+            # 平行移動では回転を一切指令しないので、**測れた回転は異常の証拠**。
+            # 実機 (#76) では壁に接触した移動が -3.01° を残し、その後カメラの軸角測定が
+            # 壊れて走行が崩壊した。通常の移動の残差は 0.9° 以下なので、ここで止める。
+            heading_residual = abs(math.degrees(motion.residual()[2]))
+            if not args.turn_in_place and heading_residual > args.max_heading_residual:
+                log.error("進行中止: 回転を指令していないのに %.2f° 回った "
+                          "(上限 %.2f°)。壁との接触かスリップの可能性が高い。",
+                          heading_residual, args.max_heading_residual)
+                return False
             coast(args.pause)
             return True
 
