@@ -297,6 +297,38 @@ def maze_walls_to_body(
     }
 
 
+#: 進路チェック (地図が開いていると言う方角に壁が見えないか) に使う最低赤割合。
+#: **壁の有無判定より高くする。** 問うている内容が違うため:
+#:   壁検出   … 「壁はあるか」。前提なし。見落とし = 衝突なのでしきい値は低く (0.08)
+#:   進路確認 … 「地図は開いていると言うが本当か」。**開いている公算が高い**という前提が
+#:               あり、誤検出は走行を無駄に終わらせる
+#: 実測の分離 (#65, 113 フレーム / 452 ラベル) は 壁なし <= 0.121 / 壁あり >= 0.302 なので、
+#: その間を取る。実機 (#76) では right の 0.09 で最速ランが誤って中止された。
+#: なお本当に危険な状況 (姿勢がずれて壁を見失う) では赤割合は 0.00 まで落ちるので、
+#: この値を上げても検出力はほとんど落ちない。
+PATH_BLOCK_MIN_FRACTION = 0.20
+
+
+def path_block_threshold(cfg: "WallDetectorConfig", edge: str) -> float:
+    """進路チェックのしきい値 (辺ごとの壁判定値と :data:`PATH_BLOCK_MIN_FRACTION` の大きい方)。"""
+    return max(cfg.threshold_for(edge), PATH_BLOCK_MIN_FRACTION)
+
+
+def body_edge_for(direction: Direction, facing: Direction) -> str:
+    """迷路方角 ``direction`` の壁が、``facing`` を向いた機体のどの辺に写るかを返す。
+
+    :func:`maze_walls_to_body` の「辺だけ」版。**進もうとしている方角の壁を見る**のに使う
+    (ホロノミック走行では進行方向と機体の向きが一致しないので、「前方を確認する」では
+    足りない)。``facing`` を北に固定すると N→FRONT / S→BACK / W→LEFT / E→RIGHT の
+    定数写像になる。
+    """
+    return _BODY_EDGE_BY_QUARTER[(direction - facing) % 4]
+
+
+# facing からの時計回りの 90° 単位のずれ -> 機体の辺
+_BODY_EDGE_BY_QUARTER = {0: FRONT, 1: RIGHT, 2: BACK, 3: LEFT}
+
+
 def update_maze_walls(maze, x: int, y: int, walls_maze: dict[Direction, bool]) -> None:
     """判定した迷路方角の壁有無をセル (x, y) に反映する (共有エッジで隣接にも反映)。"""
     for d, present in walls_maze.items():

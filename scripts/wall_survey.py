@@ -93,7 +93,7 @@ def plan_tour(
                 log.warning("%s から %s へ進めない", cell, target)
                 return steps
             nxt = maze.neighbor(*cell, d)
-            steps.append(Step(quarter_turns(face, d), d, nxt))
+            steps.append(Step(d, nxt))
             cell, face = nxt, d
             visited.add(cell)
 
@@ -126,7 +126,7 @@ def main() -> None:
     log.info("既知形状 (%dx%d) を読み込み:\n%s", maze.size, maze.size, maze.to_ascii())
     tour = plan_tour(maze)
     log.info("巡回順路 %d 手: %s", len(tour),
-             " ".join(f"{TURN_LABEL.get(s.turn, s.turn)}->{s.to_cell}" for s in tour))
+             " ".join(f"{s.direction.name}->{s.to_cell}" for s in tour))
     if args.dry_run:
         return
 

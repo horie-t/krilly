@@ -12,7 +12,7 @@ import pytest
 from krilly.app.run_manager import RunManager, RunPhase, facing_after
 from krilly.solver.maze import Direction
 from krilly.strategy.explorer import quarter_turns
-from krilly.strategy.shortest_path import Leg, path_to_legs, shortest_path
+from krilly.strategy.shortest_path import Leg, path_to_legs, shortest_path, turns_in
 from tests.test_explorer import open_maze, run_search
 
 
@@ -35,11 +35,18 @@ def manager(explorer):
 
 
 # --- facing_after -----------------------------------------------------------
-def test_facing_after_folds_turns():
-    legs = [Leg(turn=0, cells=2), Leg(turn=-1, cells=2)]   # 直進 -> 右90°
-    assert facing_after(legs, Direction.N) is Direction.E
-    assert facing_after([Leg(2, 1)], Direction.N) is Direction.S
-    assert facing_after([], Direction.W) is Direction.W
+def test_facing_after_is_unchanged_when_holonomic():
+    """旋回レス走行では機体は回らないので、走り終えても向きは同じ (#76)。"""
+    legs = [Leg(Direction.N, 2), Leg(Direction.E, 2)]
+    assert facing_after(legs, Direction.N) is Direction.N
+    assert facing_after(legs, Direction.W) is Direction.W
+
+
+def test_facing_after_follows_the_last_leg_when_turning():
+    """旋回する走り方では最後の区間の方角を向いて終わる。"""
+    legs = [Leg(Direction.N, 2), Leg(Direction.E, 2)]
+    assert facing_after(legs, Direction.N, holonomic=False) is Direction.E
+    assert facing_after([], Direction.W, holonomic=False) is Direction.W
 
 
 # --- 基本の遷移 --------------------------------------------------------------
@@ -60,7 +67,7 @@ def test_full_cycle_search_return_speed(manager):
     # 最速経路は shortest_path (known=visited) と一致する
     path = shortest_path(ex.maze, ex.maze.start, known=ex.visited,
                          start_facing=facing_home)
-    assert speed == path_to_legs(path, facing_home)
+    assert speed == path_to_legs(path)
 
 
 def test_repeats_until_max_runs(manager):
@@ -117,43 +124,63 @@ def test_time_budget_blocks_at_home_too(manager):
 
 
 def test_estimate_uses_measured_times(manager):
-    """セル数・旋回数に加えて**直進の回数**も数える (ランプの固定費)。"""
-    legs = [Leg(0, 3), Leg(-1, 2)]                 # 5 セル / 直進 2 回 / 旋回 1 回
+    """セル数に加えて**区間の本数**も数える (ランプの固定費)。旋回レスでは旋回は乗らない。"""
+    legs = [Leg(Direction.N, 3), Leg(Direction.E, 2)]      # 5 セル / 区間 2 本
     assert manager.estimate_s(legs) == pytest.approx(
-        5 * manager.cell_time_s + 2 * manager.straight_time_s + 1 * manager.turn_time_s
+        3 * manager.cell_time_s + 2 * manager.lateral_cell_time_s
+        + 2 * manager.straight_time_s
+    )
+
+
+def test_estimate_adds_turns_only_in_the_turning_mode(explorer):
+    """旋回する走り方では旋回の時間が乗る (#76 の退避路)。"""
+    legs = [Leg(Direction.N, 3), Leg(Direction.E, 2)]      # 北 -> 東 = 90° 1 回
+    # 旋回する走り方は常に前後軸で進むので、比較のため東西も前後と同じ時間に揃える
+    # (既定は東西 0.75s / 南北 0.73s と少し違う)。
+    turning = RunManager(explorer, holonomic=False, lateral_cell_time_s=0.73)
+    assert turning.estimate_s(legs, Direction.N) - turning.turn_time_s == pytest.approx(
+        RunManager(explorer, lateral_cell_time_s=0.73).estimate_s(legs)
     )
 
 
 def test_estimate_prefers_fewer_straights_for_the_same_cells(manager):
     """同じ 4 セルでも、区間が細切れなほど見積もりは大きい (固定費が効く)。"""
-    one_leg = manager.estimate_s([Leg(0, 4)])
-    four_legs = manager.estimate_s([Leg(0, 1)] * 4)
-    assert four_legs > one_leg
-    assert four_legs - one_leg == pytest.approx(3 * manager.straight_time_s)
+    one_leg = manager.estimate_s([Leg(Direction.N, 4)])
+    zigzag = [Leg(Direction.N, 1), Leg(Direction.N, 1),
+              Leg(Direction.N, 1), Leg(Direction.N, 1)]
+    assert manager.estimate_s(zigzag) > one_leg
+    assert manager.estimate_s(zigzag) - one_leg == pytest.approx(
+        3 * manager.straight_time_s)
 
 
-# 実機の最速ラン: 20 セル / 直進 12 回 / 旋回 13 回
-MEASURED_LEGS = [Leg(2, 3), Leg(-1, 1), Leg(1, 1), Leg(-1, 3), Leg(-1, 2), Leg(-1, 1),
-                 Leg(1, 1), Leg(1, 1), Leg(-1, 1), Leg(-1, 3), Leg(-1, 2), Leg(-1, 1)]
+# 実機の最速ラン: 20 セル / 区間 12 本 / 旋回 13 回 (北向きスタート)
+MEASURED_LEGS = [Leg(Direction.S, 3), Leg(Direction.W, 1), Leg(Direction.S, 1),
+                 Leg(Direction.W, 3), Leg(Direction.N, 2), Leg(Direction.E, 1),
+                 Leg(Direction.N, 1), Leg(Direction.W, 1), Leg(Direction.N, 1),
+                 Leg(Direction.E, 3), Leg(Direction.S, 2), Leg(Direction.W, 1)]
 
 
 def test_estimate_matches_the_measured_speed_run(explorer):
-    """3 項モデル (セル数・直進回数・旋回回数) が実測に合う。
+    """3 項モデル (セル数・区間の本数・旋回回数) が実測に合う。
 
-    M5 #20 の速度設定 (v=0.12, omega=1.0) でこの経路は実測 70.9s だった。
-    定数はその後 #21 で速くした側へ更新したので、モデルの検証は当時の定数で行う。
+    M5 #20 の速度設定 (v=0.12, omega=1.0) でこの経路は実測 70.9s だった。定数はその後
+    #21 で速くした側へ更新したので、モデルの検証は当時の定数と**旋回する走り方**で行う。
     セル数と旋回数だけの 2 項モデルでは同じ経路が 25% 低く出ていた。
     """
     assert sum(leg.cells for leg in MEASURED_LEGS) == 20
-    assert sum(abs(leg.turn) for leg in MEASURED_LEGS) == 13
-    m5 = RunManager(explorer, cell_time_s=1.50, straight_time_s=0.70, turn_time_s=2.56)
-    assert m5.estimate_s(MEASURED_LEGS) == pytest.approx(70.9, abs=1.5)
+    assert len(MEASURED_LEGS) == 12
+    assert turns_in(MEASURED_LEGS, Direction.N) == 13
+    m5 = RunManager(explorer, cell_time_s=1.50, straight_time_s=0.70, turn_time_s=2.56,
+                    holonomic=False)
+    assert m5.estimate_s(MEASURED_LEGS, Direction.N) == pytest.approx(70.9, abs=1.5)
 
 
-def test_current_constants_are_faster_than_the_m5_ones(explorer, manager):
-    """#21 のチューニング後の定数は、同じ経路をより速く見積もる。"""
-    m5 = RunManager(explorer, cell_time_s=1.50, straight_time_s=0.70, turn_time_s=2.56)
-    assert manager.estimate_s(MEASURED_LEGS) < m5.estimate_s(MEASURED_LEGS)
+def test_holonomic_estimate_is_about_half_of_the_turning_one(explorer, manager):
+    """旋回をやめると同じ経路の見積もりが半分近くになる (#76 の狙い)。"""
+    turning = RunManager(explorer, holonomic=False)
+    ratio = manager.estimate_s(MEASURED_LEGS) / turning.estimate_s(MEASURED_LEGS,
+                                                                   Direction.N)
+    assert 0.40 < ratio < 0.60
 
 
 def test_elapsed_starts_at_first_departure(manager):
@@ -169,11 +196,10 @@ def test_speed_route_only_uses_visited_cells(manager):
     legs = manager.speed_legs(Direction.N)
     assert legs is not None
     # Leg を辿ってセル列を復元し、全部 visited であること
-    cell, facing = ex.maze.start, Direction.N
+    cell = ex.maze.start
     for leg in legs:
-        facing = Direction((facing - leg.turn) % 4)
         for _ in range(leg.cells):
-            cell = ex.maze.neighbor(*cell, facing)
+            cell = ex.maze.neighbor(*cell, leg.direction)
             assert cell in ex.visited
     assert ex.maze.is_goal(*cell)
 
@@ -182,11 +208,10 @@ def test_return_legs_from_goal(manager):
     ex = manager.explorer
     legs = manager.return_legs(ex.cell, ex.facing)
     assert legs is not None
-    cell, facing = ex.cell, ex.facing
+    cell = ex.cell
     for leg in legs:
-        facing = Direction((facing - leg.turn) % 4)
         for _ in range(leg.cells):
-            cell = ex.maze.neighbor(*cell, facing)
+            cell = ex.maze.neighbor(*cell, leg.direction)
     assert cell == ex.maze.start
 
 

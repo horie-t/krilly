@@ -9,19 +9,23 @@ import pytest
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import Explorer
 from krilly.strategy.shortest_path import (
+    DEFAULT_COST,
+    LEGACY_COST,
     Leg,
+    MoveCost,
     describe_legs,
     direction_between,
     path_cost,
     path_to_legs,
     route,
     shortest_path,
+    turns_in,
 )
 from tests.test_explorer import open_maze, run_search, sense
 
 
-def turns_in(path, start_facing=Direction.N) -> int:
-    return sum(abs(leg.turn) for leg in path_to_legs(path, start_facing))
+def path_turns(path, start_facing=Direction.N) -> int:
+    return turns_in(path_to_legs(path), start_facing)
 
 
 def crosses_no_wall(maze: Maze, path) -> bool:
@@ -55,9 +59,27 @@ def test_shortest_path_minimises_turns_with_turn_cost():
     """壁なしなら同じセル数の経路が多数ある。旋回コストで曲がりの少ない方を選ぶ。"""
     m = open_maze(5)
     # 北向きスタート: 北へ2 -> 東へ2 なら旋回 1 回で足りる
-    assert turns_in(shortest_path(m, (0, 0), turn_cost=1.0)) == 1
-    # turn_cost=0 ならセル数だけの最短 (旋回回数は問わない) になる
-    assert len(shortest_path(m, (0, 0), turn_cost=0.0)) - 1 == 4
+    cost = MoveCost(leg=0.0, turn=1.0)
+    assert path_turns(shortest_path(m, (0, 0), cost=cost)) == 1
+    # 旋回も区間の固定費も 0 ならセル数だけの最短 (曲がり方は問わない) になる
+    flat = MoveCost(cell_ew=1.0, leg=0.0, turn=0.0)   # 軸差も消して 1 セル = 1.0 にする
+    assert len(shortest_path(m, (0, 0), cost=flat)) - 1 == 4
+
+
+def test_leg_cost_prefers_fewer_straight_runs():
+    """旋回レスでも「区間の固定費」があるので、曲がりの少ない経路を選ぶ (#76)。"""
+    m = open_maze(5)
+    # 既定 (leg=1.04, turn=0) でも、区間が 2 本で済む L 字が選ばれる
+    assert len(path_to_legs(shortest_path(m, (0, 0)))) == 2
+
+
+def test_legacy_cost_reproduces_the_turning_route():
+    """LEGACY_COST は「セル数 + turn_cost x 旋回回数」と厳密に一致する (#76 の後方互換)。"""
+    m = open_maze(5)
+    path = shortest_path(m, (0, 0), cost=LEGACY_COST)
+    legs = path_to_legs(path)
+    expected = (len(path) - 1) + LEGACY_COST.turn * turns_in(legs)
+    assert path_cost(path, Direction.N, LEGACY_COST) == pytest.approx(expected)
 
 
 def test_shortest_path_start_on_goal():
@@ -116,28 +138,51 @@ def test_shortest_path_ignores_open_shortcut_outside_known():
 # --- 区間への圧縮 (最速ランが使う形) --------------------------------------
 def test_path_to_legs_run_length_encodes_straights():
     path = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)]
-    assert path_to_legs(path, Direction.N) == [Leg(turn=0, cells=2), Leg(turn=-1, cells=2)]
+    assert path_to_legs(path) == [Leg(Direction.N, 2), Leg(Direction.E, 2)]
 
 
-def test_path_to_legs_includes_the_initial_turn():
+def test_path_to_legs_does_not_depend_on_the_facing():
+    """区間は「どちらへ何セル」なので、機体の向きは関係しない (#76)。"""
     path = [(0, 0), (1, 0), (2, 0)]
-    assert path_to_legs(path, Direction.N) == [Leg(turn=-1, cells=2)]   # 右90°して直進2
-    assert path_to_legs(path, Direction.E) == [Leg(turn=0, cells=2)]    # 既に東向き
-    assert path_to_legs(path, Direction.W) == [Leg(turn=2, cells=2)]    # 180°
+    assert path_to_legs(path) == [Leg(Direction.E, 2)]
 
 
 def test_path_to_legs_handles_a_zigzag():
     path = [(0, 0), (0, 1), (1, 1), (1, 2), (2, 2)]
-    assert path_to_legs(path, Direction.N) == [
-        Leg(0, 1), Leg(-1, 1), Leg(1, 1), Leg(-1, 1),
+    assert path_to_legs(path) == [
+        Leg(Direction.N, 1), Leg(Direction.E, 1), Leg(Direction.N, 1), Leg(Direction.E, 1),
     ]
 
 
-def test_path_cost_counts_cells_and_turns():
-    path = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)]
-    assert path_cost(path, Direction.N, turn_cost=0.0) == pytest.approx(4.0)
-    assert path_cost(path, Direction.N, turn_cost=1.0) == pytest.approx(5.0)   # 旋回1回
+def test_turns_in_counts_quarter_turns_from_the_start_facing():
+    legs = [Leg(Direction.N, 2), Leg(Direction.E, 2)]
+    assert turns_in(legs, Direction.N) == 1        # 北のまま -> 東へ 90°
+    assert turns_in(legs, Direction.E) == 2        # 東 -> 北 -> 東
+    assert turns_in([], Direction.N) == 0
+
+
+def test_path_cost_matches_what_the_search_minimises():
+    path = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)]   # 北へ2 -> 東へ2
+    flat = MoveCost(cell_ew=1.0, leg=0.0, turn=0.0)   # 軸差も消して 1 セル = 1.0 にする
+    assert path_cost(path, Direction.N, flat) == pytest.approx(4.0)
+    turning = MoveCost(cell_ew=1.0, leg=0.0, turn=1.0)
+    assert path_cost(path, Direction.N, turning) == pytest.approx(5.0)   # 旋回1回
+    # 旋回レス既定: 南北 2 セル + 東西 2 セル x 1.03 + 区間 2 本 x 1.10
+    assert path_cost(path, Direction.N, DEFAULT_COST) == pytest.approx(
+        2 * 1.0 + 2 * 1.03 + 2 * 1.10
+    )
     assert path_cost([(0, 0)]) == pytest.approx(0.0)
+
+
+def test_direction_split_cost_biases_the_route():
+    """南北と東西でコストが違えば、安い軸を長く使う経路を選ぶ (#76 の横移動用)。"""
+    m = open_maze(5)
+    cheap_ns = MoveCost(cell_ns=1.0, cell_ew=3.0, leg=0.0, turn=0.0)
+    path = shortest_path(m, (0, 0), [(2, 2)], cost=cheap_ns)
+    legs = path_to_legs(path)
+    # 東西が高いので、東西の移動は最小限 (2 セル) のまま。経路長は変わらないが
+    # コストの内訳は南北優先になる
+    assert sum(l.cells for l in legs if l.direction in (Direction.E, Direction.W)) == 2
 
 
 def test_route_composes_path_and_legs():
@@ -146,8 +191,8 @@ def test_route_composes_path_and_legs():
 
 
 def test_describe_legs_text():
-    legs = [Leg(0, 2), Leg(-1, 3), Leg(2, 1)]
-    assert describe_legs(legs) == "直進2 -> 右90° -> 直進3 -> 180° -> 直進1"
+    legs = [Leg(Direction.N, 2), Leg(Direction.E, 3), Leg(Direction.S, 1)]
+    assert describe_legs(legs) == "Nへ2 -> Eへ3 -> Sへ1"
     assert describe_legs([]) == "(移動なし)"
 
 

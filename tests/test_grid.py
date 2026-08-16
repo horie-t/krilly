@@ -1,11 +1,17 @@
 """格子スナップ補正 (GridCorrector / snap_to_grid) と位置補正のユニットテスト。"""
 
+import math
+
 import pytest
 
 from krilly.config import RobotConfig
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
-from krilly.localization.grid import GridCorrector, snap_to_grid
+from krilly.localization.grid import (
+    GridCorrector,
+    apply_axis_heading,
+    snap_to_grid,
+)
 
 PITCH = 0.180
 
@@ -93,3 +99,19 @@ def test_residual():
 def test_invalid_pitch_raises():
     with pytest.raises(ValueError):
         GridCorrector(0.0)
+
+
+def test_apply_axis_heading_rejects_an_implausible_correction():
+    """13° 級の補正は誤測定として棄却する (#76)。
+
+    正常運転で機体の方位が迷路軸から 13° ずれることはない。適用すると機体を物理的に
+    その角度だけ回してしまい、以降のカメラ測定も壊れる。実機でこれが起きて走行が崩壊した。
+    """
+    est = DeadReckoning(KiwiKinematics(config=CFG), phi=math.pi / 2)
+    before = est.phi
+    assert not apply_axis_heading(est, math.radians(-13.27))
+    assert est.phi == before                        # 触らない
+
+    # 数度の補正は通る (これが本来の用途)
+    assert apply_axis_heading(est, math.radians(1.5))
+    assert est.phi == pytest.approx(math.pi / 2 + math.radians(1.5))

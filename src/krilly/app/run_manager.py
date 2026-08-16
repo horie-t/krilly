@@ -25,10 +25,12 @@ from enum import Enum
 from krilly.solver.maze import Direction
 from krilly.strategy.explorer import Explorer
 from krilly.strategy.shortest_path import (
-    DEFAULT_TURN_COST,
+    DEFAULT_COST,
     Leg,
+    MoveCost,
     path_to_legs,
     shortest_path,
+    turns_in,
 )
 
 
@@ -42,11 +44,15 @@ class RunPhase(Enum):
     FINISHED = "finished"      # 終了 (時間切れ / 5 走消化 / 続行不能)
 
 
-def facing_after(legs: list[Leg], facing: Direction) -> Direction:
-    """``legs`` を実行し終えたときの向き (+turn = CCW)。"""
-    for leg in legs:
-        facing = Direction((facing - leg.turn) % 4)
-    return facing
+def facing_after(legs: list[Leg], facing: Direction, holonomic: bool = True) -> Direction:
+    """``legs`` を実行し終えたときの機体の向き。
+
+    旋回レス走行 (#76) では機体は回らないので ``facing`` のまま。旋回する走り方では
+    最後の区間の方角を向いている。
+    """
+    if holonomic or not legs:
+        return facing
+    return legs[-1].direction
 
 
 @dataclass
@@ -66,20 +72,23 @@ class RunManager:
     explorer: Explorer
     time_limit_s: float = 600.0        # 持ち時間 (10 分)
     max_runs: int = 5                  # 最大走行回数
-    # #21 の採用点 (v=0.24 m/s, accel 0.9, omega=2.0 rad/s) での 5x5 通しラン実測
-    # (n=80/16/24/103/9):
-    #   直進 1/2/3 セル = 1.11 / 1.87 / 2.61 s -> 1 セルあたり 0.75s + 1 回あたり 0.36s
-    #   (連続直進はランプの固定費が償却されるので、固定費を分離しないと直進の多い
-    #    経路で見積もりが外れる)
-    #   90° 旋回 1.76s / 180° 2.52s
-    #   動作間の停止は 1 回あたり 0.42s (最速ラン実測 51.2s - 動作時間の合計 41.2s を
-    #   24 動作で割った値)
+    # 旋回レス走行 (#76) の 5x5 通しラン実測。speed_run が末尾に軸ごとの当てはめを出す:
+    #   南北 (機体の前後軸) 1セル 0.73s + 区間 0.39s
+    #   東西 (機体の左右軸) 1セル 0.75s + 区間 0.35s
+    #   動作あたりの停止 0.44s (最速ラン実測 24.6s - 動作時間の合計 19.3s を 12 区間で割る)
+    # 南北と東西の差は 1 セルで 15ms しかない (横移動は前進より 4% 高い輪速を要するが、
+    # MAX_SPEED に収まっているので速度は同じ)。
+    # 旋回する走り方 (#21 の実測) は 1セル 0.75s / 区間 0.36s / 90°旋回 1.76s。
     # **速度設定を変えたら speed_run の末尾に出る実測表で測り直すこと。**
-    cell_time_s: float = 0.75          # 直進の 1 セルあたり増分
-    straight_time_s: float = 0.78      # 直進 1 回あたりの固定費 (ランプ + 整定 + 停止)
-    turn_time_s: float = 2.18          # 90° 旋回 1 回 (整定 + 停止込み)
+    cell_time_s: float = 0.73          # 南北 1 セルあたり増分
+    straight_time_s: float = 0.81      # 区間 1 本あたりの固定費 (ランプ + 整定 + 撮影 + 停止)
+    turn_time_s: float = 2.18          # 90° 旋回 1 回 (旋回する走り方のみ)
     time_margin: float = 1.5           # 見積もりに掛ける安全率
-    turn_cost: float = DEFAULT_TURN_COST
+    #: 東西 (旋回レスでは機体の左右軸) へ 1 セル進む時間。
+    lateral_cell_time_s: float = 0.75
+    #: True なら機体を旋回させない (#76)。旋回の時間は見積もりに入らない。
+    holonomic: bool = True
+    cost: MoveCost = DEFAULT_COST
 
     phase: RunPhase = field(default=RunPhase.WAIT, init=False)
     runs_used: int = field(default=0, init=False)
@@ -93,20 +102,26 @@ class RunManager:
     def remaining_s(self, now: float) -> float:
         return self.time_limit_s - self.elapsed_s(now)
 
-    def estimate_s(self, legs: list[Leg]) -> float:
+    def estimate_s(self, legs: list[Leg], facing: Direction = Direction.N) -> float:
         """Leg 列の所要時間の見積もり (安全率は掛けない素の値)。
 
-        セル数・旋回数だけでなく**直進の回数**も数える。連続直進はランプの固定費を
-        償却するので、同じセル数でも区間が細切れなほど時間がかかる。
+        セル数だけでなく**区間の本数**も数える。連続直進はランプの固定費を償却するので、
+        同じセル数でも区間が細切れなほど時間がかかる。
+
+        セルは進行軸で分ける。旋回レス走行 (#76) では機体の向きが固定なので、南北は
+        機体の前後軸・東西は左右軸の移動になり、所要時間が違いうる。旋回する走り方
+        (``holonomic=False``) では常に前を向いて進むので両者は同じで、代わりに旋回の
+        時間が乗る。
         """
-        cells = sum(leg.cells for leg in legs)
-        turns = sum(abs(leg.turn) for leg in legs)
-        straights = sum(1 for leg in legs if leg.cells)
-        return (
-            cells * self.cell_time_s
-            + straights * self.straight_time_s
-            + turns * self.turn_time_s
-        )
+        ns = sum(leg.cells for leg in legs if leg.direction in (Direction.N, Direction.S))
+        ew = sum(leg.cells for leg in legs if leg.direction in (Direction.E, Direction.W))
+        # 旋回レスでは東西が機体の左右軸 (横移動) になる。旋回するなら常に前を向いて
+        # 進むので、東西も南北も同じ時間。
+        ew_time = self.lateral_cell_time_s if self.holonomic else self.cell_time_s
+        total = ns * self.cell_time_s + ew * ew_time + len(legs) * self.straight_time_s
+        if not self.holonomic:
+            total += turns_in(legs, facing) * self.turn_time_s
+        return total
 
     # -- 経路 -----------------------------------------------------------------
     def _route(
@@ -115,10 +130,9 @@ class RunManager:
         """観測済みセルだけを通る最小コスト経路。繋がっていなければ None。"""
         path = shortest_path(
             self.explorer.maze, start, goals,
-            start_facing=facing, known=self.explorer.visited,
-            turn_cost=self.turn_cost,
+            start_facing=facing, known=self.explorer.visited, cost=self.cost,
         )
-        return path_to_legs(path, facing) if path else None
+        return path_to_legs(path) if path else None
 
     def speed_legs(self, facing: Direction) -> list[Leg] | None:
         """スタート -> ゴールの最速経路 (スタート区画で ``facing`` を向いている前提)。"""

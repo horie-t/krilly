@@ -61,9 +61,19 @@ class KiwiKinematics:
         return (float(b[0]), float(b[1]), float(b[2]))
 
     # -- ステッパ変換 -------------------------------------------------------
-    def wheel_speed_to_step_hz(self, v_mps: float) -> float:
-        """各輪の接地面速度 (m/s) -> L6470 の Run 速度 (フルステップ/s)。"""
-        return v_mps / self._m_per_fullstep
+    def wheel_speed_to_step_hz(self, v_mps: float, wheel: int | None = None) -> float:
+        """各輪の接地面速度 (m/s) -> L6470 の Run 速度 (フルステップ/s)。
+
+        ``wheel`` を渡すとその輪の実効径を使う (``RobotConfig.wheel_diameters_m``)。
+        前進はほぼ W1/W2 で駆動するので共通径は実質 W1/W2 の値になっており、
+        横移動 (W0 が主役) では輪ごとの径が要る (#76)。省略時は共通径。
+        """
+        return v_mps / self._m_per_fullstep_of(wheel)
+
+    def _m_per_fullstep_of(self, wheel: int | None) -> float:
+        if wheel is None or self.cfg.wheel_diameters_m is None:
+            return self._m_per_fullstep
+        return self.cfg.wheel_circumference(wheel) / self.cfg.steps_per_rev
 
     def step_hz_to_wheel_speed(self, step_hz: float) -> float:
         """L6470 の Run 速度 (フルステップ/s) -> 各輪の接地面速度 (m/s)。"""

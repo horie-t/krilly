@@ -37,7 +37,8 @@ from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
-    FRONT,
+    body_edge_for,
+    path_block_threshold,
     WallDetector,
     calibrated_config,
 )
@@ -49,7 +50,12 @@ from krilly.strategy.explorer import (
     heading_rad,
     quarter_turns,
 )
-from krilly.strategy.shortest_path import Leg, describe_legs
+from krilly.strategy.shortest_path import (
+    DEFAULT_COST,
+    LEGACY_COST,
+    Leg,
+    describe_legs,
+)
 
 log = get_logger("krilly.speed_run")
 
@@ -74,6 +80,10 @@ def main() -> None:
     p.add_argument("--gyro-sign", type=float, default=1.0)
     p.add_argument("--gyro-scale", type=float, default=None)
     p.add_argument("--no-correct", action="store_true", help="カメラの位置補正を無効化")
+    p.add_argument("--turn-in-place", action="store_true",
+                   help="機体を旋回させて走る従来モード (既定は旋回レス走行 #76)")
+    p.add_argument("--max-heading-residual", type=float, default=2.5,
+                   help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true", help="前進前の前方確認を無効化")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
     args = p.parse_args()
@@ -84,8 +94,10 @@ def main() -> None:
     maze_cfg = load_maze_config()
     maze = Maze(args.size) if args.size else Maze.from_config(maze_cfg)
     maze.set_outer_walls()
-    explorer = Explorer(maze)
-    manager = RunManager(explorer, time_limit_s=args.time_limit, max_runs=args.max_runs)
+    explorer = Explorer(maze, holonomic=not args.turn_in_place)
+    manager = RunManager(explorer, time_limit_s=args.time_limit, max_runs=args.max_runs,
+                         holonomic=not args.turn_in_place,
+                         cost=LEGACY_COST if args.turn_in_place else DEFAULT_COST)
     detector = WallDetector(calibrated_config())
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
@@ -196,12 +208,41 @@ def main() -> None:
             apply_cell_offset(est, cell_center(cell, maze_cfg.cell_pitch_m),
                               off.forward_m, off.left_m, phi=heading_rad(facing))
 
-        def front_is_clear() -> bool:
+        def path_is_clear(direction: Direction, facing: Direction) -> bool:
+            """進む直前に、進行方角の壁が見えていないか確認する。
+
+            見る辺は進行方角から決める (ホロノミック走行では進行方向と機体の向きが
+            一致しない)。しきい値は辺ごとの値を使うこと — BACK はケーブルの偽帯があるため
+            0.25 に上げてある。
+            """
             if args.no_front_check:
                 return True
-            fraction = detector.measure(capture())[FRONT][0]
-            if fraction >= detector.cfg.threshold_for(FRONT):
-                log.error("前進中止: 前方に壁が見える (赤割合 %.2f)。姿勢ずれの可能性。", fraction)
+            edge = body_edge_for(direction, facing)
+            fraction = detector.measure(capture())[edge][0]
+            threshold = path_block_threshold(detector.cfg, edge)
+            if fraction >= threshold:
+                log.error("進行中止: %s 方向 (%s 辺) に壁が見える (赤割合 %.2f >= %.2f)。"
+                          "姿勢ずれの可能性。", direction.name, edge, fraction, threshold)
+                return False
+            return True
+
+        def move_was_clean(label: str, timeout: float | None = None,
+                           kind: str = "") -> bool:
+            """移動を回し、**指令していない回転**が出ていないかを見る。
+
+            平行移動では回転を一切指令しないので、測れた回転は異常の証拠になる
+            (実機 #76: 壁に接触した移動が -3.01° を残し、その後カメラの軸角測定が
+            壊れて走行が崩壊した)。旋回する走り方では旋回を指令するので判定しない。
+            """
+            run_primitive(label, timeout if timeout is not None else args.timeout,
+                          kind=kind)
+            if args.turn_in_place:
+                return True
+            residual = abs(math.degrees(motion.residual()[2]))
+            if residual > args.max_heading_residual:
+                log.error("進行中止: 回転を指令していないのに %.2f° 回った (上限 %.2f°)。"
+                          "壁との接触かスリップの可能性が高い。",
+                          residual, args.max_heading_residual)
                 return False
             return True
 
@@ -231,11 +272,15 @@ def main() -> None:
                     log.info("ゴール到達! %d 手 / 訪問 %d セル",
                              explorer.steps, len(explorer.visited))
                     return (explorer.cell, explorer.facing)
-                turn_to(explorer.facing, step.direction)
-                if not front_is_clear():
+                axis = quarter_turns(explorer.facing, step.direction)
+                if args.turn_in_place:
+                    turn_to(explorer.facing, step.direction)
+                    axis = 0
+                if not path_is_clear(step.direction, explorer.facing):
                     return None
-                motion.start_forward_cells(1)
-                run_primitive("1セル前進", args.timeout, kind="cells1")
+                motion.start_move_cells(1, axis)
+                if not move_was_clean(f"{step.direction.name}へ1セル"):
+                    return None
                 explorer.advance(step)
             log.error("探索が %d 手で終わらなかった", args.max_steps)
             return None
@@ -246,15 +291,23 @@ def main() -> None:
         ) -> tuple[tuple[int, int], Direction] | None:
             log.info("%s: %s", label, describe_legs(legs))
             for leg in legs:
-                facing = turn_to(facing, Direction((facing - leg.turn) % 4))
+                axis = quarter_turns(facing, leg.direction)
+                if args.turn_in_place:
+                    facing = turn_to(facing, leg.direction)
+                    axis = 0
                 correct_at(cell, facing)
-                if not front_is_clear():
+                if not path_is_clear(leg.direction, facing):
                     return None
-                motion.start_forward_cells(leg.cells)
-                run_primitive(f"直進{leg.cells}", max(args.timeout, leg.cells * 3.0),
-                              kind=f"cells{leg.cells}")
+                motion.start_move_cells(leg.cells, axis)
+                # 実測の集計は**進行軸で分ける**。旋回レスでは南北が機体の前後軸、
+                # 東西が左右軸になり、所要時間が違いうる (時間定数の校正に要る)。
+                axis_name = "ns" if leg.direction in (Direction.N, Direction.S) else "ew"
+                if not move_was_clean(f"{leg.direction.name}へ{leg.cells}",
+                                      timeout=max(args.timeout, leg.cells * 3.0),
+                                      kind=f"{axis_name}{leg.cells}"):
+                    return None
                 for _ in range(leg.cells):
-                    cell = maze.neighbor(*cell, facing)
+                    cell = maze.neighbor(*cell, leg.direction)
             correct_at(cell, facing)
             return (cell, facing)
 
@@ -294,11 +347,24 @@ def main() -> None:
             for kind in sorted(timings):
                 vals = timings[kind]
                 per = ""
-                if kind.startswith("cells"):
-                    n = int(kind[5:])
-                    per = f" / 1セルあたり {sum(vals) / len(vals) / n:.2f}s"
+                for prefix in ("cells", "ns", "ew"):
+                    if kind.startswith(prefix) and kind[len(prefix):].isdigit():
+                        n = int(kind[len(prefix):])
+                        per = f" / 1セルあたり {sum(vals) / len(vals) / n:.2f}s"
                 log.info("  %-8s n=%2d 平均 %.2fs (最小 %.2f 最大 %.2f)%s",
                          kind, len(vals), sum(vals) / len(vals), min(vals), max(vals), per)
+            # 時間定数の当てはめ: 同じ軸の 1 セルと n セルから「1 セルあたり」と
+            # 「区間 1 本あたりの固定費」を分ける (連続直進はランプの固定費を償却する)
+            for axis, name in (("ns", "南北 (前後軸)"), ("ew", "東西 (左右軸)")):
+                points = sorted((int(k[len(axis):]), sum(v) / len(v))
+                                for k, v in timings.items()
+                                if k.startswith(axis) and k[len(axis):].isdigit())
+                if len(points) >= 2:
+                    (n1, t1), (n2, t2) = points[0], points[-1]
+                    per_cell = (t2 - t1) / (n2 - n1)
+                    fixed = t1 - per_cell * n1
+                    log.info("  -> %s: 1セルあたり %.2fs + 区間あたり %.2fs "
+                             "(%dセルと%dセルから)", name, per_cell, fixed, n1, n2)
         log.info("判明した迷路:\n%s", maze.to_ascii())
 
 

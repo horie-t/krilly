@@ -134,14 +134,14 @@ def test_observe_is_relative_to_facing():
 def test_plan_moves_toward_the_goal():
     ex = Explorer(open_maze(5))                     # (0,0) 北向き、ゴール (2,2)
     step = ex.plan()
-    assert step == Step(turn=0, direction=Direction.N, to_cell=(0, 1))
+    assert step == Step(direction=Direction.N, to_cell=(0, 1))
 
 
 def test_plan_turns_when_the_front_is_walled():
     ex = Explorer(open_maze(5))
     ex.observe({FRONT: True, BACK: True, LEFT: True, RIGHT: False})   # 東しか開いていない
     step = ex.plan()
-    assert step == Step(turn=-1, direction=Direction.E, to_cell=(1, 0))
+    assert step == Step(direction=Direction.E, to_cell=(1, 0))
 
 
 def test_plan_returns_none_at_the_goal():
@@ -158,13 +158,37 @@ def test_plan_raises_when_the_goal_is_walled_off():
         ex.plan()
 
 
-def test_advance_updates_cell_facing_and_visited():
+def test_advance_updates_cell_and_visited():
     ex = Explorer(open_maze(5))
-    ex.advance(Step(turn=-1, direction=Direction.E, to_cell=(1, 0)))
+    ex.advance(Step(direction=Direction.E, to_cell=(1, 0)))
     assert ex.cell == (1, 0)
-    assert ex.facing is Direction.E
+    assert ex.travel is Direction.E
     assert ex.visited == {(0, 0), (1, 0)}
     assert ex.steps == 1
+
+
+def test_holonomic_advance_keeps_the_facing():
+    """旋回レス走行では機体の向きは変わらない (#76)。"""
+    ex = Explorer(open_maze(5))                       # holonomic=True が既定
+    ex.advance(Step(direction=Direction.E, to_cell=(1, 0)))
+    assert ex.facing is Direction.N                   # 北を向いたまま
+    assert ex.travel is Direction.E
+
+
+def test_turning_mode_updates_the_facing():
+    """旧モード (旋回する) では機体の向きが進行方角になる。"""
+    ex = Explorer(open_maze(5), holonomic=False)
+    ex.advance(Step(direction=Direction.E, to_cell=(1, 0)))
+    assert ex.facing is Direction.E
+    assert ex.travel is Direction.E
+
+
+def test_holonomic_tie_break_prefers_keeping_the_travel_axis():
+    """同距離なら進行軸を変えない方を選ぶ (機体の向きは固定なので travel で判断)。"""
+    ex = Explorer(open_maze(5))
+    ex.advance(Step(direction=Direction.E, to_cell=(1, 0)))   # 東へ進んだ直後
+    # (1,0) からゴール (2,2) へは東も北も同距離。直前と同じ東を選ぶ
+    assert ex.plan().direction is Direction.E
 
 
 def test_goal_distance_and_progress_text():

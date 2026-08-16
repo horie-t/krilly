@@ -71,11 +71,19 @@ class GridCorrector:
         return True
 
 
+#: 方位補正として受け入れる上限。**正常運転でこれを超えることはない**ので、超える値は
+#: 常に誤測定として棄却する。実機 (#76) では、壁に接触した直後の弱い帯から axis_yaw が
+#: -13.27° という値を返し、それが 15° のガードを通って適用された結果、機体が物理的に
+#: 13° 回って走行が崩壊した。1 手ごとに補正が入る運用では機体の方位は迷路軸から
+#: 数度しかずれないので、余裕を見ても 5° で十分。
+MAX_HEADING_CORRECTION_RAD = math.radians(5.0)
+
+
 def apply_axis_heading(
     est: DeadReckoning,
     axis_rad: float,
     weight: float = 1.0,
-    max_error: float | None = math.radians(15.0),
+    max_error: float | None = MAX_HEADING_CORRECTION_RAD,
 ) -> bool:
     """カメラで測った迷路軸からの方位ずれで、推定方位を補正する。
 
@@ -91,7 +99,9 @@ def apply_axis_heading(
     絶対補正がこれ。
 
     推定 φ から測定値を引いた値を 90° 格子へスナップし、測定値を足し戻したものを
-    目標とする。``max_error`` (既定 15°) を超える補正は誤測定として棄却する。
+    目標とする。``max_error`` (既定 :data:`MAX_HEADING_CORRECTION_RAD` = 5°) を超える
+    補正は**誤測定として棄却する** — 適用すると機体を物理的にその角度だけ回してしまい、
+    以降のカメラ測定も壊れて走行が崩壊する (#76 の実機で経験)。
     """
     quarter = math.pi / 2.0
     target = snap_to_grid(est.phi - axis_rad, quarter) + axis_rad

@@ -167,15 +167,22 @@ def check_limits(tuning: TuningProfile, kin: KiwiKinematics | None = None) -> li
     m = tuning.motion
     warnings: list[str] = []
 
-    # 1. 速度のピーク: 前進中 (主軸 vx + 保持) と旋回中 (主軸 omega + 保持) の大きい方
+    # 1. 速度のピーク: 前進 / **横移動** / 旋回のうち最大。
+    #    横移動 (#76) は主軸が vy になるので vx と vy が入れ替わる。純 vy の係数は
+    #    純 vx より大きい (スポーク角が [0,120,240] 近辺なので max|cos| > max|sin|) ため、
+    #    **同じ体速度でも横の方が約 4% 高い輪速を要求する**。しかも飽和するのは W0
+    #    (スポーク角がほぼ 0° = 駆動方向が真横の車輪) なので、見落とすと横移動の距離だけが
+    #    縮んで前後へ流れる。オドメトリは指令から積分するので気づけない。
     forward = peak_wheel_value(kin, m.v_max, m.v_cross_max, m.omega_hold_max)
+    lateral = peak_wheel_value(kin, m.v_cross_max, m.v_max, m.omega_hold_max)
     turning = peak_wheel_value(kin, m.v_hold_max, m.v_hold_max, m.omega_max)
-    peak_hz = kin.wheel_speed_to_step_hz(max(forward, turning))
+    peak_hz = kin.wheel_speed_to_step_hz(max(forward, lateral, turning))
     if peak_hz > tuning.profile.max_speed_steps_s:
+        worst = max((forward, "前進"), (lateral, "横移動"), (turning, "旋回"))[1]
         warnings.append(
-            "指令速度のピーク %.0f step/s が MAX_SPEED %.0f step/s を超える。"
+            "指令速度のピーク %.0f step/s (%s) が MAX_SPEED %.0f step/s を超える。"
             "--max-speed を上げること (超えると 3 輪の速度比が崩れて経路が曲がる)。"
-            % (peak_hz, tuning.profile.max_speed_steps_s)
+            % (peak_hz, worst, tuning.profile.max_speed_steps_s)
         )
 
     # 2. 加速度のピーク: 並進のランプと旋回のランプの大きい方。3 軸が同時に最大レートで

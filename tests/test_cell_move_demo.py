@@ -62,6 +62,8 @@ def test_move_labels():
     assert Move("F", 4).label == "4セル前進"
     assert Move("R").label == "右90°"
     assert Move("L", 2).label == "左180°"
+    assert Move("H", 15).label == "左へ15セル"
+    assert Move("G").label == "右へ1セル"
 
 
 @pytest.mark.parametrize("text", ["F0", "4F", "F,X", ""])
@@ -88,6 +90,10 @@ def test_wrapped_deg_normalises_accumulated_heading():
         ("U", (0.0, 0.0, math.pi)),
         ("F4", (0.720, 0.0, 0.0)),
         ("R2", (0.0, 0.0, math.pi)),
+        # 平行移動: 機体は回らないので基準方位は 0 のまま (#76)
+        ("H", (0.0, 0.180, 0.0)),
+        ("G", (0.0, -0.180, 0.0)),
+        ("H15", (0.0, 2.700, 0.0)),
     ],
 )
 def test_token_moves_reference_as_expected(motion, text, expect_ref):

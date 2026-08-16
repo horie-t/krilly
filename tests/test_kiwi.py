@@ -77,3 +77,27 @@ def test_body_to_wheel_step_hz_matches_manual(kin):
     hz = kin.body_to_wheel_step_hz(0.2, 0.0, 0.0)
     expected = tuple(kin.wheel_speed_to_step_hz(v) for v in kin.body_to_wheels(0.2, 0.0, 0.0))
     assert hz == pytest.approx(expected)
+
+
+# --- 車輪ごとの実効径 (#76) --------------------------------------------------
+def test_wheel_speed_to_step_hz_uses_the_common_diameter_by_default():
+    """wheel を渡さなければ従来どおり共通径。"""
+    kin = KiwiKinematics(config=CFG)
+    assert kin.wheel_speed_to_step_hz(0.1) == kin.wheel_speed_to_step_hz(0.1, wheel=0)
+
+
+def test_per_wheel_diameter_changes_only_that_wheel():
+    """wheel_diameters_m を渡すと、その輪だけ step/s の換算が変わる。
+
+    前進はほぼ W1/W2 で駆動するので共通径は実質 W1/W2 の値になっており、横移動
+    (W0 が主役) では輪ごとの径が要る (#76)。
+    """
+    import dataclasses
+    cfg = dataclasses.replace(CFG, wheel_diameters_m=[CFG.wheel_diameter_m * 1.10,
+                                                      CFG.wheel_diameter_m,
+                                                      CFG.wheel_diameter_m])
+    kin = KiwiKinematics(config=cfg)
+    base = kin.wheel_speed_to_step_hz(0.1, wheel=1)
+    # 径が 10% 大きい輪は、同じ周速を出すのに 10% 少ない step/s で済む
+    assert kin.wheel_speed_to_step_hz(0.1, wheel=0) == pytest.approx(base / 1.10)
+    assert kin.wheel_speed_to_step_hz(0.1, wheel=2) == pytest.approx(base)

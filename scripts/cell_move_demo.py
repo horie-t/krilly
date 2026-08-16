@@ -20,10 +20,19 @@
     python -m scripts.cell_move_demo --seq F4               # 4セルを 1 動作で (速度調整用)
     python -m scripts.cell_move_demo --v 0.24 --accel 0.8 --decel 0.8 --max-speed 600
 
-シーケンスのトークン: F=前進 / B=後退 / L=左90° / R=右90° / U=180°。
+シーケンスのトークン:
+  平行移動 (機体は回らない): F=前 / B=後 / H=左へ / G=右へ
+  その場旋回 (機体が回る):   L=左90° / R=右90° / U=180°
 数字を付けると 1 動作でその回数ぶん動く (``F4``=4セルを 1 動作、``L2``=180°)。
+
 ``F,F,F,F`` (4 動作) と ``F4`` (1 動作) の比較が、距離誤差がスケール由来か
 動作あたりの固定オーバーラン由来かの切り分けになる (#21)。
+
+**横移動の距離スケールは前進とは別の量** (#76)。前進では W0 (スポーク角ほぼ 0°) がほとんど
+回らないので、``wheel_diameter_m`` は実質 W1/W2 の実効径になっている。横移動を決めるのは W0 で、
+1x15 の通路を使い、機体の置き方だけ変えて (東向き=前進 / 北向き=横移動) 同じ距離を比べる:
+    python -m scripts.cell_move_demo --seq F15 --camera-pose --camera-yaw   # 東向きに置く
+    python -m scripts.cell_move_demo --seq H15 --camera-pose --camera-yaw   # 北向きに置く
 
 配線: L6470×3 デイジーチェーン + BNO055 (I2C 0x28)。座標系 +x前 / +y左 / +omega=CCW。
 """
@@ -41,6 +50,7 @@ from krilly.hal.imu import Bno055Imu
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
+from krilly.localization.grid import apply_axis_heading
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
@@ -59,8 +69,12 @@ from krilly.perception.wall_detect import WallDetector, calibrated_config
 log = get_logger("krilly.cell_move_demo")
 
 TOKENS = {
-    "F": ("%dセル前進", lambda m, n: m.start_forward_cells(n)),
-    "B": ("%dセル後退", lambda m, n: m.start_forward_cells(-n)),
+    # 平行移動 (機体は回らない、#76)。数字は 1 動作で進むセル数。
+    "F": ("%dセル前進", lambda m, n: m.start_move_cells(n, 0)),
+    "B": ("%dセル後退", lambda m, n: m.start_move_cells(n, 2)),
+    "H": ("左へ%dセル", lambda m, n: m.start_move_cells(n, +1)),
+    "G": ("右へ%dセル", lambda m, n: m.start_move_cells(n, -1)),
+    # その場旋回 (機体が回る)
     "L": ("左%d°", lambda m, n: m.start_turn_left(n)),
     "R": ("右%d°", lambda m, n: m.start_turn_right(n)),
 }
@@ -153,7 +167,7 @@ def main() -> None:
     p.add_argument("--devices", type=int, default=3, help="連結台数")
     p.add_argument("--bus", type=int, default=0, help="SPI バス (既定 0)")
     p.add_argument("--device", type=int, default=0, help="SPI デバイス/CE (既定 0)")
-    p.add_argument("--seq", default="F,L,F,R", help="動作シーケンス (F/B/L/R/U、数字で回数)")
+    p.add_argument("--seq", default="F,L,F,R", help="動作シーケンス: 平行移動 F/B/H/G + 旋回 L/R/U、数字で回数 (例 F15, H4,G4)")
     add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.5, help="プリミティブ間の停止秒数")
@@ -168,12 +182,17 @@ def main() -> None:
                    help="動作前後の方位をカメラで実測してジャイロ推定と突き合わせる")
     p.add_argument("--camera-pose", action="store_true",
                    help="動作前後のセル内位置をカメラで実測し、理想量とのズレを出す")
+    p.add_argument("--align", action="store_true",
+                   help="開始前にカメラで迷路軸を測り、推定方位をそこへ引き戻す "
+                        "(実走と同じ挙動。置き方の傾きが横流れになるのを防ぐ)")
     p.add_argument("--yaw-samples", type=int, default=5, help="カメラ実測のフレーム数 (中央値)")
     p.add_argument("--save-frames", default=None,
                    help="カメラ実測フレームの保存先プレフィクス 例: /tmp/yaw")
     args = p.parse_args()
 
     setup_logging()
+    if args.align and not args.camera_yaw:
+        raise SystemExit("--align はカメラで軸角を測るので --camera-yaw が要ります")
     seq = parse_seq(args.seq)
     kin = KiwiKinematics()
     tuning = build_tuning(args)
@@ -313,6 +332,17 @@ def main() -> None:
         driver.energize()
         time.sleep(args.settle)
         yaw_before = measure_yaw("before")
+        if args.align and yaw_before is not None:
+            # 置いた傾きを迷路軸へ引き戻す。実走 (search_run / speed_run) は毎セル
+            # apply_axis_heading で同じことをしており、方位保持の P 制御が機体を真っ直ぐに
+            # する。デモにはそれが無いので、傾いたまま最後まで流れて壁に当たる。
+            # 平行移動は自分の体軸に沿って進むので、傾き θ はそのまま通路に対する
+            # 横流れ D·sin(θ) になる (実測: 1° の傾きで 8 セル = 25mm、余裕 21mm を超える)。
+            if apply_axis_heading(est, yaw_before.angle_rad):
+                log.info("迷路軸へ整列: 推定方位を %+.3f° 補正 (基準との差を次の動作で詰める)",
+                         math.degrees(est.phi - motion.reference[2]))
+            else:
+                log.warning("迷路軸への整列を見送った (補正量が大きすぎる)")
         pose_before = measure_pose("before")
         phi_before = est.phi
         for i, move in enumerate(seq, 1):
