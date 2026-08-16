@@ -50,6 +50,7 @@ from krilly.hal.imu import Bno055Imu
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
+from krilly.localization.grid import apply_axis_heading
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
@@ -181,12 +182,17 @@ def main() -> None:
                    help="動作前後の方位をカメラで実測してジャイロ推定と突き合わせる")
     p.add_argument("--camera-pose", action="store_true",
                    help="動作前後のセル内位置をカメラで実測し、理想量とのズレを出す")
+    p.add_argument("--align", action="store_true",
+                   help="開始前にカメラで迷路軸を測り、推定方位をそこへ引き戻す "
+                        "(実走と同じ挙動。置き方の傾きが横流れになるのを防ぐ)")
     p.add_argument("--yaw-samples", type=int, default=5, help="カメラ実測のフレーム数 (中央値)")
     p.add_argument("--save-frames", default=None,
                    help="カメラ実測フレームの保存先プレフィクス 例: /tmp/yaw")
     args = p.parse_args()
 
     setup_logging()
+    if args.align and not args.camera_yaw:
+        raise SystemExit("--align はカメラで軸角を測るので --camera-yaw が要ります")
     seq = parse_seq(args.seq)
     kin = KiwiKinematics()
     tuning = build_tuning(args)
@@ -326,6 +332,17 @@ def main() -> None:
         driver.energize()
         time.sleep(args.settle)
         yaw_before = measure_yaw("before")
+        if args.align and yaw_before is not None:
+            # 置いた傾きを迷路軸へ引き戻す。実走 (search_run / speed_run) は毎セル
+            # apply_axis_heading で同じことをしており、方位保持の P 制御が機体を真っ直ぐに
+            # する。デモにはそれが無いので、傾いたまま最後まで流れて壁に当たる。
+            # 平行移動は自分の体軸に沿って進むので、傾き θ はそのまま通路に対する
+            # 横流れ D·sin(θ) になる (実測: 1° の傾きで 8 セル = 25mm、余裕 21mm を超える)。
+            if apply_axis_heading(est, yaw_before.angle_rad):
+                log.info("迷路軸へ整列: 推定方位を %+.3f° 補正 (基準との差を次の動作で詰める)",
+                         math.degrees(est.phi - motion.reference[2]))
+            else:
+                log.warning("迷路軸への整列を見送った (補正量が大きすぎる)")
         pose_before = measure_pose("before")
         phi_before = est.phi
         for i, move in enumerate(seq, 1):
