@@ -511,3 +511,24 @@ def test_turn_resets_the_axis_to_forward():
     run_until_done(m)
     m.start_turn_left()
     assert m._axis_k == 0
+
+
+def test_axis_from_quarter_turns_matches_the_maze_directions():
+    """迷路方角 -> quarter_turns -> _axis_k の対応が正しいこと (#76)。
+
+    走行スクリプトは ``start_move_cells(1, quarter_turns(facing, direction))`` で
+    進むので、ここがずれると機体が違う方角へ飛ぶ。北を向いたまま各方角へ 1 セル
+    動いて、基準点がそのセル中心へ行き、**方位が変わらない**ことを確認する。
+    """
+    from krilly.solver.maze import Direction
+    from krilly.strategy.explorer import heading_rad, quarter_turns
+
+    kin = KiwiKinematics(config=ROBOT)
+    for d in Direction:
+        est = DeadReckoning(kin, x=0.0, y=0.0, phi=heading_rad(Direction.N))
+        m = CellMotion(VelocityDriver(FakeChain(), kinematics=kin), est, maze=MAZE)
+        m.start_move_cells(1, quarter_turns(Direction.N, d))
+        x, y, phi = m.reference
+        want = tuple(v * MAZE.cell_pitch_m for v in d.delta)
+        assert (x, y) == pytest.approx(want, abs=1e-9), d
+        assert phi == pytest.approx(heading_rad(Direction.N))   # 機体は回らない

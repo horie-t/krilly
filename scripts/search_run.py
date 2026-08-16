@@ -56,6 +56,7 @@ from krilly.strategy.explorer import (
     quarter_turns,
 )
 from krilly.strategy.shortest_path import (
+    DEFAULT_COST,
     LEGACY_COST,
     MoveCost,
     describe_legs,
@@ -97,6 +98,8 @@ def main() -> None:
                    help="カメラによるセル内位置の絶対補正を無効にする (#54)")
     p.add_argument("--correct-weight", type=float, default=1.0,
                    help="位置補正の引き込み率 0..1 (既定 1.0 = 測定値をそのまま採用)")
+    p.add_argument("--turn-in-place", action="store_true",
+                   help="機体を旋回させて走る従来モード (既定は旋回レス走行 #76)")
     p.add_argument("--no-front-check", action="store_true",
                    help="前進直前の前方壁チェックを無効にする (既定は有効)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
@@ -108,14 +111,15 @@ def main() -> None:
     maze_cfg = load_maze_config()
     maze = Maze(args.size) if args.size else Maze.from_config(maze_cfg)
     maze.set_outer_walls()
-    # Phase 3 で --turn-in-place を足すまでは従来どおり旋回して走る (#76)
-    explorer = Explorer(maze, holonomic=False)
+    explorer = Explorer(maze, holonomic=not args.turn_in_place)
     detector = WallDetector(calibrated_config())
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
 
-    log.info("迷路 %dx%d / ゴール %s / スタート %s 北向き",
-             maze.size, maze.size, maze.goal_cells(), maze.start)
+    log.info("迷路 %dx%d / ゴール %s / スタート %s 北向き / %s",
+             maze.size, maze.size, maze.goal_cells(), maze.start,
+             "旋回して走る (従来モード)" if args.turn_in_place
+             else "旋回せず平行移動する (#76)")
     log.info("チューニング: %s", tuning.describe())
     for warning in check_limits(tuning, kin):
         log.warning("%s", warning)
@@ -279,16 +283,24 @@ def main() -> None:
             return True
 
         def execute(step: Step) -> bool:
-            """1 手を実行する。安全チェックで中止したら False。"""
-            turn = quarter_turns(explorer.facing, step.direction)
-            if turn:
-                motion.start_turn_left(turn)
-                run_primitive(turn_label(turn))
+            """1 手を実行する。安全チェックで中止したら False。
+
+            旋回レス走行 (#76) では機体を回さず、進行方角へ平行移動する。旧モードでは
+            従来どおり「その方角を向いてから 1 セル前進」。
+            """
+            axis = quarter_turns(explorer.facing, step.direction)
+            if args.turn_in_place and axis:
+                motion.start_turn_left(axis)
+                run_primitive(turn_label(axis))
                 coast(args.pause)
             if not path_is_clear(step.direction):
                 return False
-            motion.start_forward_cells(1)
-            run_primitive("1セル前進")
+            if args.turn_in_place:
+                motion.start_move_cells(1, 0)          # 旋回済みなので前へ
+                run_primitive("1セル前進")
+            else:
+                motion.start_move_cells(1, axis)       # 向きは変えずにその方角へ
+                run_primitive(f"{step.direction.name}へ1セル")
             coast(args.pause)
             return True
 
@@ -307,9 +319,8 @@ def main() -> None:
                 log.info("ゴール到達! %d 手 / 訪問 %d セル",
                          explorer.steps, len(explorer.visited))
                 break
-            log.info("  次の1手: %s -> %s へ (%s)",
-                     turn_label(quarter_turns(explorer.facing, step.direction)),
-                     step.to_cell, step.direction.name)
+            log.info("  次の1手: %s へ -> %s (%s)",
+                     step.direction.name, step.to_cell, step.direction.name)
             if args.dry_run:
                 log.info("dry-run のため走行しない。終了。")
                 break
@@ -326,7 +337,7 @@ def main() -> None:
             log.warning("%d 手で終わらなかった (現在 %s)", args.max_steps, explorer.cell)
 
         log.info("判明した迷路:\n%s", maze.to_ascii())
-        report_shortest_path(explorer, LEGACY_COST)
+        report_shortest_path(explorer, LEGACY_COST if args.turn_in_place else DEFAULT_COST)
 
 
 def report_shortest_path(explorer: Explorer, cost: MoveCost) -> None:
