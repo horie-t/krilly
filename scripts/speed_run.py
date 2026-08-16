@@ -37,7 +37,7 @@ from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
-    FRONT,
+    body_edge_for,
     WallDetector,
     calibrated_config,
 )
@@ -196,12 +196,21 @@ def main() -> None:
             apply_cell_offset(est, cell_center(cell, maze_cfg.cell_pitch_m),
                               off.forward_m, off.left_m, phi=heading_rad(facing))
 
-        def front_is_clear() -> bool:
+        def path_is_clear(direction: Direction, facing: Direction) -> bool:
+            """進む直前に、進行方角の壁が見えていないか確認する。
+
+            見る辺は進行方角から決める (ホロノミック走行では進行方向と機体の向きが
+            一致しない)。しきい値は辺ごとの値を使うこと — BACK はケーブルの偽帯があるため
+            0.25 に上げてある。
+            """
             if args.no_front_check:
                 return True
-            fraction = detector.measure(capture())[FRONT][0]
-            if fraction >= detector.cfg.threshold_for(FRONT):
-                log.error("前進中止: 前方に壁が見える (赤割合 %.2f)。姿勢ずれの可能性。", fraction)
+            edge = body_edge_for(direction, facing)
+            fraction = detector.measure(capture())[edge][0]
+            threshold = detector.cfg.threshold_for(edge)
+            if fraction >= threshold:
+                log.error("進行中止: %s 方向 (%s 辺) に壁が見える (赤割合 %.2f >= %.2f)。"
+                          "姿勢ずれの可能性。", direction.name, edge, fraction, threshold)
                 return False
             return True
 
@@ -232,7 +241,7 @@ def main() -> None:
                              explorer.steps, len(explorer.visited))
                     return (explorer.cell, explorer.facing)
                 turn_to(explorer.facing, step.direction)
-                if not front_is_clear():
+                if not path_is_clear(step.direction, explorer.facing):
                     return None
                 motion.start_forward_cells(1)
                 run_primitive("1セル前進", args.timeout, kind="cells1")
@@ -248,7 +257,7 @@ def main() -> None:
             for leg in legs:
                 facing = turn_to(facing, Direction((facing - leg.turn) % 4))
                 correct_at(cell, facing)
-                if not front_is_clear():
+                if not path_is_clear(facing, facing):
                     return None
                 motion.start_forward_cells(leg.cells)
                 run_primitive(f"直進{leg.cells}", max(args.timeout, leg.cells * 3.0),

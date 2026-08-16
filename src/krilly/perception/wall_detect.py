@@ -297,6 +297,21 @@ def maze_walls_to_body(
     }
 
 
+def body_edge_for(direction: Direction, facing: Direction) -> str:
+    """迷路方角 ``direction`` の壁が、``facing`` を向いた機体のどの辺に写るかを返す。
+
+    :func:`maze_walls_to_body` の「辺だけ」版。**進もうとしている方角の壁を見る**のに使う
+    (ホロノミック走行では進行方向と機体の向きが一致しないので、「前方を確認する」では
+    足りない)。``facing`` を北に固定すると N→FRONT / S→BACK / W→LEFT / E→RIGHT の
+    定数写像になる。
+    """
+    return _BODY_EDGE_BY_QUARTER[(direction - facing) % 4]
+
+
+# facing からの時計回りの 90° 単位のずれ -> 機体の辺
+_BODY_EDGE_BY_QUARTER = {0: FRONT, 1: RIGHT, 2: BACK, 3: LEFT}
+
+
 def update_maze_walls(maze, x: int, y: int, walls_maze: dict[Direction, bool]) -> None:
     """判定した迷路方角の壁有無をセル (x, y) に反映する (共有エッジで隣接にも反映)。"""
     for d, present in walls_maze.items():

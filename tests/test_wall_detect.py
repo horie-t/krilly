@@ -17,8 +17,10 @@ from krilly.perception.wall_detect import (
     WallDetector,
     WallDetectorConfig,
     best_roi_red_fraction,
+    body_edge_for,
     body_walls_to_maze,
     calibrated_config,
+    maze_walls_to_body,
     calibrated_rois,
     default_rois,
     roi_red_fraction,
@@ -251,3 +253,22 @@ def test_unsaturated_band_still_measures():
     off = cell_offset(frame, det)
     assert off.saturated == ()
     assert off.forward_m is not None and off.forward_m < 0
+
+
+# --- 進行方角 -> 機体の辺 (#76) --------------------------------------------
+def test_body_edge_for_is_the_identity_when_facing_north():
+    """向きを北に固定すると N→FRONT / S→BACK / W→LEFT / E→RIGHT の定数写像になる。"""
+    assert body_edge_for(Direction.N, Direction.N) == FRONT
+    assert body_edge_for(Direction.S, Direction.N) == BACK
+    assert body_edge_for(Direction.W, Direction.N) == LEFT
+    assert body_edge_for(Direction.E, Direction.N) == RIGHT
+
+
+def test_body_edge_for_matches_maze_walls_to_body():
+    """maze_walls_to_body と同じ写像であること (辺だけを取り出した版)。"""
+    for facing in Direction:
+        walls = {d: (d is Direction.N) for d in Direction}   # 北だけ壁
+        body = maze_walls_to_body(walls, facing)
+        for d in Direction:
+            edge = body_edge_for(d, facing)
+            assert body[edge] == walls[d], (facing, d, edge)

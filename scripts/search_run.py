@@ -42,8 +42,8 @@ from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
-    FRONT,
     WallDetector,
+    body_edge_for,
     calibrated_config,
 )
 from krilly.solver.maze import Direction, Maze
@@ -252,18 +252,27 @@ def main() -> None:
                      f"補正 X{est.pose[0] - before[0]:+.4f} Y{est.pose[1] - before[1]:+.4f}"
                      if applied else "補正なし")
 
-        def front_is_clear() -> bool:
-            """前進の直前に、いま見えている前方の壁を確認する。
+        def path_is_clear(direction: Direction) -> bool:
+            """進む直前に、いま見えている**進行方角の**壁を確認する。
 
-            計画は地図に基づくので、地図が正しければ前方は空いている。ここで壁が
+            計画は地図に基づくので、地図が正しければ進路は空いている。ここで壁が
             見えたら**自機の姿勢がずれている**サインなので、突っ込む前に止める。
+
+            見る辺は進行方角から決める (:func:`body_edge_for`)。ホロノミック走行では
+            進行方向と機体の向きが一致しないので「前方を見る」では足りない。
+            しきい値は必ず ``threshold_for(edge)`` を使うこと — BACK はリボンケーブルの
+            偽帯があるため 0.25 に上げてあり、共通値 (0.08) で判定すると**南向きの移動で
+            毎回誤って中止する**。
             """
             if args.no_front_check:
                 return True
-            fraction = detector.red_fractions(camera.capture())[FRONT]
-            if fraction >= detector.cfg.threshold:
-                log.error("前進中止: 前方に壁が見える (赤割合 %.2f)。"
-                          "姿勢がずれている可能性が高い。", fraction)
+            edge = body_edge_for(direction, explorer.facing)
+            fraction = detector.measure(camera.capture())[edge][0]
+            threshold = detector.cfg.threshold_for(edge)
+            if fraction >= threshold:
+                log.error("進行中止: %s 方向 (%s 辺) に壁が見える (赤割合 %.2f >= %.2f)。"
+                          "姿勢がずれている可能性が高い。",
+                          direction.name, edge, fraction, threshold)
                 return False
             return True
 
@@ -273,7 +282,7 @@ def main() -> None:
                 motion.start_turn_left(step.turn)
                 run_primitive(turn_label(step.turn))
                 coast(args.pause)
-            if not front_is_clear():
+            if not path_is_clear(step.direction):
                 return False
             motion.start_forward_cells(1)
             run_primitive("1セル前進")
