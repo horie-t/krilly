@@ -120,3 +120,21 @@ def test_fault_flags_detects_dead_spi():
     assert fault_flags(0x7E03) == set()
     # 0x7C03 は電源投入直後の値: UVLO だけがラッチされている
     assert fault_flags(0x7C03) == {"UVLO"}
+
+
+def test_lateral_peak_is_checked_too():
+    """横移動は前進より高い輪速を要求するので、そこで先に MAX_SPEED を超える (#76)。
+
+    純 vy の係数は純 vx より大きく、飽和するのは W0 (駆動方向が真横の車輪)。
+    前進だけ見ていると見落とし、横移動の距離だけが縮む。
+    """
+    kin = KiwiKinematics()
+    m = CellMotionConfig()
+    forward = peak_wheel_value(kin, m.v_max, m.v_cross_max, m.omega_hold_max)
+    lateral = peak_wheel_value(kin, m.v_cross_max, m.v_max, m.omega_hold_max)
+    assert lateral > forward                       # 横の方が高い
+
+    # 前進は収まるが横は超える MAX_SPEED を選ぶと、横のケースだけが警告に出る
+    between = (kin.wheel_speed_to_step_hz(forward) + kin.wheel_speed_to_step_hz(lateral)) / 2
+    warnings = check_limits(build_tuning(parse(["--max-speed", str(between)])))
+    assert any("MAX_SPEED" in w and "横移動" in w for w in warnings)

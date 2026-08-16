@@ -171,6 +171,7 @@ class CellMotion:
         self._angle_remaining = 0.0   # 旋回の残角 [rad] (実回転分を差し引いていく)
         self._phi_prev = estimator.phi
         self._retries = 0
+        self._axis_k = 0              # 主軸の向き: 基準方位からの 90° 単位 (0=前/+1=左/-1=右/2=後)
         self._settle_elapsed = 0.0    # 指令が 0 になってからの経過 [s]
         self._retry_remaining = 0.0   # やり直しを決めた時点の残量 (不感帯の調整用)
 
@@ -212,15 +213,33 @@ class CellMotion:
         return self.reference
 
     # -- プリミティブの開始 -------------------------------------------------
-    def start_forward(self, distance_m: float) -> None:
-        """現在の基準方位へ ``distance_m`` 前進する (基準点を進める)。"""
-        self.x_ref += distance_m * math.cos(self.phi_ref)
-        self.y_ref += distance_m * math.sin(self.phi_ref)
+    def start_move(self, distance_m: float, axis_quarter_turns: int = 0) -> None:
+        """基準方位から ``axis_quarter_turns``×90° 回した方向へ ``distance_m`` 平行移動する。
+
+        ``axis_quarter_turns`` は 0=前 / +1=左 / -1=右 / 2=後。**機体は回らない** —
+        方位は基準方位のまま P 制御で保持し、進む向きだけを変える (ホロノミック、#76)。
+        基準点を進める設計はそのままなので、誤差はセル間で累積しない。
+
+        旋回して前進するより速い。実測で旋回は走行時間の半分を占めており、
+        ホロノミック機ではそれを丸ごと省ける。
+        """
+        self._axis_k = axis_quarter_turns
+        axis = self._axis_phi
+        self.x_ref += distance_m * math.cos(axis)
+        self.y_ref += distance_m * math.sin(axis)
         self._begin(Kind.FORWARD)
+
+    def start_move_cells(self, cells: float = 1.0, axis_quarter_turns: int = 0) -> None:
+        """``cells`` セル分 (既定 1 セル = 180mm) 平行移動する。"""
+        self.start_move(cells * self.cell_pitch_m, axis_quarter_turns)
+
+    def start_forward(self, distance_m: float) -> None:
+        """現在の基準方位へ ``distance_m`` 前進する (``start_move`` の別名)。"""
+        self.start_move(distance_m, 0)
 
     def start_forward_cells(self, cells: float = 1.0) -> None:
         """``cells`` セル分 (既定 1 セル = 180mm) 前進する。"""
-        self.start_forward(cells * self.cell_pitch_m)
+        self.start_move(cells * self.cell_pitch_m, 0)
 
     def start_turn(self, delta_rad: float) -> None:
         """基準方位を ``delta_rad`` 回して、その絶対方位まで旋回する (+ = CCW)。
@@ -231,6 +250,7 @@ class CellMotion:
         heading_error = _wrap_angle(self.phi_ref - self.est.phi)
         self.phi_ref = _wrap_angle(self.phi_ref + delta_rad)
         self._angle_remaining = delta_rad + heading_error
+        self._axis_k = 0
         self._begin(Kind.TURN)
 
     def start_turn_left(self, quarter_turns: int = 1) -> None:
@@ -271,7 +291,7 @@ class CellMotion:
     def remaining(self) -> float:
         """主軸の残量 (前進なら [m]、旋回なら [rad]、符号付き)。"""
         if self._kind is Kind.FORWARD:
-            return self._along_remaining()
+            return self._axis_remaining()
         if self._kind is Kind.TURN:
             return self._angle_remaining
         return 0.0
@@ -283,7 +303,32 @@ class CellMotion:
         """
         return (self._along_remaining(), self._cross_error(), self._heading_error())
 
+    @property
+    def _axis_phi(self) -> float:
+        """主軸の絶対方位 (基準方位 + k×90°)。"""
+        return _wrap_angle(self.phi_ref + self._axis_k * math.pi / 2.0)
+
+    def _axis_unit(self) -> tuple[int, int]:
+        """主軸の車体フレームでの単位ベクトル。k は整数なので厳密に ±1/0 になる。
+
+        cos/sin を通さないのは、k=0 のとき前進の挙動をビット単位で不変にするため。
+        """
+        return ((1, 0), (0, 1), (-1, 0), (0, -1))[self._axis_k % 4]
+
+    def _axis_remaining(self) -> float:
+        """**主軸方向**の残量 [m] (制御用)。k=0 なら _along_remaining と同一。"""
+        c, s = self._axis_unit()
+        return c * self._along_remaining() + s * self._cross_error()
+
+    def _axis_cross(self) -> float:
+        """主軸に**直交する**ずれ [m] (制御用)。k=0 なら _cross_error と同一。"""
+        c, s = self._axis_unit()
+        return -s * self._along_remaining() + c * self._cross_error()
+
     # -- 誤差の計算 (基準方位フレーム) --------------------------------------
+    # 以下の 2 つは residual() が返す「前後 / 左右」の定義であり、**基準方位フレームのまま
+    # 据え置く**。3 つの走行スクリプトのログと cell_move_demo.world_components が
+    # この意味に依存している。制御には上の _axis_* を使う。
     def _along_remaining(self) -> float:
         dx, dy = self.x_ref - self.est.x, self.y_ref - self.est.y
         return dx * math.cos(self.phi_ref) + dy * math.sin(self.phi_ref)
@@ -328,10 +373,15 @@ class CellMotion:
         retry = self._retries > 0
         if self._kind is Kind.FORWARD:
             v_max = cfg.retry_v_max if retry else cfg.v_max
-            remaining = self._along_remaining()
-            vx = _envelope(remaining, v_max, self._decel, dt)
-            vx = self._with_floor(vx, cfg.min_v, remaining)
-            vy = _clamp(cfg.k_cross * self._cross_error(), cfg.v_cross_max)
+            remaining = self._axis_remaining()
+            v_along = _envelope(remaining, v_max, self._decel, dt)
+            v_along = self._with_floor(v_along, cfg.min_v, remaining)
+            v_cross = _clamp(cfg.k_cross * self._axis_cross(), cfg.v_cross_max)
+            # 主軸フレームの (主軸, 直交) を車体フレームの (vx, vy) へ回す。
+            # k=0 では (vx, vy) = (v_along, v_cross) に厳密に還元される。
+            c, s = self._axis_unit()
+            vx = v_along * c - v_cross * s
+            vy = v_along * s + v_cross * c
             omega = _clamp(cfg.k_heading * self._heading_error(), cfg.omega_hold_max)
         else:  # Kind.TURN
             omega_max = cfg.retry_omega_max if retry else cfg.omega_max
@@ -392,11 +442,14 @@ class CellMotion:
             else:
                 self._phase = Phase.DONE
 
+    # 許容値は **TURN のときだけ角度**、それ以外は距離。逆向き (FORWARD のとき距離、
+    # else 角度) に書くと、距離系の Kind を足したときに角度許容 (0.3° = 0.0052) が
+    # 黙って適用される。単位が違うので値の大小でも気づけない。
     def _tolerance(self) -> float:
         """主軸を詰めるのをやめる (整定へ移る) 残量。"""
-        return self.cfg.pos_tol_m if self._kind is Kind.FORWARD else self.cfg.angle_tol_rad
+        return self.cfg.angle_tol_rad if self._kind is Kind.TURN else self.cfg.pos_tol_m
 
     def _retry_tolerance(self) -> float:
         """やり直すかどうかの残量。機械の不感帯より内側は追いかけない。"""
-        return (self.cfg.retry_pos_tol_m if self._kind is Kind.FORWARD
-                else self.cfg.retry_angle_tol_rad)
+        return (self.cfg.retry_angle_tol_rad if self._kind is Kind.TURN
+                else self.cfg.retry_pos_tol_m)

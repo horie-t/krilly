@@ -410,3 +410,104 @@ def test_retry_still_fires_for_a_real_overrun():
     cfg = CellMotionConfig()
     motion, _ticks = _turn_settling_into_play(cfg, math.radians(5.0))
     assert motion.retries == 1
+
+
+# --- 横移動 (旋回せず平行移動する、#76) --------------------------------------
+def _axis_motion():
+    kin = KiwiKinematics(config=ROBOT)
+    return CellMotion(VelocityDriver(FakeChain(), kinematics=kin),
+                      DeadReckoning(kin), maze=MAZE)
+
+
+@pytest.mark.parametrize(
+    "k, expect",
+    [
+        (0, (0.180, 0.0)),      # 前 (基準方位 = +x)
+        (1, (0.0, 0.180)),      # 左 (+y)
+        (-1, (0.0, -0.180)),    # 右 (-y)
+        (2, (-0.180, 0.0)),     # 後
+    ],
+)
+def test_start_move_cells_advances_the_reference_along_the_axis(motion, k, expect):
+    """基準点は「基準方位から k×90° 回した向き」へ進む。機体は回らない。"""
+    motion.start_move_cells(1, k)
+    x, y, phi = motion.reference
+    assert (x, y) == pytest.approx(expect, abs=1e-12)
+    assert phi == pytest.approx(0.0)          # 基準方位は変わらない
+
+
+def test_start_move_uses_the_reference_heading_not_the_estimate():
+    """主軸は基準方位を基準にする (推定方位がずれていても軸は動かない)。"""
+    kin = KiwiKinematics(config=ROBOT)
+    est = DeadReckoning(kin, phi=math.pi / 2)          # 北を向いて置いた
+    m = CellMotion(VelocityDriver(FakeChain(), kinematics=kin), est, maze=MAZE)
+    m.start_move_cells(1, +1)                          # 左 = 西へ
+    x, y, _phi = m.reference
+    assert (x, y) == pytest.approx((-0.180, 0.0), abs=1e-9)
+
+
+@pytest.mark.parametrize("k", [1, -1, 2])
+def test_lateral_move_converges_and_holds_heading(k):
+    """横移動でも主軸が詰まり、方位は基準へ保持される。"""
+    m = _axis_motion()
+    m.start_move_cells(1, k)
+    run_until_done(m)
+    assert abs(m.remaining) <= m.cfg.pos_tol_m
+    along, cross, heading = m.residual()
+    assert abs(along) < 2e-3 and abs(cross) < 2e-3
+    assert abs(heading) < math.radians(0.1)
+
+
+def test_lateral_move_uses_the_distance_tolerance_not_the_angle_one():
+    """横移動に角度許容が漏れていないこと (#76 の設計上の罠の回帰テスト)。
+
+    許容値を「FORWARD なら距離、else 角度」と書くと、距離系の Kind を足したときに
+    角度許容 (0.3° = 0.0052) が黙って適用される。pos_tol_m (0.0015) の 3.5 倍で、
+    しかも単位が違うので値の大小では気づけない。
+    """
+    m = _axis_motion()
+    m.start_move_cells(1, +1)
+    assert m._tolerance() == m.cfg.pos_tol_m
+    assert m._retry_tolerance() == m.cfg.retry_pos_tol_m
+    run_until_done(m)
+    assert abs(m.remaining) <= m.cfg.pos_tol_m        # 角度許容なら 0.0052 まで許してしまう
+
+
+def test_lateral_move_corrects_cross_drift():
+    """横移動中に主軸と直交する方向へずらしても戻る。"""
+    m = _axis_motion()
+    m.start_move_cells(1, +1)                          # 左へ = 主軸は +y、直交は x
+    for _ in range(10):
+        m.update(DT)
+    m.est.x += 0.008                                   # 8mm 前へずれた
+    run_until_done(m)
+    along, cross, _ = m.residual()
+    assert abs(along) < 2e-3 and abs(cross) < 2e-3
+
+
+def test_square_of_lateral_and_forward_moves_returns_to_origin():
+    """前 → 左 → 後 → 右 の 1 セル正方形で基準点も推定も原点に戻る。"""
+    m = _axis_motion()
+    for k in (0, 1, 2, -1):
+        m.start_move_cells(1, k)
+        run_until_done(m)
+    assert m.reference[:2] == pytest.approx((0.0, 0.0), abs=1e-9)
+    assert m.est.pose[:2] == pytest.approx((0.0, 0.0), abs=3e-3)
+
+
+def test_axis_projection_reduces_to_the_forward_one_at_k0(motion):
+    """k=0 では主軸フレームと基準方位フレームが厳密に一致する。"""
+    motion.start_move_cells(1, 0)
+    for _ in range(20):
+        motion.update(DT)
+    assert motion._axis_remaining() == motion._along_remaining()
+    assert motion._axis_cross() == motion._cross_error()
+
+
+def test_turn_resets_the_axis_to_forward():
+    """旋回したら主軸は前に戻る (横移動の指定が残ると次の前進が横へ飛ぶ)。"""
+    m = _axis_motion()
+    m.start_move_cells(1, +1)
+    run_until_done(m)
+    m.start_turn_left()
+    assert m._axis_k == 0

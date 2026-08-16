@@ -20,10 +20,19 @@
     python -m scripts.cell_move_demo --seq F4               # 4セルを 1 動作で (速度調整用)
     python -m scripts.cell_move_demo --v 0.24 --accel 0.8 --decel 0.8 --max-speed 600
 
-シーケンスのトークン: F=前進 / B=後退 / L=左90° / R=右90° / U=180°。
+シーケンスのトークン:
+  平行移動 (機体は回らない): F=前 / B=後 / H=左へ / G=右へ
+  その場旋回 (機体が回る):   L=左90° / R=右90° / U=180°
 数字を付けると 1 動作でその回数ぶん動く (``F4``=4セルを 1 動作、``L2``=180°)。
+
 ``F,F,F,F`` (4 動作) と ``F4`` (1 動作) の比較が、距離誤差がスケール由来か
 動作あたりの固定オーバーラン由来かの切り分けになる (#21)。
+
+**横移動の距離スケールは前進とは別の量** (#76)。前進では W0 (スポーク角ほぼ 0°) がほとんど
+回らないので、``wheel_diameter_m`` は実質 W1/W2 の実効径になっている。横移動を決めるのは W0 で、
+1x15 の通路を使い、機体の置き方だけ変えて (東向き=前進 / 北向き=横移動) 同じ距離を比べる:
+    python -m scripts.cell_move_demo --seq F15 --camera-pose --camera-yaw   # 東向きに置く
+    python -m scripts.cell_move_demo --seq H15 --camera-pose --camera-yaw   # 北向きに置く
 
 配線: L6470×3 デイジーチェーン + BNO055 (I2C 0x28)。座標系 +x前 / +y左 / +omega=CCW。
 """
@@ -59,8 +68,12 @@ from krilly.perception.wall_detect import WallDetector, calibrated_config
 log = get_logger("krilly.cell_move_demo")
 
 TOKENS = {
-    "F": ("%dセル前進", lambda m, n: m.start_forward_cells(n)),
-    "B": ("%dセル後退", lambda m, n: m.start_forward_cells(-n)),
+    # 平行移動 (機体は回らない、#76)。数字は 1 動作で進むセル数。
+    "F": ("%dセル前進", lambda m, n: m.start_move_cells(n, 0)),
+    "B": ("%dセル後退", lambda m, n: m.start_move_cells(n, 2)),
+    "H": ("左へ%dセル", lambda m, n: m.start_move_cells(n, +1)),
+    "G": ("右へ%dセル", lambda m, n: m.start_move_cells(n, -1)),
+    # その場旋回 (機体が回る)
     "L": ("左%d°", lambda m, n: m.start_turn_left(n)),
     "R": ("右%d°", lambda m, n: m.start_turn_right(n)),
 }
@@ -153,7 +166,7 @@ def main() -> None:
     p.add_argument("--devices", type=int, default=3, help="連結台数")
     p.add_argument("--bus", type=int, default=0, help="SPI バス (既定 0)")
     p.add_argument("--device", type=int, default=0, help="SPI デバイス/CE (既定 0)")
-    p.add_argument("--seq", default="F,L,F,R", help="動作シーケンス (F/B/L/R/U、数字で回数)")
+    p.add_argument("--seq", default="F,L,F,R", help="動作シーケンス: 平行移動 F/B/H/G + 旋回 L/R/U、数字で回数 (例 F15, H4,G4)")
     add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.5, help="プリミティブ間の停止秒数")
