@@ -358,9 +358,11 @@ def report_shortest_path(explorer: Explorer, cost: MoveCost) -> None:
                     "(訪問 %d セル)。探索を続ける必要がある。", len(explorer.visited))
         return
     legs = path_to_legs(path)
-    turns = turns_in(legs, Direction.N)
-    log.info("最速経路: %d セル / 旋回 %d 回 / コスト %.1f (旋回コスト %.2f)",
-             len(path) - 1, turns, path_cost(path, Direction.N, cost), cost.turn)
+    # 旋回レスでは旋回しないので回数は出さない (区間の本数が時間を決める)
+    detail = (f"旋回 {turns_in(legs, Direction.N)} 回" if cost.turn
+              else f"区間 {len(legs)} 本")
+    log.info("最速経路: %d セル / %s / コスト %.1f",
+             len(path) - 1, detail, path_cost(path, Direction.N, cost))
     log.info("  %s", describe_legs(legs))
     log.info("  セル列: %s", " -> ".join(str(c) for c in path))
 
