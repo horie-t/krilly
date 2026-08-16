@@ -8,16 +8,18 @@
   見えない壁に突っ込む事故になる。``known`` に観測済みセル
   (:attr:`krilly.strategy.explorer.Explorer.visited`) を渡すことで表現する。
 
-また、最短は**セル数だけでは決まらない**。実機の実測 (5x5 通しラン、--omega 1.0) では
+また、最短は**セル数だけでは決まらない**。動作には「1 セル進む」以外のコストがある:
 
-    直進 1 セルあたり ≈ 1.50 s / 90° ターン ≈ 2.56 s (整定・停止込み)
+- **区間ごとの固定費** (``MoveCost.leg``): 加減速のランプ・整定・停止。連続直進なら
+  1 回で済むので、セルをまとめるほど得になる。
+- **旋回** (``MoveCost.turn``): 機体を回す時間。**ホロノミック走行 (#76) では 0**。
 
-で、**旋回 1 回は 1.7 セル分の時間**を食う。そのためセル数の BFS ではなく
-**(セル, 向き) を状態にした Dijkstra** で「セル数 + turn_cost × 旋回回数」を
-最小化する (``turn_cost`` の既定 1.0 はこの実測に由来)。``turn_cost=0`` にすれば
-純粋なセル数最短 (BFS 相当) になる。
+そのためセル数の BFS ではなく **(セル, 直前の進行方角) を状態にした Dijkstra** で
+総コストを最小化する。状態の第 2 要素は旋回する走り方では「機体の向き」と一致するので、
+``MoveCost`` を差し替えるだけで**両方の走り方を同じ Dijkstra で表現できる**
+(:data:`LEGACY_COST` が旋回あり、:data:`DEFAULT_COST` が旋回レス)。
 
-結果は :func:`path_to_legs` で **旋回 + 直進セル数** に run-length 圧縮できる。
+結果は :func:`path_to_legs` で **方角 + セル数** に run-length 圧縮できる。
 最速ランの走行状態機械 (#20) はこの形 (連続直進の長さが分かる形) を必要とする。
 """
 
@@ -40,11 +42,37 @@ DEFAULT_TURN_COST = 2.9
 
 
 @dataclass(frozen=True)
-class Leg:
-    """経路の 1 区間: ``turn`` だけ旋回してから ``cells`` セル直進する。"""
+class MoveCost:
+    """1 セル進むコストの内訳 (単位は「直進 1 セル」)。
 
-    turn: int      # 90°単位の旋回量 (+CCW / -CW / 2=180°)
-    cells: int     # 直進するセル数 (>= 1)
+    実測 (#21) の時間から比で作る。既定は**旋回レス走行** (#76) 用:
+    区間の固定費 0.78s / 直進 1 セル 0.75s = 1.04。
+    """
+
+    cell_ns: float = 1.0    # 南北 (機体の前後軸) へ 1 セル
+    cell_ew: float = 1.0    # 東西 (機体の左右軸) へ 1 セル ※横移動の実測が出たら差を入れる
+    leg: float = 1.04       # 直進区間 1 本あたりの固定費 (ランプ + 整定 + 停止)
+    turn: float = 0.0       # 機体旋回 90° 1 回 (旋回レスでは 0)
+
+
+#: 旋回レス走行 (#76) のコスト。
+DEFAULT_COST = MoveCost()
+
+#: 旋回して前進する従来の走り方のコスト。現行の実装と厳密に一致する。
+LEGACY_COST = MoveCost(cell_ns=1.0, cell_ew=1.0, leg=0.0, turn=DEFAULT_TURN_COST)
+
+
+@dataclass(frozen=True)
+class Leg:
+    """経路の 1 区間: ``direction`` の方角へ ``cells`` セル進む。
+
+    旋回する走り方では「その方角を向いてから直進する」、旋回レス走行 (#76) では
+    「向きを変えずにその方角へ平行移動する」。**どちらへ何セル進むか**という情報は
+    共通なので、この表現は両方で使える。
+    """
+
+    direction: Direction   # 進む方角
+    cells: int             # 進むセル数 (>= 1)
 
 
 def direction_between(a: tuple[int, int], b: tuple[int, int]) -> Direction:
@@ -56,6 +84,22 @@ def direction_between(a: tuple[int, int], b: tuple[int, int]) -> Direction:
     raise ValueError(f"{a} と {b} は隣接していない")
 
 
+def _step_cost(
+    cost: MoveCost, prev: Direction | None, d: Direction, start_facing: Direction
+) -> float:
+    """``prev`` の方角から ``d`` へ 1 セル進むコスト。
+
+    ``prev`` が None なのは出発点だけ。そのとき区間の固定費は課金し (止まっている状態
+    から動き出すので)、旋回量は ``start_facing`` から測る (機体は既にその向きを向いている)。
+    """
+    step = cost.cell_ns if d in (Direction.N, Direction.S) else cost.cell_ew
+    if d != prev:
+        step += cost.leg
+    if cost.turn:
+        step += cost.turn * abs(quarter_turns(start_facing if prev is None else prev, d))
+    return step
+
+
 def shortest_path(
     maze: Maze,
     start: tuple[int, int] | None = None,
@@ -63,14 +107,15 @@ def shortest_path(
     *,
     start_facing: Direction = Direction.N,
     known: Iterable[tuple[int, int]] | None = None,
-    turn_cost: float = DEFAULT_TURN_COST,
+    cost: MoveCost = DEFAULT_COST,
 ) -> list[tuple[int, int]]:
     """``start`` からゴールまでの最小コスト経路をセル列で返す。無ければ空リスト。
 
-    コストは ``セル数 + turn_cost × 旋回回数`` (旋回回数は 90° を 1、180° を 2)。
-    ``known`` を渡すと**そのセルしか通らない** (未探索セルは壁が未確定なので
-    最速ランでは通さない)。戻り値は ``[start, ..., goal]`` で、start がゴールの
-    場合は ``[start]``。
+    状態は **(セル, 直前の進行方角)**。旋回する走り方 (``cost=LEGACY_COST``) では
+    第 2 要素が機体の向きと一致するので、同じ Dijkstra が両方の走り方を表現する。
+
+    ``known`` を渡すと**そのセルしか通らない** (未探索セルは壁が未確定なので最速ランでは
+    通さない)。戻り値は ``[start, ..., goal]`` で、start がゴールの場合は ``[start]``。
     """
     goal_set = set(goals) if goals is not None else set(maze.goal_cells())
     known_set = set(known) if known is not None else None
@@ -78,29 +123,38 @@ def shortest_path(
     if origin in goal_set:
         return [origin]
 
-    best: dict[tuple[tuple[int, int], Direction], float] = {(origin, start_facing): 0.0}
-    prev: dict[tuple[tuple[int, int], Direction], tuple[tuple[int, int], Direction]] = {}
-    heap: list[tuple[float, tuple[int, int], Direction]] = [(0.0, origin, start_facing)]
+    Node = tuple[tuple[int, int], Direction | None]
+    source: Node = (origin, None)
+    best: dict[Node, float] = {source: 0.0}
+    prev_of: dict[Node, Node] = {}
+    # heap の要素に通し番号を挟む。挟まないとコストとセルが同値のとき
+    # None と Direction を比較して TypeError になる (同コスト経路が多い迷路で再現する)。
+    counter = 0
+    heap: list[tuple[float, int, tuple[int, int], Direction | None]] = [
+        (0.0, counter, origin, None)
+    ]
     while heap:
-        cost, cell, facing = heapq.heappop(heap)
-        if cost > best.get((cell, facing), math.inf):
+        total, _seq, cell, came_from = heapq.heappop(heap)
+        node: Node = (cell, came_from)
+        if total > best.get(node, math.inf):
             continue                       # 既に更新された古いエントリ
         if cell in goal_set:
-            return _reconstruct(prev, (origin, start_facing), (cell, facing))
+            return _reconstruct(prev_of, source, node)
         for d in accessible_directions(maze, *cell):
             nxt = maze.neighbor(*cell, d)
             if known_set is not None and nxt not in known_set:
                 continue                   # 壁が未確定のセルは通さない
-            nxt_cost = cost + 1.0 + turn_cost * abs(quarter_turns(facing, d))
+            nxt_cost = total + _step_cost(cost, came_from, d, start_facing)
             if nxt_cost < best.get((nxt, d), math.inf):
                 best[(nxt, d)] = nxt_cost
-                prev[(nxt, d)] = (cell, facing)
-                heapq.heappush(heap, (nxt_cost, nxt, d))
+                prev_of[(nxt, d)] = node
+                counter += 1
+                heapq.heappush(heap, (nxt_cost, counter, nxt, d))
     return []
 
 
 def _reconstruct(prev, origin, node) -> list[tuple[int, int]]:
-    """(セル, 向き) の来歴からセル列を復元する。"""
+    """(セル, 直前の進行方角) の来歴からセル列を復元する。"""
     cells = [node[0]]
     while node != origin:
         node = prev[node]
@@ -109,29 +163,29 @@ def _reconstruct(prev, origin, node) -> list[tuple[int, int]]:
     return cells
 
 
-def path_to_legs(
-    path: list[tuple[int, int]], start_facing: Direction = Direction.N
-) -> list[Leg]:
-    """セル列を「旋回 + 直進セル数」の区間列へ run-length 圧縮する。"""
+def path_to_legs(path: list[tuple[int, int]]) -> list[Leg]:
+    """セル列を「方角 + セル数」の区間列へ run-length 圧縮する。"""
     if len(path) < 2:
         return []
     dirs = [direction_between(path[i], path[i + 1]) for i in range(len(path) - 1)]
-    legs = []
-    facing = start_facing
-    for d, group in groupby(dirs):
-        legs.append(Leg(quarter_turns(facing, d), sum(1 for _ in group)))
-        facing = d
-    return legs
+    return [Leg(d, sum(1 for _ in group)) for d, group in groupby(dirs)]
 
 
 def path_cost(
     path: list[tuple[int, int]],
     start_facing: Direction = Direction.N,
-    turn_cost: float = DEFAULT_TURN_COST,
+    cost: MoveCost = DEFAULT_COST,
 ) -> float:
-    """経路のコスト (セル数 + turn_cost × 旋回回数)。"""
-    legs = path_to_legs(path, start_facing)
-    return (len(path) - 1) + turn_cost * sum(abs(leg.turn) for leg in legs)
+    """経路のコスト (:func:`shortest_path` が最小化しているものと同じ式)。"""
+    if len(path) < 2:
+        return 0.0
+    dirs = [direction_between(path[i], path[i + 1]) for i in range(len(path) - 1)]
+    total = 0.0
+    prev: Direction | None = None
+    for d in dirs:
+        total += _step_cost(cost, prev, d, start_facing)
+        prev = d
+    return total
 
 
 def route(
@@ -141,24 +195,31 @@ def route(
     *,
     start_facing: Direction = Direction.N,
     known: Iterable[tuple[int, int]] | None = None,
-    turn_cost: float = DEFAULT_TURN_COST,
+    cost: MoveCost = DEFAULT_COST,
 ) -> list[Leg]:
-    """便利版: 最短経路を求めて区間列 (旋回 + 直進) にして返す。無ければ空リスト。"""
+    """便利版: 最短経路を求めて区間列 (方角 + セル数) にして返す。無ければ空リスト。"""
     path = shortest_path(
-        maze, start, goals, start_facing=start_facing, known=known, turn_cost=turn_cost
+        maze, start, goals, start_facing=start_facing, known=known, cost=cost
     )
-    return path_to_legs(path, start_facing)
+    return path_to_legs(path)
 
 
 def describe_legs(legs: list[Leg]) -> str:
-    """ログ用の 1 行表記 例: "直進2 -> 右90° -> 直進3"。"""
+    """ログ用の 1 行表記 例: "北へ2 -> 東へ3"。"""
     if not legs:
         return "(移動なし)"
-    names = {0: None, 1: "左90°", -1: "右90°", 2: "180°"}
-    parts = []
+    return " -> ".join(f"{leg.direction.name}へ{leg.cells}" for leg in legs)
+
+
+def turns_in(legs: list[Leg], start_facing: Direction = Direction.N) -> int:
+    """区間列に含まれる 90° 旋回の回数 (旋回する走り方の見積もり用)。
+
+    ``Leg`` は方角しか持たないので、旋回量は隣り合う区間の方角の差から出す。
+    旋回レス走行ではこの値は時間に効かない。
+    """
+    total = 0
+    facing = start_facing
     for leg in legs:
-        turn = names.get(leg.turn, f"{leg.turn * 90}°")
-        if turn:
-            parts.append(turn)
-        parts.append(f"直進{leg.cells}")
-    return " -> ".join(parts)
+        total += abs(quarter_turns(facing, leg.direction))
+        facing = leg.direction
+    return total

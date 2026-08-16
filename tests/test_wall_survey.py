@@ -95,9 +95,14 @@ def test_plan_tour_visits_every_cell_without_crossing_walls():
     assert visited == {(x, y) for x in range(3) for y in range(3)}
 
 
-def test_plan_tour_turns_are_quarter_turns():
-    tour = plan_tour(Maze.from_ascii(PRACTICE))
-    assert all(step.turn in (-1, 0, 1, 2) for step in tour)
+def test_plan_tour_steps_move_to_an_adjacent_cell():
+    """各手は隣接セルへの 1 手 (Step は方角とセルだけを持つ)。"""
+    maze = Maze.from_ascii(PRACTICE)
+    tour = plan_tour(maze)
+    cell = maze.start
+    for step in tour:
+        assert maze.neighbor(*cell, step.direction) == step.to_cell
+        cell = step.to_cell
 
 
 def test_plan_tour_on_open_maze_is_efficient():

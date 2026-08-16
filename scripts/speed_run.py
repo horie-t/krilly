@@ -84,7 +84,8 @@ def main() -> None:
     maze_cfg = load_maze_config()
     maze = Maze(args.size) if args.size else Maze.from_config(maze_cfg)
     maze.set_outer_walls()
-    explorer = Explorer(maze)
+    # Phase 3/4 で --turn-in-place を足すまでは従来どおり旋回して走る (#76)
+    explorer = Explorer(maze, holonomic=False)
     manager = RunManager(explorer, time_limit_s=args.time_limit, max_runs=args.max_runs)
     detector = WallDetector(calibrated_config())
     yaw_cfg = calibrated_axis_yaw_config()
@@ -255,7 +256,7 @@ def main() -> None:
         ) -> tuple[tuple[int, int], Direction] | None:
             log.info("%s: %s", label, describe_legs(legs))
             for leg in legs:
-                facing = turn_to(facing, Direction((facing - leg.turn) % 4))
+                facing = turn_to(facing, leg.direction)
                 correct_at(cell, facing)
                 if not path_is_clear(facing, facing):
                     return None
@@ -263,7 +264,7 @@ def main() -> None:
                 run_primitive(f"直進{leg.cells}", max(args.timeout, leg.cells * 3.0),
                               kind=f"cells{leg.cells}")
                 for _ in range(leg.cells):
-                    cell = maze.neighbor(*cell, facing)
+                    cell = maze.neighbor(*cell, leg.direction)
             correct_at(cell, facing)
             return (cell, facing)
 

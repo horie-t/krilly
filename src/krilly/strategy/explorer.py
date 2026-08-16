@@ -63,11 +63,17 @@ class Unreachable(RuntimeError):
 
 @dataclass(frozen=True)
 class Step:
-    """次の 1 手 (旋回してから 1 セル前進する)。"""
+    """次の 1 手 (``direction`` の方角へ 1 セル進む)。
 
-    turn: int              # 90°単位の旋回量 (+CCW / -CW / 2=180°)
-    direction: Direction   # 旋回後に向く方角 = 進む方角
-    to_cell: tuple[int, int]   # 前進後のセル
+    旋回する走り方では「その方角を向いてから前進」、旋回レス走行 (#76) では
+    「向きを変えずにその方角へ平行移動」。**旋回量は持たない** — 同じ名前で
+    「機体の旋回量」と「進行軸の変更量」の両方を表すと、走り方を混ぜたときに
+    符号は合うのに意味が違うという最悪のバグになる。旋回量が要る側 (旧モードの
+    実行と見積もり) は :func:`quarter_turns` で方角から計算する。
+    """
+
+    direction: Direction   # 進む方角
+    to_cell: tuple[int, int]   # 進んだ後のセル
 
 
 @dataclass
@@ -77,6 +83,11 @@ class Explorer:
     maze: Maze
     cell: tuple[int, int] = (0, 0)
     facing: Direction = Direction.N
+    #: 直前に進んだ方角。旋回レス走行 (#76) では機体の向きが変わらないので、
+    #: 「進行軸を変えない方を優先する」タイブレークにはこちらを使う。
+    travel: Direction = Direction.N
+    #: True なら機体を旋回させない (向きは facing に固定されたまま平行移動する)。
+    holonomic: bool = True
     visited: set[tuple[int, int]] = field(default_factory=set)
     steps: int = 0
     # 一度観測した壁は「無し」の観測で消さない。壁の見落とし (偽陰性) は壁に突っ込む
@@ -125,18 +136,23 @@ class Explorer:
         if self.at_goal:
             return None
         dist = self.distances()
-        d = next_direction(self.maze, self.cell, self.facing, dist, self.visited)
+        # タイブレークの基準: 旋回レスなら「直前に進んだ方角」、旋回するなら「機体の向き」。
+        # facing 固定のまま facing を渡すと、迷路と無関係に北を最優先する静的な偏りになる。
+        reference = self.travel if self.holonomic else self.facing
+        d = next_direction(self.maze, self.cell, reference, dist, self.visited)
         if d is None:
             raise Unreachable(
                 f"セル {self.cell} からゴールへ到達できない "
                 f"(距離={dist[self.cell[0]][self.cell[1]]})"
             )
-        return Step(quarter_turns(self.facing, d), d, self.maze.neighbor(*self.cell, d))
+        return Step(d, self.maze.neighbor(*self.cell, d))
 
     # -- 前進 ---------------------------------------------------------------
     def advance(self, step: Step) -> tuple[int, int]:
         """1 手を実行したものとして内部状態を進める。新しいセルを返す。"""
-        self.facing = step.direction
+        self.travel = step.direction
+        if not self.holonomic:
+            self.facing = step.direction   # 旋回する走り方だけ機体の向きが変わる
         self.cell = step.to_cell
         self.visited.add(self.cell)
         self.steps += 1
