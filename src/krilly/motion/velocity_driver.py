@@ -115,5 +115,8 @@ class VelocityDriver:
         # ボディ速度 -> 各輪の符号付き周速 [m/s] -> 向き + フルステップ/s (正)
         wheel_mps = self.kin.body_to_wheels(vx, vy, omega)
         dirs = [FWD if s >= 0 else REV for s in wheel_mps]
-        step_hz = [abs(self.kin.wheel_speed_to_step_hz(s)) for s in wheel_mps]
+        # 輪ごとの実効径で step/s に直す (#76)。前進はほぼ W1/W2、横移動は W0 が主役なので、
+        # 共通径のままだと横移動だけスケールがずれる。
+        step_hz = [abs(self.kin.wheel_speed_to_step_hz(v, i))
+                   for i, v in enumerate(wheel_mps)]
         self.chain.run_all(dirs, step_hz)
