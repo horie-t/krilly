@@ -38,6 +38,7 @@ from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
     body_edge_for,
+    path_block_threshold,
     WallDetector,
     calibrated_config,
 )
@@ -218,7 +219,7 @@ def main() -> None:
                 return True
             edge = body_edge_for(direction, facing)
             fraction = detector.measure(capture())[edge][0]
-            threshold = detector.cfg.threshold_for(edge)
+            threshold = path_block_threshold(detector.cfg, edge)
             if fraction >= threshold:
                 log.error("進行中止: %s 方向 (%s 辺) に壁が見える (赤割合 %.2f >= %.2f)。"
                           "姿勢ずれの可能性。", direction.name, edge, fraction, threshold)

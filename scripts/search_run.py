@@ -44,6 +44,7 @@ from krilly.perception.wall_detect import (
     BODY_DIRS,
     WallDetector,
     body_edge_for,
+    path_block_threshold,
     calibrated_config,
 )
 from krilly.solver.maze import Direction, Maze
@@ -279,7 +280,7 @@ def main() -> None:
                 return True
             edge = body_edge_for(direction, explorer.facing)
             fraction = detector.measure(camera.capture())[edge][0]
-            threshold = detector.cfg.threshold_for(edge)
+            threshold = path_block_threshold(detector.cfg, edge)
             if fraction >= threshold:
                 log.error("進行中止: %s 方向 (%s 辺) に壁が見える (赤割合 %.2f >= %.2f)。"
                           "姿勢がずれている可能性が高い。",

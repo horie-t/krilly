@@ -135,9 +135,11 @@ def test_estimate_uses_measured_times(manager):
 def test_estimate_adds_turns_only_in_the_turning_mode(explorer):
     """旋回する走り方では旋回の時間が乗る (#76 の退避路)。"""
     legs = [Leg(Direction.N, 3), Leg(Direction.E, 2)]      # 北 -> 東 = 90° 1 回
-    turning = RunManager(explorer, holonomic=False)
+    # 旋回する走り方は常に前後軸で進むので、比較のため東西も前後と同じ時間に揃える
+    # (既定は東西 0.75s / 南北 0.73s と少し違う)。
+    turning = RunManager(explorer, holonomic=False, lateral_cell_time_s=0.73)
     assert turning.estimate_s(legs, Direction.N) - turning.turn_time_s == pytest.approx(
-        RunManager(explorer).estimate_s(legs)
+        RunManager(explorer, lateral_cell_time_s=0.73).estimate_s(legs)
     )
 
 

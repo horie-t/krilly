@@ -62,7 +62,7 @@ def test_shortest_path_minimises_turns_with_turn_cost():
     cost = MoveCost(leg=0.0, turn=1.0)
     assert path_turns(shortest_path(m, (0, 0), cost=cost)) == 1
     # 旋回も区間の固定費も 0 ならセル数だけの最短 (曲がり方は問わない) になる
-    flat = MoveCost(leg=0.0, turn=0.0)
+    flat = MoveCost(cell_ew=1.0, leg=0.0, turn=0.0)   # 軸差も消して 1 セル = 1.0 にする
     assert len(shortest_path(m, (0, 0), cost=flat)) - 1 == 4
 
 
@@ -163,12 +163,14 @@ def test_turns_in_counts_quarter_turns_from_the_start_facing():
 
 def test_path_cost_matches_what_the_search_minimises():
     path = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)]   # 北へ2 -> 東へ2
-    flat = MoveCost(leg=0.0, turn=0.0)
+    flat = MoveCost(cell_ew=1.0, leg=0.0, turn=0.0)   # 軸差も消して 1 セル = 1.0 にする
     assert path_cost(path, Direction.N, flat) == pytest.approx(4.0)
-    turning = MoveCost(leg=0.0, turn=1.0)
+    turning = MoveCost(cell_ew=1.0, leg=0.0, turn=1.0)
     assert path_cost(path, Direction.N, turning) == pytest.approx(5.0)   # 旋回1回
-    # 旋回レス: セル 4 + 区間 2 本 x 1.04
-    assert path_cost(path, Direction.N, DEFAULT_COST) == pytest.approx(4 + 2 * 1.04)
+    # 旋回レス既定: 南北 2 セル + 東西 2 セル x 1.03 + 区間 2 本 x 1.10
+    assert path_cost(path, Direction.N, DEFAULT_COST) == pytest.approx(
+        2 * 1.0 + 2 * 1.03 + 2 * 1.10
+    )
     assert path_cost([(0, 0)]) == pytest.approx(0.0)
 
 

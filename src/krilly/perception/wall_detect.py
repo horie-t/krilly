@@ -297,6 +297,23 @@ def maze_walls_to_body(
     }
 
 
+#: 進路チェック (地図が開いていると言う方角に壁が見えないか) に使う最低赤割合。
+#: **壁の有無判定より高くする。** 問うている内容が違うため:
+#:   壁検出   … 「壁はあるか」。前提なし。見落とし = 衝突なのでしきい値は低く (0.08)
+#:   進路確認 … 「地図は開いていると言うが本当か」。**開いている公算が高い**という前提が
+#:               あり、誤検出は走行を無駄に終わらせる
+#: 実測の分離 (#65, 113 フレーム / 452 ラベル) は 壁なし <= 0.121 / 壁あり >= 0.302 なので、
+#: その間を取る。実機 (#76) では right の 0.09 で最速ランが誤って中止された。
+#: なお本当に危険な状況 (姿勢がずれて壁を見失う) では赤割合は 0.00 まで落ちるので、
+#: この値を上げても検出力はほとんど落ちない。
+PATH_BLOCK_MIN_FRACTION = 0.20
+
+
+def path_block_threshold(cfg: "WallDetectorConfig", edge: str) -> float:
+    """進路チェックのしきい値 (辺ごとの壁判定値と :data:`PATH_BLOCK_MIN_FRACTION` の大きい方)。"""
+    return max(cfg.threshold_for(edge), PATH_BLOCK_MIN_FRACTION)
+
+
 def body_edge_for(direction: Direction, facing: Direction) -> str:
     """迷路方角 ``direction`` の壁が、``facing`` を向いた機体のどの辺に写るかを返す。
 
