@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """競技の通しラン: 探索 → 復帰 → 最速 ×N (issue #20)。
 
-:class:`krilly.app.run_manager.RunManager` の差配で、10 分・最大 5 走の予算内を
+:class:`krilly.app.run_manager.RunManager` の差配で、7 分・最大 5 走の予算内を
 自動で回す。探索ランは :mod:`scripts.search_run` と同じ閉ループ (壁観測 +
 flood-fill + 位置補正)。復帰と最速は確定した壁情報から :func:`shortest_path` の
 Leg 列 (旋回 + 連続直進) を作り、**複数セルを 1 動作で**走る。
@@ -72,7 +72,8 @@ def main() -> None:
     add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.4, help="動作の前後で止まる秒数")
-    p.add_argument("--time-limit", type=float, default=600.0, help="持ち時間 [s]")
+    p.add_argument("--time-limit", type=float, default=420.0,
+                   help="持ち時間 [s] (既定 420 = クラシック規定の 7 分。大会により 5 分)")
     p.add_argument("--max-runs", type=int, default=5, help="最大走行回数")
     p.add_argument("--max-steps", type=int, default=400, help="探索の打ち切りステップ数")
     p.add_argument("--timeout", type=float, default=10.0, help="1動作の上限秒数 (直進はセル数で延長)")
@@ -332,6 +333,11 @@ def main() -> None:
             legs = manager.home_reached(time.monotonic(), pose[1])
             if legs is None:
                 break
+            # 競技規定 3-4: 始点に戻って自動的に再スタートする場合、始点で 2 秒以上
+            # 停止しなければならない。持ち時間から確実に引かれるが、削ってはいけない。
+            log.info("[走行 %d] 始点で %.1fs 停止 (規定 3-4)",
+                     manager.runs_used, manager.restart_dwell_s)
+            time.sleep(manager.restart_dwell_s)
             log.info("[走行 %d] 最速ラン開始 (見積 %.1fs)",
                      manager.runs_used, manager.estimate_s(legs))
             t_run = time.monotonic()

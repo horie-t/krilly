@@ -187,7 +187,8 @@ def test_elapsed_starts_at_first_departure(manager):
     assert manager.elapsed_s(100.0) == 0.0         # 開始前は 0
     manager.start_search(100.0)
     assert manager.elapsed_s(160.0) == pytest.approx(60.0)
-    assert manager.remaining_s(160.0) == pytest.approx(540.0)
+    # 持ち時間はクラシック競技規定の 7 分 (420s)
+    assert manager.remaining_s(160.0) == pytest.approx(360.0)
 
 
 # --- 経路 ---------------------------------------------------------------------
@@ -236,3 +237,26 @@ def test_summary_text(manager):
     manager.start_search(0.0)
     text = manager.summary(30.0)
     assert "走行 1/5" in text and "経過 30s" in text and "search" in text
+
+
+# --- 競技規定 (NTF クラシックマウス競技規定) ---------------------------------
+def test_time_limit_follows_the_classic_rules(explorer):
+    """持ち時間は 7 分 (規定 3-6)。10 分は別競技 (旧ハーフサイズ) の規定。"""
+    assert RunManager(explorer).time_limit_s == 420.0
+    assert RunManager(explorer).max_runs == 5
+
+
+def test_restart_dwell_is_charged_before_a_speed_run(explorer):
+    """規定 3-4: 始点に戻って自動再スタートするなら 2 秒以上停止する。
+
+    削れない時間なので、見積もりにも予算判断にも入っていなければならない。
+    """
+    mgr = RunManager(explorer)
+    assert mgr.restart_dwell_s >= 2.0
+    mgr.start_search(0.0)
+    legs = mgr.speed_legs(Direction.N)
+    need = mgr.time_margin * mgr.estimate_s(legs)
+    mgr.goal_reached(0.0, explorer.cell, explorer.facing)
+    # 停止の分だけ足りないときは走行を始めない
+    late = mgr.time_limit_s - need - mgr.restart_dwell_s / 2
+    assert mgr.home_reached(late, Direction.N) is None

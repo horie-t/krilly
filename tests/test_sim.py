@@ -1,7 +1,7 @@
 """迷路シミュレーション基盤 (issue #77) のユニットテスト。
 
 離散層はハードウェアに触らないので、真の迷路を用意すればセッション全体が回る。
-ここで**実機なしに担保する**のは 探索の完走 / 地図の一致 / 10 分 5 走の予算 / 経路計画。
+ここで**実機なしに担保する**のは 探索の完走 / 地図の一致 / 7 分 5 走の予算 / 経路計画。
 カメラの見落としや姿勢の誤差は模擬しない (実機 #23 の担当)。
 """
 
@@ -207,7 +207,7 @@ def test_sessions_complete_on_random_16x16_mazes(seed):
     result = simulate_session(random_maze(16, seed=seed))
     assert result.reached_goal, result.describe()
     assert result.mismatches == [], result.describe()
-    assert result.elapsed_s <= 600.0
+    assert result.elapsed_s <= 420.0
     assert 1 <= result.runs_used <= 5
 
 
@@ -241,7 +241,7 @@ def test_the_manager_refuses_a_run_it_cannot_finish():
     assert result.reached_goal
     assert result.runs_used == 1
     assert result.speed_runs == []
-    assert result.elapsed_s <= 600.0
+    assert result.elapsed_s <= 420.0
 
 
 @pytest.mark.parametrize("scale", [1.0, 1.2, 1.4])
@@ -253,7 +253,7 @@ def test_the_budget_holds_even_when_reality_is_slower_than_the_estimate(scale):
     """
     for seed in range(6):
         result = simulate_session(random_maze(16, seed=seed), actual_scale=scale)
-        assert result.elapsed_s <= 600.0, result.describe()
+        assert result.elapsed_s <= 420.0, result.describe()
         assert result.mismatches == []
 
 
@@ -261,7 +261,7 @@ def test_slower_reality_costs_runs_not_the_time_limit():
     fast = simulate_session(random_maze(16, seed=3, loop_ratio=0.0), actual_scale=1.0)
     slow = simulate_session(random_maze(16, seed=3, loop_ratio=0.0), actual_scale=1.4)
     assert slow.runs_used <= fast.runs_used
-    assert slow.elapsed_s <= 600.0
+    assert slow.elapsed_s <= 420.0
 
 
 def test_turning_mode_is_slower_than_the_turn_free_one():
@@ -355,7 +355,7 @@ def test_every_contest_maze_runs_a_session(path):
     result = simulate_session(truth)
     assert result.reached_goal, result.describe()
     assert result.mismatches == [], result.describe()
-    assert result.elapsed_s <= 600.0
+    assert result.elapsed_s <= 420.0
 
 
 def test_the_official_answer_is_reproduced():

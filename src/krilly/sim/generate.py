@@ -141,7 +141,7 @@ def serpentine_maze(size: int) -> Maze:
     """長い一本道 (蛇行)。全 N^2 セルを 1 本の経路で繋ぐ最長経路の迷路。
 
     行ごとに東西へ折り返す。行の間の横壁は折り返す端の 1 箇所だけ開ける。
-    最短経路が最長になるので、10 分予算と経路長の見積もりの上限側を突く。
+    最短経路が最長になるので、持ち時間と経路長の見積もりの上限側を突く。
     """
     maze = walled_maze(size)
     for y in range(size):
@@ -156,7 +156,7 @@ def serpentine_maze(size: int) -> Maze:
 def comb_maze(size: int) -> Maze:
     """袋小路だらけの櫛形。南端が幹線で、そこから北へ伸びる歯はすべて行き止まり。
 
-    探索が歯を 1 本ずつ入っては戻る形になるので、探索の手数と 10 分予算を突く。
+    探索が歯を 1 本ずつ入っては戻る形になるので、探索の手数と持ち時間を突く。
     """
     maze = walled_maze(size)
     for x in range(size - 1):

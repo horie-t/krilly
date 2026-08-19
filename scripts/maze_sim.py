@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """多数の迷路をまとめてシミュレートする (issue #77)。
 
-**実機不要。** 探索 → 復帰 → 最速 xN の 10 分セッションを、真の迷路を相手に丸ごと
+**実機不要。** 探索 → 復帰 → 最速 xN の 7 分セッションを、真の迷路を相手に丸ごと
 回して「完走したか / 地図が一致したか / 予算に収まったか」を出す。実機の役割を
 「誤差の蓄積」と「カメラ判定」に絞るための土台 (#23)。
 
@@ -77,7 +77,8 @@ def build_args() -> argparse.ArgumentParser:
                      help="ゴールの位置 (既定 center = 本番設定の中央 2x2)")
     cfg.add_argument("--turn-in-place", action="store_true",
                      help="旋回する走り方で見積もる (既定は旋回レス #76)")
-    cfg.add_argument("--time-limit", type=float, default=600.0, help="持ち時間 [s]")
+    cfg.add_argument("--time-limit", type=float, default=420.0,
+                     help="持ち時間 [s] (既定 420 = クラシック規定の 7 分)")
     cfg.add_argument("--max-runs", type=int, default=5, help="最大走行回数")
     cfg.add_argument("--actual-scale", type=float, default=1.0,
                      help="実際は見積もりの何倍かかるか (予算判断の余裕を試す)")

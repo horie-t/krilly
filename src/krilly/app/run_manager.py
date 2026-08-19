@@ -1,7 +1,13 @@
 """走行の状態機械: 待機 → 探索 → 復帰 → 最速 → … (issue #20)。
 
-クラシック競技の制約 (**持ち時間 10 分・走行は最大 5 回**) の下で、いつ次の走行を
-始めてよいかを決める純ロジック。「走行」はスタート区画を出発してゴールを目指す
+クラシック競技の制約 (**持ち時間 7 分・走行は最大 5 回**) の下で、いつ次の走行を
+始めてよいかを決める純ロジック。
+
+持ち時間は NTF のクラシックマウス競技規定による: 「マイクロマウスは 7 分間の持ち時間を
+有し」「この間 5 回までの走行をすることができる」。ただし「特に必要と認められた競技会に
+ついては、持ち時間を 5 分、走行回数を 5 回とすることがある」ので、**大会ごとに確認して
+``time_limit_s`` を設定すること**。10 分はマイクロマウス競技 (旧ハーフサイズ、9cm 区画・
+最大 32x32) の規定で、本機の出る競技のものではない。「走行」はスタート区画を出発してゴールを目指す
 試行と数える (探索ランも 1 走行。ゴールからスタートへの**復帰は走行に数えない**)。
 
 方針:
@@ -57,7 +63,7 @@ def facing_after(legs: list[Leg], facing: Direction, holonomic: bool = True) -> 
 
 @dataclass
 class RunManager:
-    """10 分・5 走の予算内で 探索 → (復帰 → 最速)×N を差配する。
+    """7 分・5 走の予算内で 探索 → (復帰 → 最速)×N を差配する。
 
     使い方 (駆動側は各イベントで 1 回ずつ呼ぶ):
 
@@ -70,7 +76,9 @@ class RunManager:
     """
 
     explorer: Explorer
-    time_limit_s: float = 600.0        # 持ち時間 (10 分)
+    #: 持ち時間 [s]。クラシック競技規定の 7 分。大会によっては 5 分 (300s) なので、
+    #: **競技会ごとの発表を確認して設定すること**。
+    time_limit_s: float = 420.0
     max_runs: int = 5                  # 最大走行回数
     # 旋回レス走行 (#76) の 5x5 通しラン実測。speed_run が末尾に軸ごとの当てはめを出す:
     #   南北 (機体の前後軸) 1セル 0.73s + 区間 0.39s
@@ -84,6 +92,12 @@ class RunManager:
     straight_time_s: float = 0.81      # 区間 1 本あたりの固定費 (ランプ + 整定 + 撮影 + 停止)
     turn_time_s: float = 2.18          # 90° 旋回 1 回 (旋回する走り方のみ)
     time_margin: float = 1.5           # 見積もりに掛ける安全率
+    #: スタート区画へ戻ってから再スタートするまでの停止時間 [s]。
+    #: **競技規定 3-4 の要求**: 「マイクロマウスが始点に戻り、自動的に再スタートする
+    #: 場合、始点において 2 秒以上停止しなければならない」。守らないと走行が無効に
+    #: なりうるので、これは最適化の対象ではない。持ち時間からは確実に引かれるので
+    #: 見積もりにも入れる。
+    restart_dwell_s: float = 2.0
     #: 東西 (旋回レスでは機体の左右軸) へ 1 セル進む時間。
     lateral_cell_time_s: float = 0.75
     #: True なら機体を旋回させない (#76)。旋回の時間は見積もりに入らない。
@@ -168,7 +182,7 @@ class RunManager:
             if home is not None:
                 next_speed = self.speed_legs(facing_after(home, facing))
                 if next_speed is not None:
-                    budget = self.time_margin * (
+                    budget = self.restart_dwell_s + self.time_margin * (
                         self.estimate_s(home) + self.estimate_s(next_speed)
                     )
                     if self.remaining_s(now) >= budget:
@@ -185,7 +199,8 @@ class RunManager:
         if (
             legs is not None
             and self.runs_used < self.max_runs
-            and self.remaining_s(now) >= self.time_margin * self.estimate_s(legs)
+            and self.remaining_s(now) >= (self.restart_dwell_s
+                                          + self.time_margin * self.estimate_s(legs))
         ):
             self.runs_used += 1
             self.phase = RunPhase.SPEED
