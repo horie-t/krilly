@@ -325,3 +325,68 @@ def test_comb_maze_is_all_dead_ends():
     for x in range(6):
         assert m.has_wall(x, 5, Direction.N)
         assert m.has_wall(x, 5, Direction.E) or x == 5
+
+
+# --- 書き起こした大会迷路 (#84) ---------------------------------------------
+CONTEST_DIR = MAZE_DIR / "contest"
+
+
+def contest_mazes():
+    return sorted(CONTEST_DIR.glob("*.txt"))
+
+
+def test_the_contest_corpus_is_present():
+    assert len(contest_mazes()) >= 30, "書き起こした大会迷路が見つからない"
+
+
+@pytest.mark.parametrize("path", contest_mazes(), ids=lambda p: p.stem)
+def test_every_contest_maze_is_solvable(path):
+    """大会迷路は必ず解ける。解けないなら書き起こしの誤り (#84)。"""
+    maze = Maze.from_ascii(path.read_text(encoding="utf-8"))
+    assert maze.size == 16
+    report = check_maze(maze)
+    assert report.ok, f"{path.stem}: {report.errors}"
+
+
+@pytest.mark.parametrize("path", contest_mazes(), ids=lambda p: p.stem)
+def test_every_contest_maze_runs_a_session(path):
+    """探索が完走し、訪問範囲で地図が一致すること。"""
+    truth = Maze.from_ascii(path.read_text(encoding="utf-8"))
+    result = simulate_session(truth)
+    assert result.reached_goal, result.describe()
+    assert result.mismatches == [], result.describe()
+    assert result.elapsed_s <= 600.0
+
+
+def test_the_official_answer_is_reproduced():
+    """2013 年エキスパート予選の図に載っている公式解と一致すること。
+
+    記載は「西回り 52歩29折、54歩29折 南回り 52歩25折、54歩23折」。抽出した迷路の
+    最短経路が 52 歩 29 折、折れ最小の経路が 52 歩 25 折になる。**書き起こしが
+    正しいことの、目視によらない唯一の裏付け**なので消さないこと。
+    """
+    from krilly.strategy.shortest_path import MoveCost, path_to_legs, turns_in
+    maze = Maze.from_ascii(
+        (CONTEST_DIR / "2013_japan_exp_q.txt").read_text(encoding="utf-8"))
+    shortest = shortest_path(maze, cost=MoveCost(1, 1, 0, 0))
+    assert len(shortest) - 1 == 52
+    assert turns_in(path_to_legs(shortest), Direction.N) == 29
+    fewest_turns = shortest_path(maze, cost=MoveCost(1, 1, 0, 0.01))
+    assert len(fewest_turns) - 1 == 52
+    assert turns_in(path_to_legs(fewest_turns), Direction.N) == 25
+
+
+def test_contest_mazes_are_harder_than_generated_ones():
+    """**生成した迷路は本物の代わりにならない** (#84 の根拠)。
+
+    壁の枚数を合わせても解の長さが 4 倍違う。難しさは密度ではなく配置で決まる。
+    """
+    import statistics
+    real = [Maze.from_ascii(p.read_text(encoding="utf-8")) for p in contest_mazes()]
+    fake = [random_maze(16, seed=s, loop_ratio=0.10) for s in range(len(real))]
+    real_sol = statistics.median(len(shortest_path(m)) - 1 for m in real)
+    fake_sol = statistics.median(len(shortest_path(m)) - 1 for m in fake)
+    real_walls = statistics.median(wall_counts(m).inner for m in real)
+    fake_walls = statistics.median(wall_counts(m).inner for m in fake)
+    assert abs(real_walls - fake_walls) < 40      # 壁の枚数は近いのに
+    assert real_sol > 3 * fake_sol               # 解の長さは 3 倍以上違う
