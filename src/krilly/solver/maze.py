@@ -63,8 +63,7 @@ class Maze:
     @classmethod
     def from_config(cls, maze: MazeConfig) -> "Maze":
         m = cls(maze.grid_size)
-        m._goal_min = tuple(maze.goal_min)  # type: ignore[assignment]
-        m._goal_max = tuple(maze.goal_max)  # type: ignore[assignment]
+        m.set_goal(tuple(maze.goal_min), tuple(maze.goal_max))  # type: ignore[arg-type]
         return m
 
     @classmethod
@@ -73,6 +72,11 @@ class Maze:
 
         セル幅は任意 (``+-+`` でも ``+---+`` でもよい)。行数は 2N+1 で、上の行が
         北。既知形状を手書きで与えたいとき (校正・テスト・デバッグ) に使う。
+
+        セルの内側の ``S`` / ``G`` はスタート / ゴールを表す (#77)。``G`` が 1 つでも
+        あればゴールはその**外接矩形**になり、矩形が ``G`` で埋まっていなければ
+        エラーにする (ゴール領域は矩形と決まっているため)。どちらも無ければ
+        スタート (0,0) ・ゴール中央 2x2 の既定のまま。
 
         例::
 
@@ -100,6 +104,7 @@ class Maze:
             return "".join(at(row, c) for c in range(plus[x] + 1, plus[x + 1]))
 
         maze = cls(size)
+        goals: list[tuple[int, int]] = []
         for row in range(size):
             y = size - 1 - row                  # 上の行が北 (y が大きい)
             for x in range(size):
@@ -111,6 +116,21 @@ class Maze:
                     maze.set_wall(x, y, Direction.W)
                 if at(2 * row + 1, plus[x + 1]) == "|":
                     maze.set_wall(x, y, Direction.E)
+                inside = segment(2 * row + 1, x)
+                if "S" in inside:
+                    maze.start = (x, y)
+                if "G" in inside:
+                    goals.append((x, y))
+        if goals:
+            lo = (min(g[0] for g in goals), min(g[1] for g in goals))
+            hi = (max(g[0] for g in goals), max(g[1] for g in goals))
+            span = (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1)
+            if span != len(goals):
+                raise ValueError(
+                    f"ゴールは矩形でなければならない ('G' が {len(goals)} 個、"
+                    f"外接矩形 {lo}..{hi} は {span} セル)"
+                )
+            maze.set_goal(lo, hi)
         return maze
 
     # -- 範囲・近傍 ---------------------------------------------------------
@@ -166,6 +186,27 @@ class Maze:
         return out
 
     # -- ゴール -------------------------------------------------------------
+    @property
+    def goal_min(self) -> tuple[int, int]:
+        return self._goal_min
+
+    @property
+    def goal_max(self) -> tuple[int, int]:
+        return self._goal_max
+
+    def set_goal(self, lo: tuple[int, int], hi: tuple[int, int]) -> None:
+        """ゴール領域 (両端含む矩形) を設定する。
+
+        既定は中央 2x2 (本番設定) だが、対角ゴール ``set_goal((n-1, n-1), (n-1, n-1))``
+        のように経路長を最大化するストレステストにも使う (#77)。
+        """
+        for c in (lo, hi):
+            if not self.in_bounds(*c):
+                raise IndexError(c)
+        if lo[0] > hi[0] or lo[1] > hi[1]:
+            raise ValueError(f"ゴール矩形の下限が上限を超えている ({lo} .. {hi})")
+        self._goal_min, self._goal_max = lo, hi
+
     def goal_cells(self) -> list[tuple[int, int]]:
         return [
             (x, y)
@@ -178,8 +219,12 @@ class Maze:
                 and self._goal_min[1] <= y <= self._goal_max[1])
 
     # -- デバッグ表示 -------------------------------------------------------
-    def to_ascii(self) -> str:
-        """迷路を ASCII で表示 (北が上)。壁 '---'/'|'、格子点 '+'。"""
+    def to_ascii(self, markers: bool = True) -> str:
+        """迷路を ASCII で表示 (北が上)。壁 '---'/'|'、格子点 '+'。
+
+        ``markers`` でスタート ``S`` / ゴール ``G`` をセルの内側に書く。
+        :meth:`from_ascii` が読み戻すので往復できる。
+        """
         lines = []
         for y in range(self.size - 1, -1, -1):
             top = "+"
@@ -188,7 +233,13 @@ class Maze:
             lines.append(top)
             mid = "|" if self.has_wall(0, y, Direction.W) else " "
             for x in range(self.size):
-                mid += "   " + ("|" if self.has_wall(x, y, Direction.E) else " ")
+                mark = " "
+                if markers:
+                    if (x, y) == self.start:
+                        mark = "S"
+                    elif self.is_goal(x, y):
+                        mark = "G"
+                mid += f" {mark} " + ("|" if self.has_wall(x, y, Direction.E) else " ")
             lines.append(mid)
         bottom = "+"
         for x in range(self.size):

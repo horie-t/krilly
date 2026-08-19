@@ -10,6 +10,7 @@ import pytest
 
 from krilly.config import MazeConfig
 from krilly.perception.wall_detect import BACK, FRONT, LEFT, RIGHT
+from krilly.sim import open_maze, sense       # カメラの代役は krilly.sim にある (#77)
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import (
     Explorer,
@@ -19,26 +20,6 @@ from krilly.strategy.explorer import (
     heading_rad,
     quarter_turns,
 )
-
-
-def open_maze(size: int) -> Maze:
-    m = Maze(size)
-    m.set_outer_walls()
-    return m
-
-
-def sense(truth: Maze, cell: tuple[int, int], facing: Direction) -> dict[str, bool]:
-    """真の迷路から、その姿勢で見える機体相対の壁有無を作る (実機カメラの代役)。
-
-    ``body_walls_to_maze`` の逆写像。LEFT=facing の反時計回り、RIGHT=時計回り。
-    """
-    x, y = cell
-    return {
-        FRONT: truth.has_wall(x, y, facing),
-        BACK: truth.has_wall(x, y, Direction((facing + 2) % 4)),
-        LEFT: truth.has_wall(x, y, Direction((facing - 1) % 4)),
-        RIGHT: truth.has_wall(x, y, Direction((facing + 1) % 4)),
-    }
 
 
 def run_search(truth: Maze, max_steps: int = 500) -> Explorer:
