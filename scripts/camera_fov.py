@@ -30,6 +30,7 @@ import cv2
 from krilly.config import load_maze_config
 from krilly.hal.camera import Camera
 from krilly.logging_config import get_logger, setup_logging
+from krilly.perception.camera_tilt import measure_tilt
 from krilly.perception.red_wall import red_mask
 from krilly.perception.wall_detect import (
     BACK,
@@ -48,11 +49,13 @@ def parse_size(text: str) -> tuple[int, int]:
     return int(w), int(h)
 
 
-def measure(cam: Camera, pitch_mm: float, label: str, out_dir: Path | None):
-    """1 枚撮って帯の位置から px/mm と画角を出す。"""
+def measure(cam: Camera, pitch_mm: float, label: str, out_dir: Path | None,
+            wall_height_mm: float = 50.0, camera_height_mm: float = 390.0):
+    """1 枚撮って帯の位置から px/mm と画角を出し、格子の収束から傾きも測る。"""
     frame = cam.capture()
     h, w = frame.shape[:2]
-    bands = band_positions(red_mask(frame, CALIBRATED_RED))
+    mask = red_mask(frame, CALIBRATED_RED)
+    bands = band_positions(mask)
     log.info("[%s] %dx%d  帯 %s", label, w, h,
              {k: v for k, v in sorted(bands.items())})
     if out_dir:
@@ -82,6 +85,15 @@ def measure(cam: Camera, pitch_mm: float, label: str, out_dir: Path | None):
              "(壁は %.0fmm 先、隣セルの奥の壁は %.0fmm)",
              label, cy / px_y, (h - 1 - cy) / px_y, cx / px_x, (w - 1 - cx) / px_x,
              pitch_mm / 2, pitch_mm * 1.5)
+
+    # 壁上面は 3D では正確な格子なので、真下向きなら画像でも平行線になる。
+    # 傾いていれば消失点へ収束する (セルが正方形でなくても影響を受けない)。
+    focal = px_x * (camera_height_mm - wall_height_mm)
+    tilt = measure_tilt(mask, focal)
+    log.info("[%s] 傾き (焦点距離 %.0fpx = %.3f px/mm x %.0fmm を仮定):",
+             label, focal, px_x, camera_height_mm - wall_height_mm)
+    for line in tilt.describe().splitlines():
+        log.info("[%s]   %s", label, line)
     return px_x, px_y, cx, cy, w, h
 
 
@@ -93,6 +105,8 @@ def main() -> None:
     p.add_argument("--current-size", default="640x480", help="比較する現行の出力")
     p.add_argument("--out-dir", default=None, help="フレームの保存先")
     p.add_argument("--full-only", action="store_true", help="全画素モードだけ測る")
+    p.add_argument("--camera-height", type=float, default=390.0,
+                   help="床からカメラまでの高さ [mm] (既定 390)。傾きの角度はこれに比例する")
     args = p.parse_args()
     setup_logging()
 
@@ -103,11 +117,13 @@ def main() -> None:
     if not args.full_only:
         w, h = parse_size(args.current_size)
         with Camera(width=w, height=h) as cam:
-            results["現行"] = measure(cam, pitch_mm, "current", out_dir)
+            results["現行"] = measure(cam, pitch_mm, "current", out_dir,
+                                    camera_height_mm=args.camera_height)
 
     w, h = parse_size(args.size)
     with Camera(width=w, height=h, full_fov=True) as cam:
-        results["全画素"] = measure(cam, pitch_mm, "full_fov", out_dir)
+        results["全画素"] = measure(cam, pitch_mm, "full_fov", out_dir,
+                                 camera_height_mm=args.camera_height)
 
     a, b = results.get("現行"), results.get("全画素")
     if a and b:
