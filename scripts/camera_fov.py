@@ -91,12 +91,40 @@ def measure(cam: Camera, pitch_mm: float, label: str, out_dir: Path | None,
     # 傾いていれば消失点へ収束する (セルが正方形でなくても影響を受けない)。
     focal = px_x * (camera_height_mm - wall_height_mm)
     tilt = measure_tilt(mask, focal)
+    _report_walls_used(label, tilt, cx, cy, px_x, px_y, pitch_mm, focal, (w / 2, h / 2))
     log.info("[%s] 傾き (焦点距離 %.0fpx = %.3f px/mm x %.0fmm を仮定):",
              label, focal, px_x, camera_height_mm - wall_height_mm)
     for line in tilt.describe().splitlines():
         log.info("[%s]   %s", label, line)
     _report_shim(label, tilt)
     return px_x, px_y, cx, cy, w, h
+
+
+def _report_walls_used(label, tilt, cx, cy, px_x, px_y, pitch_mm, focal, pp):
+    """どの壁を使ったかと、自セルの壁だけで測った場合との差を出す。
+
+    画角が広がって隣のセルの壁まで写るようになったので、**床パネルの継ぎ目をまたぐ**
+    可能性がある。自セル (中心から半ピッチ) だけで測った値と比べれば、継ぎ目の影響を
+    受けているかがそのまま分かる。差が当てはめ残差より大きければ、隣の壁は信用しない。
+    """
+    from krilly.perception.camera_tilt import _tilt_from_vp, vanishing_point
+
+    half = pitch_mm / 2
+    for name, lines, pos, scale, c, axis in (
+        ("ロール", tilt.horizontal, lambda ln: ln.py, px_y, cy, 0),
+        ("ピッチ", tilt.vertical, lambda ln: ln.px, px_x, cx, 1),
+    ):
+        if not lines:
+            continue
+        near = [ln for ln in lines if abs(abs((pos(ln) - c) / scale) - half) < half / 2]
+        where = ", ".join(f"{(pos(ln) - c) / scale:+.0f}mm" for ln in sorted(lines, key=pos))
+        log.info("[%s]   %s に使った壁 (セル中心から): %s", label, name, where)
+        if len(near) < len(lines):
+            t_near = _tilt_from_vp(vanishing_point(near), pp, focal, axis)
+            t_all = _tilt_from_vp(vanishing_point(lines), pp, focal, axis)
+            if t_near is not None and t_all is not None:
+                log.info("[%s]     自セルの壁だけ %+.2f° / 隣も含めて %+.2f° (差 %.2f°)",
+                         label, t_near, t_all, abs(t_all - t_near))
 
 
 #: カメラ取付穴の間隔 [mm] (Camera Module 3)。前後が 12.5、左右が 21.0。
