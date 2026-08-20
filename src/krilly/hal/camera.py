@@ -21,11 +21,17 @@ class Camera:
     ``close`` を持つオブジェクト)。注入しない場合は ``Picamera2`` を開いて開始する。
     """
 
+    #: 全画素を読めるセンサーモード。IMX708 の 1536x864 モードは ``crop_limits`` が
+    #: (768, 432, 3072, 1728) で**それ自体が中央 67% の切り出し**なので、これを選ばないと
+    #: 画角が狭いままになる (2304x1296 の ``crop_limits`` は全画素 4608x2592)。
+    FULL_FOV_SENSOR = (2304, 1296)
+
     def __init__(
         self,
         width: int = 640,
         height: int = 480,
         lock_awb_exposure: bool = True,
+        full_fov: bool = False,
         picam2=None,
     ) -> None:
         if picam2 is None:
@@ -34,8 +40,15 @@ class Camera:
             from picamera2 import Picamera2
 
             picam2 = Picamera2()
+            # picamera2 は要求サイズから勝手にセンサーモードを選ぶ。640x480 を頼むと
+            # 1536x864 モード + 4:3 への切り出しになり、**センサー面積の 33% しか
+            # 使わない** (横 50% x 縦 67%)。full_fov で全画素モードを明示すると
+            # 縦横とも 1.5 倍の画角になる。分解能を保つには出力も 1.5 倍にすること
+            # (960x720 なら px/mm は据え置きで画角だけ広がる)。
+            sensor = ({"sensor": {"output_size": self.FULL_FOV_SENSOR, "bit_depth": 10}}
+                      if full_fov else {})
             config = picam2.create_video_configuration(
-                main={"size": (width, height), "format": "RGB888"}
+                main={"size": (width, height), "format": "RGB888"}, **sensor
             )
             picam2.configure(config)
             picam2.start()

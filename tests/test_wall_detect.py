@@ -272,3 +272,53 @@ def test_body_edge_for_matches_maze_walls_to_body():
         for d in Direction:
             edge = body_edge_for(d, facing)
             assert body[edge] == walls[d], (facing, d, edge)
+
+
+# --- 帯の位置測定 (#87 の画角変更に伴う再校正で使う) -------------------------
+def test_band_positions_recovers_synthetic_bands():
+    """行/列プロファイルから 4 辺の帯の位置を取り出せること。"""
+    import numpy as np
+
+    from krilly.perception.wall_detect import band_positions
+
+    mask = np.zeros((480, 640), np.uint8)
+    mask[120:143, 100:540] = 255      # FRONT (行)
+    mask[425:448, 100:540] = 255      # BACK
+    mask[150:400, 134:156] = 255      # LEFT (列)
+    mask[150:400, 438:462] = 255      # RIGHT
+    got = band_positions(mask)
+    assert got[FRONT] == (120, 142)
+    assert got[BACK] == (425, 447)
+    assert got[LEFT] == (134, 155)
+    assert got[RIGHT] == (438, 461)
+
+
+def test_band_positions_skips_edges_with_no_wall():
+    """壁の無い辺は帯が出ないので結果に入らない。"""
+    import numpy as np
+
+    from krilly.perception.wall_detect import band_positions
+
+    mask = np.zeros((480, 640), np.uint8)
+    mask[120:143, 100:540] = 255      # FRONT だけ
+    got = band_positions(mask)
+    assert FRONT in got
+    assert BACK not in got and LEFT not in got and RIGHT not in got
+
+
+def test_band_positions_finds_the_calibrated_bands():
+    """校正済みの帯位置を入れたら、その位置が返ること (回帰)。"""
+    import numpy as np
+
+    from krilly.perception.wall_detect import CALIBRATED_BANDS, band_positions
+
+    mask = np.zeros((480, 640), np.uint8)
+    for edge in (FRONT, BACK):
+        lo, hi = CALIBRATED_BANDS[edge]
+        mask[lo:hi + 1, 100:540] = 255
+    for edge in (LEFT, RIGHT):
+        lo, hi = CALIBRATED_BANDS[edge]
+        mask[150:400, lo:hi + 1] = 255
+    got = band_positions(mask)
+    for edge in (FRONT, BACK, LEFT, RIGHT):
+        assert got[edge] == CALIBRATED_BANDS[edge], edge
