@@ -322,3 +322,58 @@ def test_band_positions_finds_the_calibrated_bands():
     got = band_positions(mask)
     for edge in (FRONT, BACK, LEFT, RIGHT):
         assert got[edge] == CALIBRATED_BANDS[edge], edge
+
+
+# --- 色相の 2 帯を分けて取る (#87 の調べもの用) -----------------------------
+def test_red_mask_parts_splits_by_hue_band():
+    """h1 (オレンジ寄り) と h2 (マゼンタ寄り) が分かれて返ること。"""
+    import cv2
+    import numpy as np
+
+    from krilly.perception.red_wall import RedDetectorConfig, red_mask_parts
+
+    cfg = RedDetectorConfig(morph_kernel=0)
+    img = np.zeros((40, 40, 3), np.uint8)
+    # 上半分を H=5 (h1 帯)、下半分を H=170 (h2 帯) の彩度・明度が十分な色で塗る
+    hsv = np.zeros((40, 40, 3), np.uint8)
+    hsv[:20] = (5, 200, 200)
+    hsv[20:] = (170, 200, 200)
+    img = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    h1, h2 = red_mask_parts(img, cfg)
+    assert (h1[:20] > 0).all() and (h1[20:] == 0).all()
+    assert (h2[20:] > 0).all() and (h2[:20] == 0).all()
+
+
+def test_red_mask_parts_agrees_with_red_mask_without_morphology():
+    """形態学処理を切れば h1 | h2 は red_mask と一致すること。
+
+    掛けると 2 帯の境目で結果がずれるので、判定には red_mask を使う (docstring 参照)。
+    """
+    import numpy as np
+
+    from krilly.perception.red_wall import RedDetectorConfig, red_mask, red_mask_parts
+
+    rng = np.random.default_rng(0)
+    img = rng.integers(0, 255, (60, 60, 3), dtype=np.uint8)
+    cfg = RedDetectorConfig(morph_kernel=0)
+    h1, h2 = red_mask_parts(img, cfg)
+    assert ((h1 | h2) == red_mask(img, cfg)).all()
+
+
+def test_red_mask_parts_finds_the_orange_side_separately():
+    """壁の色相 (h2) と、オレンジ寄りの異物 (h1) を区別できること。
+
+    #87 でリボンケーブルの残留を特定した使い方。単色のマスクでは分からなかった。
+    """
+    import cv2
+    import numpy as np
+
+    from krilly.perception.red_wall import RedDetectorConfig, red_mask_parts
+
+    hsv = np.zeros((30, 60, 3), np.uint8)
+    hsv[:, :30] = (170, 200, 200)   # 壁 (h2)
+    hsv[:, 30:] = (7, 90, 60)       # 暗いオレンジ寄りの異物 (h1)
+    img = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    h1, h2 = red_mask_parts(img, RedDetectorConfig(morph_kernel=0, s_min=50, v_min=40))
+    assert (h2[:, :30] > 0).all() and (h2[:, 30:] == 0).all()
+    assert (h1[:, 30:] > 0).all() and (h1[:, :30] == 0).all()
