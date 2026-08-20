@@ -58,15 +58,36 @@ class TiltResult:
     vp_vertical: tuple[float, float] | None
     spread_h_deg: float | None  # 横帯どうしの角度のばらつき (収束の生の証拠)
     spread_v_deg: float | None
+    #: 透視モデルの当てはまり [deg]。各帯を消失点へ通すのに要る回転の RMS。
+    #: **これが傾きの角度に対して小さくないと、測っているのは傾きではない**
+    #: (自立式の壁が平行でない、レンズの歪曲が残っている、など)。
+    residual_h_deg: float | None
+    residual_v_deg: float | None
+
+    @property
+    def trustworthy(self) -> bool:
+        """透視モデルが信号に対して十分よく当てはまっているか (残差 < 信号の 1/3)。"""
+        for angle, resid in ((self.roll_deg, self.residual_h_deg),
+                             (self.pitch_deg, self.residual_v_deg)):
+            if angle is None or resid is None:
+                return False
+            if resid > abs(angle) / 3.0:
+                return False
+        return True
 
     def describe(self) -> str:
         def fmt(v, unit="°"):
             return "測定不能" if v is None else f"{v:+.2f}{unit}"
+        def q(angle, resid):
+            if angle is None or resid is None:
+                return ""
+            mark = "" if resid <= abs(angle) / 3.0 else "  <- 残差が大きい。要注意"
+            return f" (当てはめ残差 {resid:.2f}°){mark}"
         return (
             f"横帯 {len(self.horizontal)} 本 (角度の幅 {fmt(self.spread_h_deg)}) "
-            f"-> ロール {fmt(self.roll_deg)}\n"
+            f"-> ロール {fmt(self.roll_deg)}{q(self.roll_deg, self.residual_h_deg)}\n"
             f"縦帯 {len(self.vertical)} 本 (角度の幅 {fmt(self.spread_v_deg)}) "
-            f"-> ピッチ {fmt(self.pitch_deg)}"
+            f"-> ピッチ {fmt(self.pitch_deg)}{q(self.pitch_deg, self.residual_v_deg)}"
         )
 
 
@@ -143,15 +164,23 @@ def find_bands(mask: np.ndarray, horizontal: bool, min_length: int = 120,
     return out
 
 
-def vanishing_point(lines: list[Line]) -> tuple[float, float] | None:
-    """直線の束が最もよく交わる点 (最小二乗)。平行なら None。"""
+def vanishing_point(lines: list[Line], weighted: bool = True) -> tuple[float, float] | None:
+    """直線の束が最もよく交わる点 (最小二乗)。平行なら None。
+
+    **帯の長さで重み付けする。** 直線の向きの不確かさは長さに反比例するので、
+    短い帯ほど消失点の位置を粗くしか決められない。重み付けしないと、フレーム端の
+    短い帯 (実機で 245px、他は 600-900px) が端にあるぶん強い梃子になって推定を
+    振り回す — 実測で消失点の勾配が 16% 変わり、傾きの再現性が 0.07° から 1.1° に
+    悪化した。
+    """
     if len(lines) < 2:
         return None
     A, b = [], []
     for ln in lines:
         nx, ny = -ln.dy, ln.dx          # 法線
-        A.append([nx, ny])
-        b.append(nx * ln.px + ny * ln.py)
+        w = ln.length if weighted else 1.0
+        A.append([nx * w, ny * w])
+        b.append(w * (nx * ln.px + ny * ln.py))
     A = np.array(A); b = np.array(b)
     # 条件数が悪い (= ほぼ平行) ときは消失点が無限遠とみなす
     s = np.linalg.svd(A, compute_uv=False)
@@ -162,13 +191,38 @@ def vanishing_point(lines: list[Line]) -> tuple[float, float] | None:
 
 
 def _tilt_from_vp(vp: tuple[float, float] | None, principal: tuple[float, float],
-                  focal_px: float) -> float | None:
+                  focal_px: float, axis: int) -> float | None:
+    """消失点から傾きを出す。**符号は光軸が倒れている向き**。
+
+    消失点は光軸が倒れている側にできる (実測で確認: ピッチの消失点が画像の上に
+    あるとき、光軸の足はセル中心より前に落ちていた)。符号が無いと、機体を 180°
+    回して測り直したときに「カメラ側の傾き」と「床側の傾き」を区別できない。
+    """
     if vp is None:
         return None
     d = math.hypot(vp[0] - principal[0], vp[1] - principal[1])
     if d <= 0:
         return 90.0
-    return math.degrees(math.atan(focal_px / d))
+    sign = math.copysign(1.0, vp[axis] - principal[axis])
+    return sign * math.degrees(math.atan(focal_px / d))
+
+
+def _fit_residual_deg(lines: list[Line], vp: tuple[float, float] | None) -> float | None:
+    """各帯を消失点へ通すのに要る回転角の RMS [deg]。
+
+    透視なら 4 本は 1 点で交わるはずなので、これが小さいほどモデルが当たっている。
+    **傾きの角度と同じくらい大きいなら、それは傾きではなく壁の据え付け誤差**。
+    """
+    if vp is None or len(lines) < 3:
+        return None
+    out = []
+    for ln in lines:
+        nx, ny = -ln.dy, ln.dx
+        d = abs(nx * (vp[0] - ln.px) + ny * (vp[1] - ln.py))
+        D = math.hypot(vp[0] - ln.px, vp[1] - ln.py)
+        if D > 0:
+            out.append(math.degrees(math.atan2(d, D)))
+    return float(np.sqrt(np.mean(np.square(out)))) if out else None
 
 
 def _spread(lines: list[Line]) -> float | None:
@@ -193,8 +247,10 @@ def measure_tilt(mask: np.ndarray, focal_px: float,
     ver = find_bands(mask, False, min_length)
     vp_h, vp_v = vanishing_point(hor), vanishing_point(ver)
     return TiltResult(
-        roll_deg=_tilt_from_vp(vp_h, pp, focal_px),
-        pitch_deg=_tilt_from_vp(vp_v, pp, focal_px),
+        roll_deg=_tilt_from_vp(vp_h, pp, focal_px, axis=0),
+        pitch_deg=_tilt_from_vp(vp_v, pp, focal_px, axis=1),
         horizontal=hor, vertical=ver, vp_horizontal=vp_h, vp_vertical=vp_v,
         spread_h_deg=_spread(hor), spread_v_deg=_spread(ver),
+        residual_h_deg=_fit_residual_deg(hor, vp_h),
+        residual_v_deg=_fit_residual_deg(ver, vp_v),
     )

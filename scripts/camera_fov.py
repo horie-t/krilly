@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import cv2
@@ -94,7 +95,42 @@ def measure(cam: Camera, pitch_mm: float, label: str, out_dir: Path | None,
              label, focal, px_x, camera_height_mm - wall_height_mm)
     for line in tilt.describe().splitlines():
         log.info("[%s]   %s", label, line)
+    _report_shim(label, tilt)
     return px_x, px_y, cx, cy, w, h
+
+
+#: カメラ取付穴の間隔 [mm] (Camera Module 3)。前後が 12.5、左右が 21.0。
+HOLE_SPAN_FWD, HOLE_SPAN_LAT = 12.5, 21.0
+
+
+def _report_shim(label: str, tilt) -> None:
+    """スペーサーをどちらへ何 mm 変えればよいかを出す。
+
+    カメラは天板の**下面**に下向きで付いているので、ある列のスペーサーを**長く**すると
+    その列が下がる。下向きカメラの法線は、前端を下げると後ろを向く。したがって
+    「光軸が前に倒れている」なら**前列を下げる = 前列のスペーサーを長くする**。
+    """
+    if not tilt.trustworthy:
+        log.warning("[%s]   **まだ調整しないこと。** 透視モデルの当てはまりを検証できて"
+                    "いない (帯が 3 本未満の軸がある)。下の切り分けを先に行う:", label)
+        log.warning("[%s]     1. 機体を 180° 回して同じセルで測る "
+                    "-> 符号が変わらなければカメラ側、反転すれば床/迷路側の傾き", label)
+        log.warning("[%s]     2. 機体を 90° 回して測る "
+                    "-> ロールとピッチが入れ替わり、検証できなかった軸が 4 本で測れる", label)
+        return
+    for name, angle, span, lo, hi in (
+        ("ピッチ", tilt.pitch_deg, HOLE_SPAN_FWD, "後列 (レンズ列, 機体 x=0)",
+         "前列 (機体 x=+12.5)"),
+        ("ロール", tilt.roll_deg, HOLE_SPAN_LAT, "左列 (機体 y=+10.5)",
+         "右列 (機体 y=-10.5)"),
+    ):
+        if angle is None:
+            continue
+        shim = abs(span * math.tan(math.radians(angle)))
+        # 消失点は光軸が倒れている側にできる。倒れている側の列を下げる = 長くする。
+        target = hi if angle > 0 else lo
+        log.info("[%s]   %s %+.2f° を消す: **%s のスペーサーを %.2fmm 長くする**",
+                 label, name, angle, target, shim)
 
 
 def main() -> None:
