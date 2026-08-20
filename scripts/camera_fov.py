@@ -146,17 +146,22 @@ def _report_shim(label: str, tilt) -> None:
         log.warning("[%s]     2. 機体を 90° 回して測る "
                     "-> ロールとピッチが入れ替わり、検証できなかった軸が 4 本で測れる", label)
         return
-    for name, angle, span, lo, hi in (
-        ("ピッチ", tilt.pitch_deg, HOLE_SPAN_FWD, "後列 (レンズ列, 機体 x=0)",
-         "前列 (機体 x=+12.5)"),
-        ("ロール", tilt.roll_deg, HOLE_SPAN_LAT, "左列 (機体 y=+10.5)",
-         "右列 (機体 y=-10.5)"),
+    # 角度の符号は**画像座標**での向き。機体座標へ直すとき、前後だけ反転する:
+    #   画像 +y = 画面の下 = 機体の**後ろ**   -> ピッチ + なら後ろへ倒れている
+    #   画像 +x = 画面の右 = 機体の**右**     -> ロール + なら右へ倒れている
+    # (実機で確認済み: ピッチ -3.04° = 光軸が前へ倒れている状態で後ろを上げたら
+    #  -1.27° まで減った)
+    for name, angle, span, positive, negative in (
+        ("ピッチ", tilt.pitch_deg, HOLE_SPAN_FWD,
+         "後列 (レンズ列, 機体 x=0)", "前列 (機体 x=+12.5)"),
+        ("ロール", tilt.roll_deg, HOLE_SPAN_LAT,
+         "右列 (機体 y=-10.5)", "左列 (機体 y=+10.5)"),
     ):
         if angle is None:
             continue
         shim = abs(span * math.tan(math.radians(angle)))
         # 消失点は光軸が倒れている側にできる。倒れている側の列を下げる = 長くする。
-        target = hi if angle > 0 else lo
+        target = positive if angle > 0 else negative
         log.info("[%s]   %s %+.2f° を消す: **%s のスペーサーを %.2fmm 長くする**",
                  label, name, angle, target, shim)
 
