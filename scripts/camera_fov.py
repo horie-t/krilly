@@ -82,7 +82,7 @@ def measure(cam: Camera, pitch_mm: float, label: str, out_dir: Path | None):
              "(壁は %.0fmm 先、隣セルの奥の壁は %.0fmm)",
              label, cy / px_y, (h - 1 - cy) / px_y, cx / px_x, (w - 1 - cx) / px_x,
              pitch_mm / 2, pitch_mm * 1.5)
-    return px_x, px_y, cx, cy
+    return px_x, px_y, cx, cy, w, h
 
 
 def main() -> None:
@@ -112,7 +112,10 @@ def main() -> None:
     a, b = results.get("現行"), results.get("全画素")
     if a and b:
         log.info("---")
-        log.info("画角の比: X %.2f 倍 / Y %.2f 倍 (期待 1.50)", a[0] / b[0], a[1] / b[1])
+        # 画角は「地面の範囲 = 出力画素数 / px/mm」で比べる。px/mm だけ見ると、
+        # 出力も一緒に大きくしたときに 1.00 倍と出てしまう (画角は広がっているのに)。
+        log.info("画角の比: X %.2f 倍 / Y %.2f 倍 (期待 1.50)",
+                 (b[4] / b[0]) / (a[4] / a[0]), (b[5] / b[1]) / (a[5] / a[1]))
         log.info("分解能の比: %.2f 倍 (1.00 なら壁判定のしきい値はそのまま使える見込み)",
                  b[0] / a[0])
 
