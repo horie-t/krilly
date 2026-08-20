@@ -1,7 +1,7 @@
 """探索 → 復帰 → 最速 xN を一本で回す統合シミュレータ (issue #77)。
 
 :class:`krilly.app.run_manager.RunManager` は ``now`` を渡される純ロジックなので、
-時計を実測由来の見積もりで進めれば**10 分 5 走のセッション全体が実機なしで回る**。
+時計を実測由来の見積もりで進めれば**7 分 5 走のセッション全体が実機なしで回る**。
 
 **このシミュレータが検証するもの**: 探索の完走、判明した地図と真の迷路の一致、
 予算の管理 (いつ次の走行を始め、いつ打ち切るか)、経路計画。
@@ -58,7 +58,7 @@ class SessionResult:
     #: 途中で止まった理由 (完走なら None)。
     aborted: str | None = None
     #: 持ち時間 [s] (:attr:`ok` の判定に使う)。
-    limit_s: float = field(default=600.0, repr=False)
+    limit_s: float = field(default=420.0, repr=False)
 
     @property
     def search(self) -> RunRecord | None:
@@ -105,14 +105,15 @@ def simulate_session(
     *,
     holonomic: bool = True,
     cost: MoveCost = DEFAULT_COST,
-    time_limit_s: float = 600.0,
+    time_limit_s: float = 420.0,
     max_runs: int = 5,
+    time_margin: float = 1.5,
     start_facing: Direction = Direction.N,
     search_step_overhead_s: float = 0.0,
     actual_scale: float = 1.0,
     max_steps: int = 5000,
 ) -> SessionResult:
-    """真の迷路 ``truth`` を相手に 10 分 5 走のセッションを丸ごと回す。
+    """真の迷路 ``truth`` を相手に 7 分 5 走 (クラシック競技規定) のセッションを丸ごと回す。
 
     ``search_step_overhead_s`` は探索 1 手あたりの追加時間。最速ランの実測から出た
     区間の固定費には**壁判定と位置補正の時間が入っていない**ので、探索はそのぶん
@@ -120,14 +121,17 @@ def simulate_session(
 
     ``actual_scale`` は「実際は見積もりの何倍かかるか」。1.0 なら見積もりが定義上
     ぴったり当たるので、予算判断の余裕を試すには 1.2-1.5 を入れる。
+
+    ``time_margin`` は :class:`RunManager` の安全率。走行を始めるかの判断だけに効く
+    (小さくすると際どい走行にも出るようになる)。
     """
     learned = open_maze(truth.size)
     learned.start = truth.start
     learned.set_goal(truth.goal_min, truth.goal_max)   # ゴール位置は競技前から既知
     ex = Explorer(learned, cell=truth.start, facing=start_facing,
                   travel=start_facing, holonomic=holonomic)
-    mgr = RunManager(ex, holonomic=holonomic, cost=cost,
-                     time_limit_s=time_limit_s, max_runs=max_runs)
+    mgr = RunManager(ex, holonomic=holonomic, cost=cost, time_limit_s=time_limit_s,
+                     max_runs=max_runs, time_margin=time_margin)
     result = SessionResult(truth=truth, explorer=ex)
     result.limit_s = time_limit_s
 
@@ -177,6 +181,7 @@ def simulate_session(
         legs = mgr.home_reached(now, facing)
         if legs is None:
             break
+        now += mgr.restart_dwell_s      # 競技規定 3-4: 始点で 2 秒以上停止してから再出発
         started, dt = now, leg_time(legs, facing)
         now += dt
         result.records.append(RunRecord(
