@@ -18,6 +18,8 @@
     python -m scripts.cell_move_demo --v 0.08 --omega 1.0  # ゆっくり
     python -m scripts.cell_move_demo --seq L --camera-yaw   # 90°ターンの方位をカメラで実測
     python -m scripts.cell_move_demo --seq F4               # 4セルを 1 動作で (速度調整用)
+    python -m scripts.cell_move_demo --seq F,H,F,G --chain --camera-pose --camera-yaw
+                                                           # 止まらずに曲がる (#80) の実測
     python -m scripts.cell_move_demo --v 0.24 --accel 0.8 --decel 0.8 --max-speed 600
 
 シーケンスのトークン:
@@ -81,6 +83,10 @@ TOKENS = {
 # U は L2 (180°) の別名。過去のシーケンス表記との互換のため残す。
 ALIASES = {"U": ("L", 2)}
 
+#: 平行移動のトークン -> 基準方位からの軸 (90°単位)。旋回のトークンは入らない。
+#: ``--chain`` で区間を繋ぐとき、どの軸へ予約するかを引くのに使う (#80)。
+TRANSLATION_AXIS = {"F": 0, "B": 2, "H": +1, "G": -1}
+
 
 @dataclass(frozen=True)
 class Move:
@@ -95,8 +101,17 @@ class Move:
         # 回転は角度で書いた方が読みやすい (L2 -> 左180°)
         return fmt % (self.count * 90 if self.token in ("L", "R") else self.count)
 
+    @property
+    def axis(self) -> int | None:
+        """平行移動なら基準方位からの軸 (90°単位)、旋回なら None。"""
+        return TRANSLATION_AXIS.get(self.token)
+
     def start(self, motion) -> None:
         TOKENS[self.token][1](motion, self.count)
+
+    def queue(self, motion) -> None:
+        """止まらずに続けるため、次の区間として予約する (#80、平行移動のみ)。"""
+        motion.queue_move_cells(self.count, self.axis)
 
 
 ALONG, CROSS = "前後", "左右"
@@ -138,6 +153,21 @@ def wrapped_deg(rad: float) -> float:
     (-180, 180] に正規化してあるため、並べて読むには表示側も揃える必要がある。
     """
     return math.degrees((rad + math.pi) % (2 * math.pi) - math.pi)
+
+
+def chain_groups(seq: list[Move]) -> list[list[Move]]:
+    """連続する平行移動をまとめる (#80)。旋回は繋げないので単独のグループになる。
+
+    **反転 (180°) は繋いでも丸まらない** が、``CellMotion`` が自分で一度止まってから
+    次へ進むので、ここで切る必要はない。
+    """
+    groups: list[list[Move]] = []
+    for move in seq:
+        if move.axis is not None and groups and groups[-1][-1].axis is not None:
+            groups[-1].append(move)
+        else:
+            groups.append([move])
+    return groups
 
 
 def parse_seq(text: str) -> list[Move]:
@@ -182,6 +212,8 @@ def main() -> None:
                    help="動作前後の方位をカメラで実測してジャイロ推定と突き合わせる")
     p.add_argument("--camera-pose", action="store_true",
                    help="動作前後のセル内位置をカメラで実測し、理想量とのズレを出す")
+    p.add_argument("--chain", action="store_true",
+                   help="連続する平行移動を止まらずに繋ぐ (#80)。旋回で区切られる")
     p.add_argument("--align", action="store_true",
                    help="開始前にカメラで迷路軸を測り、推定方位をそこへ引き戻す "
                         "(実走と同じ挙動。置き方の傾きが横流れになるのを防ぐ)")
@@ -345,11 +377,20 @@ def main() -> None:
                 log.warning("迷路軸への整列を見送った (補正量が大きすぎる)")
         pose_before = measure_pose("before")
         phi_before = est.phi
-        for i, move in enumerate(seq, 1):
-            log.info("[%d/%d] %s 開始", i, len(seq), move.label)
-            move.start(motion)
+        groups = chain_groups(seq) if args.chain else [[m] for m in seq]
+        for i, group in enumerate(groups, 1):
+            label = " -> ".join(m.label for m in group)
+            log.info("[%d/%d] %s 開始%s", i, len(groups), label,
+                     " (止まらずに %d 区間)" % len(group) if len(group) > 1 else "")
+            group[0].start(motion)
+            for move in group[1:]:
+                move.queue(motion)
             # 複数セル・複数回転を 1 動作で回すぶんだけ打ち切り時間も延ばす
-            run_primitive(f"[{i}/{len(seq)}] {move.label}", args.timeout * move.count)
+            run_primitive(f"[{i}/{len(groups)}] {label}",
+                          args.timeout * sum(m.count for m in group))
+            if motion.corners:
+                log.info("  止まらずに曲がった回数 %d (ブレンド距離 %.0fmm)",
+                         motion.corners, motion.blend_distance * 1000)
             coast(args.pause)
         yaw_after = measure_yaw("after")
         pose_after = measure_pose("after")
