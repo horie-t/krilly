@@ -266,6 +266,44 @@ class WallDetector:
         }
 
 
+def band_positions(mask: np.ndarray, min_fraction: float = 0.25) -> dict[str, tuple[int, int]]:
+    """赤マスクから 4 辺の帯の位置を測る (:data:`CALIBRATED_BANDS` を取り直す手順)。
+
+    行/列プロファイルの山を探すだけの素朴な実装。FRONT/BACK は行 (y)、LEFT/RIGHT は
+    列 (x) の範囲を返し、見つからない辺は入らない。**カメラの取付・高さ・画角を変えたら
+    必ずこれで測り直す** — ROI が帯から外れると壁ありでも赤割合が出ず、機体が壁に
+    突っ込む (#56 がまさにそれ)。
+
+    帯は画像の中央寄りに 4 本出るので、上下・左右それぞれで中央から外側へ探し、
+    最初に見つかった山を採る (中央は自機で占有されているので山にならない)。
+    """
+    h, w = mask.shape[:2]
+    rows = (mask > 0).mean(axis=1)
+    cols = (mask > 0).mean(axis=0)
+
+    def run_from(profile, start, step):
+        """``start`` から ``step`` 方向へ進み、最初の山 (連続して閾値以上) の範囲。"""
+        i, n = start, len(profile)
+        while 0 <= i < n and profile[i] < min_fraction:
+            i += step
+        if not (0 <= i < n):
+            return None
+        j = i
+        while 0 <= j + step < n and profile[j + step] >= min_fraction:
+            j += step
+        return (min(i, j), max(i, j))
+
+    out: dict[str, tuple[int, int]] = {}
+    for name, prof, start, step in (
+        (FRONT, rows, h // 2, -1), (BACK, rows, h // 2, +1),
+        (LEFT, cols, w // 2, -1), (RIGHT, cols, w // 2, +1),
+    ):
+        found = run_from(prof, start, step)
+        if found is not None:
+            out[name] = found
+    return out
+
+
 def body_walls_to_maze(
     walls_body: dict[str, bool], facing: Direction
 ) -> dict[Direction, bool]:

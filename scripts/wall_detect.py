@@ -16,9 +16,17 @@ N フレーム撮り、辺ごとの赤割合と帯のずれ、そこから出る
 実際に進む方向を決めるのは**車輪**なので、この差はどんな方位測定にも乗ってくる
 (1 回の測定では消せないので、校正は必ず複数回の平均で決めること)。
 
+``--hue-split`` は赤マスクを**色相の 2 帯に塗り分ける**モード (#87)。赤は H の下端
+(オレンジ寄り) と上端 (マゼンタ寄り) に割れるので、どちらで拾ったかが異物の切り分けの
+決め手になる。**単色で重ねても分からない。**
+
 例:
     # 保存画像に対して ROI と判定を可視化
     python -m scripts.wall_detect --image ~/Documents/krilly/red_detect_20260730.png --out /tmp/walls.png
+    # 色相の 2 帯に塗り分け (シアン=オレンジ寄り / 緑=壁と同じ色相)
+    python -m scripts.wall_detect --image shot.png --hue-split --out /tmp/split.png
+    # 一部を拡大して元画像と並べる
+    python -m scripts.wall_detect --image shot.png --hue-split --zoom 610,790,580,720 --out /tmp/split.png
     # ライブ (カメラ)
     python -m scripts.wall_detect --out walls.png --thickness 70 --span 0.5
     # 位置測定の再現性 (実機・静止のまま 10 フレーム)
@@ -32,6 +40,7 @@ ROI (front/back/left/right) を自機・ケーブル・支柱の外へ、壁が�
 from __future__ import annotations
 
 import argparse
+import dataclasses
 
 import cv2
 import numpy as np
@@ -45,7 +54,7 @@ from krilly.perception.cell_pose import (
     CellOffset,
     cell_offset,
 )
-from krilly.perception.red_wall import RedDetectorConfig, red_mask
+from krilly.perception.red_wall import RedDetectorConfig, red_mask, red_mask_parts
 from krilly.perception.wall_detect import (
     BACK,
     CALIBRATED_RED,
@@ -133,6 +142,45 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
                  "軸角", sum(yaws) / len(yaws), max(yaws) - min(yaws), min(yaws), max(yaws))
 
 
+def hue_split(frame, red: RedDetectorConfig, out_path: str, zoom: str | None) -> None:
+    """赤マスクを色相の 2 帯に塗り分け、帯ごとの HSV を出す (#87)。
+
+    **単色で重ねても異物の正体は分からない。** 赤は H の下端 (オレンジ寄り) と上端
+    (マゼンタ寄り) に割れるので、どちらで拾ったかが決め手になる。実例: リボンケーブルに
+    黒テープを貼った後も 10% ほど残った赤判定は、壁がすべて h2 (H 169) なのに
+    ケーブル上は h1 (H 7) で、隣のテープが H 15 だったことから**テープ自身が h1_hi の
+    境界をまたいでいる**と特定できた (ラベルの貼り残しでも壁の映り込みでもない)。
+
+    重ねる色: **シアン = h1 (オレンジ寄り) / 緑 = h2 (壁と同じ色相)**。
+    """
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    h1, h2 = red_mask_parts(frame, red)
+    m1, m2 = h1 > 0, h2 > 0
+    log.info("赤とみなす色相: H %d-%d (h1) と H %d-%d (h2)  s_min=%d v_min=%d",
+             red.h1_lo, red.h1_hi, red.h2_lo, red.h2_hi, red.s_min, red.v_min)
+    for name, m in (("h1 (オレンジ寄り)", m1), ("h2 (壁と同じ色相)", m2)):
+        if not m.any():
+            log.info("  %-18s 0 画素", name)
+            continue
+        px = hsv[m]
+        log.info("  %-18s %6d 画素 (%.2f%%)  H %3.0f  S %3.0f  V %3.0f",
+                 name, int(m.sum()), 100.0 * m.mean(),
+                 np.median(px[:, 0]), np.median(px[:, 1]), np.median(px[:, 2]))
+    if m1.any() and m2.any():
+        log.info("  ※ 壁は h2 に出る。h1 に固まりがあれば、それは壁ではない何か")
+
+    vis = (frame * 0.45).astype(np.uint8)
+    vis[m2] = (0, 255, 0)        # 緑 = h2
+    vis[m1] = (255, 255, 0)      # シアン = h1
+    if zoom:
+        x0, x1, y0, y1 = (int(v) for v in zoom.split(","))
+        pair = np.hstack([cv2.convertScaleAbs(frame[y0:y1, x0:x1], alpha=1.9, beta=5),
+                          np.full((y1 - y0, 6, 3), 60, np.uint8), vis[y0:y1, x0:x1]])
+        vis = cv2.resize(pair, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_NEAREST)
+    cv2.imwrite(out_path, vis)
+    log.info("塗り分け画像を保存: %s (シアン=h1 / 緑=h2)", out_path)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="セル壁判定の可視化")
     p.add_argument("--measure", type=int, default=0, metavar="N",
@@ -144,6 +192,12 @@ def main() -> None:
     p.add_argument("--threshold", type=float, default=0.15, help="壁ありとみなす赤割合")
     p.add_argument("--s-min", type=int, default=CALIBRATED_RED.s_min, help="赤HSVのS下限")
     p.add_argument("--v-min", type=int, default=CALIBRATED_RED.v_min, help="赤HSVのV下限")
+    p.add_argument("--h2-lo", type=int, default=CALIBRATED_RED.h2_lo,
+                   help="赤とみなす色相の上側の帯の下限 (#65 で 160->140 に広げた)")
+    p.add_argument("--hue-split", action="store_true",
+                   help="赤マスクを色相の 2 帯に分けて塗り分ける (異物の切り分け用)")
+    p.add_argument("--zoom", default=None, metavar="X0,X1,Y0,Y1",
+                   help="--hue-split の拡大範囲 (画素)")
     args = p.parse_args()
 
     setup_logging()
@@ -161,7 +215,15 @@ def main() -> None:
         with Camera() as cam:
             frame = cam.capture()
 
-    red = RedDetectorConfig(s_min=args.s_min, v_min=args.v_min)
+    # **校正済みの設定から派生させる。** ここで RedDetectorConfig() を素で作ると
+    # h2_lo が既定の 160 に戻り、#65 で 140 まで広げた意味が消える (右壁の上面が
+    # 場所によって H=141-155 のマゼンタ側へ流れるため、160 では帯の上 2/3 を落とす)。
+    # 調整スクリプトが実機と違うマスクを使っていては意味がない。
+    red = dataclasses.replace(CALIBRATED_RED, s_min=args.s_min, v_min=args.v_min,
+                              h2_lo=args.h2_lo)
+    if args.hue_split:
+        hue_split(frame, red, args.out, args.zoom)
+        return
     rois = calibrated_rois()  # 実機校正済みの各辺 ROI
     det = WallDetector(WallDetectorConfig(rois=rois, threshold=args.threshold, red=red))
 
