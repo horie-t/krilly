@@ -95,12 +95,35 @@ CALIBRATED_RED = RedDetectorConfig(h2_lo=140, s_min=50, v_min=40)
 #   前後の帯間隔 290.5px -> 305.5px、左右 285.5px -> 305.0px (カメラが約 5% 低い)
 #   px/mm は X 1.586->1.694 / Y 1.614->1.697。改修前は X と Y が 1.8% 食い違って
 #   いたが、傾き修正後は 0.2% 以内で一致する。
-CALIBRATED_BANDS = {
-    FRONT: (119, 142),   # 行 (y)  定規で前後中央にした (2,1) 北向きで実測
-    BACK: (425, 447),    # 行 (y)  同上
-    LEFT: (134, 155),    # 列 (x)  定規で左右中央にした (0,1) 北向きで実測
-    RIGHT: (438, 461),   # 列 (x)  同上
+#: 解像度ごとに実測した帯の位置。``camera_fov --emit-bands`` が出す値をそのまま貼る。
+#: **定規でセル中央に置いた姿勢で測ること** — ここが位置測定のゼロ点になる (#64)。
+#:
+#: **カメラの傾きを直したら必ず測り直す** (#87 -> #88)。傾きを 4.3° から 0.87° へ
+#: 追い込んだだけで FRONT/BACK の帯が 41px 動き、それまでの ROI とは**重なりが 0px**に
+#: なった。壁ありでも赤割合が出ず、機体が壁へ突っ込む状態だった。
+CALIBRATED_BANDS_BY_SIZE = {
+    # 640x480 (センサーの 33% しか使わない従来モード)。傾き調整後に再測定。
+    (640, 480): {
+        FRONT: (79, 101),
+        BACK: (384, 406),
+        LEFT: (150, 173),
+        RIGHT: (458, 480),
+    },
+    # 960x720 全画素モード (#88)。画角 1.5 倍・px/mm は据え置き 1.70。
+    (960, 720): {
+        FRONT: (199, 220),
+        BACK: (504, 526),
+        LEFT: (310, 333),
+        RIGHT: (618, 639),
+    },
 }
+
+#: 実機で使う撮影サイズ。**`hal.camera.Camera` の既定と対で変えること**
+#: (食い違うと ROI が帯から外れる。``WallDetector.measure`` が検算する)。
+DEFAULT_FRAME_SIZE = (960, 720)
+
+#: 既定サイズの帯 (後方互換のための別名)。
+CALIBRATED_BANDS = CALIBRATED_BANDS_BY_SIZE[DEFAULT_FRAME_SIZE]
 
 
 @dataclass(frozen=True)
@@ -178,8 +201,15 @@ class CameraGeometry:
         return {e: self.roi(e, spec) for e, spec in specs.items()}
 
 
-#: 実機校正済みの幾何 (640x480)。:data:`CALIBRATED_BANDS` から起こす。
-CALIBRATED_GEOMETRY = CameraGeometry.from_bands(CALIBRATED_BANDS, 640, 480)
+#: 解像度ごとの校正済み幾何。実測した帯から起こす。
+CALIBRATED_GEOMETRIES = {
+    size: CameraGeometry.from_bands(bands, *size)
+    for size, bands in CALIBRATED_BANDS_BY_SIZE.items()
+}
+
+#: 既定サイズの幾何 (後方互換のための別名)。
+CALIBRATED_GEOMETRY = CALIBRATED_GEOMETRIES[DEFAULT_FRAME_SIZE]
+
 
 #: 各辺の ROI の形。**画角を変えても据え置き**で、位置だけ幾何が決める。
 #: 値は #16 / #56 / #65 で手で追い込んだ画素値を mm に直したもの。
@@ -191,12 +221,6 @@ CALIBRATED_ROI_SPECS = {
     LEFT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
     RIGHT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
 }
-
-
-#: 解像度ごとの校正済み幾何。**撮影サイズと ROI は必ず対で使う。**
-#: 食い違うと ROI が帯から外れ、壁ありでも赤割合が出ずに機体が壁へ突っ込む
-#: (#56 で実際に起きた失敗と同じ形)。:func:`geometry_for` が対応付けを保証する。
-CALIBRATED_GEOMETRIES = {(640, 480): CALIBRATED_GEOMETRY}
 
 
 def geometry_for(size: tuple[int, int]) -> CameraGeometry:
@@ -233,7 +257,7 @@ def calibrated_rois(geometry: CameraGeometry | None = None) -> dict[str, Roi]:
 
 
 def calibrated_config(threshold: float = 0.08,
-                      size: tuple[int, int] = (640, 480)) -> "WallDetectorConfig":
+                      size: tuple[int, int] = DEFAULT_FRAME_SIZE) -> "WallDetectorConfig":
     """実機校正済みの WallDetectorConfig を返す (ROI + 赤しきい値 + 帯探索)。
 
     しきい値は #65 の 5x5 手動調査 (``scripts/survey_shot.py``、113 枚 = 452 ラベル、

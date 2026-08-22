@@ -224,7 +224,7 @@ def main() -> None:
 
     if not args.full_only:
         w, h = parse_size(args.current_size)
-        with Camera(width=w, height=h) as cam:
+        with Camera(width=w, height=h, full_fov=False) as cam:
             results["現行"] = measure(cam, pitch_mm, "current", out_dir,
                                     camera_height_mm=args.camera_height,
                                     emit=args.emit_bands)

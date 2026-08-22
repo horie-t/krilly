@@ -26,12 +26,22 @@ class Camera:
     #: 画角が狭いままになる (2304x1296 の ``crop_limits`` は全画素 4608x2592)。
     FULL_FOV_SENSOR = (2304, 1296)
 
+    #: 既定の撮影サイズと全画素モード (#88)。**壁判定の ROI はこのサイズで校正されて
+    #: いる** (``perception.wall_detect.DEFAULT_FRAME_SIZE``)。片方だけ変えると ROI が
+    #: 帯から外れて壁を見落とすので、必ず対で変えること
+    #: (``WallDetector.measure`` が実フレームと突き合わせて検算する)。
+    #:
+    #: 960x720 + 全画素モードにすると、640x480 に対して**画角が 1.5 倍・分解能は据え置き**
+    #: (px/mm 1.70)。画像処理は 3.4ms -> 6.0ms しか増えず、1 セルの停止 0.44s に対して
+    #: 無視できる。
+    DEFAULT_SIZE = (960, 720)
+
     def __init__(
         self,
-        width: int = 640,
-        height: int = 480,
+        width: int = DEFAULT_SIZE[0],
+        height: int = DEFAULT_SIZE[1],
         lock_awb_exposure: bool = True,
-        full_fov: bool = False,
+        full_fov: bool = True,
         picam2=None,
     ) -> None:
         if picam2 is None:
