@@ -21,6 +21,7 @@ from krilly.perception.cell_pose import (
 from krilly.perception.wall_detect import (
     BACK,
     CALIBRATED_BANDS,
+    DEFAULT_FRAME_SIZE,
     FRONT,
     LEFT,
     RIGHT,
@@ -33,13 +34,13 @@ RED = (0, 0, 255)
 
 def frame_with_bands(shift_x: int = 0, shift_y: int = 0, edges=(LEFT, RIGHT)) -> np.ndarray:
     """校正位置から (shift_x, shift_y) px ずらして赤帯を描いた合成フレーム。"""
-    img = np.zeros((480, 640, 3), dtype=np.uint8)
+    img = np.zeros((DEFAULT_FRAME_SIZE[1], DEFAULT_FRAME_SIZE[0], 3), dtype=np.uint8)
     for edge in edges:
         lo, hi = CALIBRATED_BANDS[edge]
         if edge in (LEFT, RIGHT):
-            img[100:400, lo + shift_x : hi + shift_x] = RED
+            img[:, lo + shift_x : hi + shift_x] = RED
         else:
-            img[lo + shift_y : hi + shift_y, 180:400] = RED
+            img[lo + shift_y : hi + shift_y, :] = RED
     return img
 
 
@@ -101,7 +102,8 @@ def test_single_wall_is_enough(detector):
 
 
 def test_nothing_measurable_without_walls(detector):
-    off = cell_offset(np.zeros((480, 640, 3), dtype=np.uint8), detector)
+    blank = np.zeros((DEFAULT_FRAME_SIZE[1], DEFAULT_FRAME_SIZE[0], 3), dtype=np.uint8)
+    off = cell_offset(blank, detector)
     assert not off.measured and off.walls_x == 0 and off.walls_y == 0
 
 

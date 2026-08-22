@@ -95,38 +95,169 @@ CALIBRATED_RED = RedDetectorConfig(h2_lo=140, s_min=50, v_min=40)
 #   前後の帯間隔 290.5px -> 305.5px、左右 285.5px -> 305.0px (カメラが約 5% 低い)
 #   px/mm は X 1.586->1.694 / Y 1.614->1.697。改修前は X と Y が 1.8% 食い違って
 #   いたが、傾き修正後は 0.2% 以内で一致する。
-CALIBRATED_BANDS = {
-    FRONT: (119, 142),   # 行 (y)  定規で前後中央にした (2,1) 北向きで実測
-    BACK: (425, 447),    # 行 (y)  同上
-    LEFT: (134, 155),    # 列 (x)  定規で左右中央にした (0,1) 北向きで実測
-    RIGHT: (438, 461),   # 列 (x)  同上
+#: 解像度ごとに実測した帯の位置。``camera_fov --emit-bands`` が出す値をそのまま貼る。
+#: **定規でセル中央に置いた姿勢で測ること** — ここが位置測定のゼロ点になる (#64)。
+#:
+#: **カメラの傾きを直したら必ず測り直す** (#87 -> #88)。傾きを 4.3° から 0.87° へ
+#: 追い込んだだけで FRONT/BACK の帯が 41px 動き、それまでの ROI とは**重なりが 0px**に
+#: なった。壁ありでも赤割合が出ず、機体が壁へ突っ込む状態だった。
+CALIBRATED_BANDS_BY_SIZE = {
+    # 640x480 (センサーの 33% しか使わない従来モード)。傾き調整後に再測定。
+    (640, 480): {
+        FRONT: (79, 101),
+        BACK: (384, 406),
+        LEFT: (150, 173),
+        RIGHT: (458, 480),
+    },
+    # 960x720 全画素モード (#88)。画角 1.5 倍・px/mm は据え置き 1.70。
+    (960, 720): {
+        FRONT: (199, 220),
+        BACK: (504, 526),
+        LEFT: (310, 333),
+        RIGHT: (618, 639),
+    },
+}
+
+#: 実機で使う撮影サイズ。**`hal.camera.Camera` の既定と対で変えること**
+#: (食い違うと ROI が帯から外れる。``WallDetector.measure`` が検算する)。
+DEFAULT_FRAME_SIZE = (960, 720)
+
+#: 既定サイズの帯 (後方互換のための別名)。
+CALIBRATED_BANDS = CALIBRATED_BANDS_BY_SIZE[DEFAULT_FRAME_SIZE]
+
+
+@dataclass(frozen=True)
+class RoiSpec:
+    """帯に対する ROI の**形**だけを mm で持つ (位置は幾何から決まる)。
+
+    寸法を画素ではなく mm で持つ理由は、**カメラの画角を変えても形が保たれる**こと。
+    #88 で 640x480 (センサーの 33% しか使っていなかった) から 960x720 の全画素モードへ
+    移ったとき、px/mm は 1.70 のまま画角だけ 1.5 倍になったので、**ROI の寸法は据え置きで
+    位置だけが変わった**。mm で持っていれば、どちらの場合も同じ定義で書ける。
+    """
+
+    thickness_mm: float      # 帯に直交する向きの長さ (帯 12mm を包む)
+    length_mm: float         # 帯に沿う向きの長さ
+    along_offset_mm: float = 0.0   # 帯に沿う向きのずらし (自機・ケーブルを避ける)
+
+
+@dataclass(frozen=True)
+class CameraGeometry:
+    """校正の実体。**実測できる量だけ**で表す。
+
+    - ``cell_center``: **定規でセル中央に置いた機体**でセル中心が写る画素。
+      ここが位置測定のゼロ点になる (#64: ROI の中心をここに合わせて 6mm の偏りを消した)
+    - ``px_per_mm_*``: 対向する帯の間隔が 1 セルピッチ (180mm) であることから出る
+
+    壁は必ずセル中心から半ピッチ (90mm) の位置にあるので、**帯の位置はこの 2 つから
+    計算できる**。実測の :data:`CALIBRATED_BANDS` と誤差 0.000px で一致する
+    (当然で、この 2 つは帯の実測から作られている)。
+    """
+
+    width: int
+    height: int
+    cell_center: tuple[float, float]
+    px_per_mm_x: float
+    px_per_mm_y: float
+
+    @classmethod
+    def from_bands(cls, bands: dict[str, tuple[int, int]], width: int, height: int,
+                   pitch_mm: float = 180.0) -> "CameraGeometry":
+        """実測した 4 辺の帯位置から幾何を起こす。"""
+        c = {e: (lo + hi) / 2.0 for e, (lo, hi) in bands.items()}
+        return cls(
+            width=width, height=height,
+            cell_center=((c[LEFT] + c[RIGHT]) / 2.0, (c[FRONT] + c[BACK]) / 2.0),
+            px_per_mm_x=(c[RIGHT] - c[LEFT]) / pitch_mm,
+            px_per_mm_y=(c[BACK] - c[FRONT]) / pitch_mm,
+        )
+
+    def scale(self, edge: str) -> float:
+        """その辺の帯に**直交**する向きの px/mm。"""
+        return self.px_per_mm_x if edge in (LEFT, RIGHT) else self.px_per_mm_y
+
+    def band_center(self, edge: str, half_pitch_mm: float = 90.0) -> float:
+        """その辺の帯の中心 (縦帯なら列 x、横帯なら行 y)。"""
+        sign = -1.0 if edge in (FRONT, LEFT) else +1.0
+        base = self.cell_center[0] if edge in (LEFT, RIGHT) else self.cell_center[1]
+        return base + sign * half_pitch_mm * self.scale(edge)
+
+    def roi(self, edge: str, spec: RoiSpec) -> Roi:
+        """帯の上に ROI を置く。**ROI の中心が、その軸の位置測定のゼロ点**になる。"""
+        vertical = edge in (LEFT, RIGHT)
+        cross = self.band_center(edge)
+        along_scale = self.px_per_mm_y if vertical else self.px_per_mm_x
+        along_base = self.cell_center[1] if vertical else self.cell_center[0]
+        along = along_base + spec.along_offset_mm * along_scale
+        thick = spec.thickness_mm * self.scale(edge)
+        length = spec.length_mm * along_scale
+        if vertical:
+            return Roi(int(round(cross - thick / 2)), int(round(along - length / 2)),
+                       int(round(thick)), int(round(length)))
+        return Roi(int(round(along - length / 2)), int(round(cross - thick / 2)),
+                   int(round(length)), int(round(thick)))
+
+    def rois(self, specs: dict[str, RoiSpec]) -> dict[str, Roi]:
+        return {e: self.roi(e, spec) for e, spec in specs.items()}
+
+
+#: 解像度ごとの校正済み幾何。実測した帯から起こす。
+CALIBRATED_GEOMETRIES = {
+    size: CameraGeometry.from_bands(bands, *size)
+    for size, bands in CALIBRATED_BANDS_BY_SIZE.items()
+}
+
+#: 既定サイズの幾何 (後方互換のための別名)。
+CALIBRATED_GEOMETRY = CALIBRATED_GEOMETRIES[DEFAULT_FRAME_SIZE]
+
+
+#: 各辺の ROI の形。**画角を変えても据え置き**で、位置だけ幾何が決める。
+#: 値は #16 / #56 / #65 で手で追い込んだ画素値を mm に直したもの。
+CALIBRATED_ROI_SPECS = {
+    FRONT: RoiSpec(thickness_mm=29.5, length_mm=106.2, along_offset_mm=+13.6),
+    # BACK だけ短く、少しずらしてある。リボンケーブルが赤く写るのを避けるため (#65)。
+    # ケーブルは柔軟なので完全には避けられず、辺別しきい値 (BACK=0.25) と併用する。
+    BACK: RoiSpec(thickness_mm=22.4, length_mm=53.1, along_offset_mm=+5.9),
+    LEFT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
+    RIGHT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
 }
 
 
-def calibrated_rois() -> dict[str, Roi]:
-    """実機 (640x480, 39cm, セル中央) で校正した各辺 ROI。
+def geometry_for(size: tuple[int, int]) -> CameraGeometry:
+    """撮影サイズに対応する校正済み幾何。無ければ **エラーにする**。
+
+    黙って既定へ落とすと ROI が帯から外れたまま走ってしまう。校正していない解像度で
+    走らせるくらいなら止まった方が安い。
+    """
+    try:
+        return CALIBRATED_GEOMETRIES[size]
+    except KeyError:
+        known = ", ".join(f"{w}x{h}" for w, h in sorted(CALIBRATED_GEOMETRIES))
+        raise KeyError(
+            f"{size[0]}x{size[1]} の校正済み幾何が無い (あるのは {known})。"
+            "camera_fov --emit-bands で測って CALIBRATED_GEOMETRIES に足すこと"
+        ) from None
+
+
+def calibrated_rois(geometry: CameraGeometry | None = None) -> dict[str, Roi]:
+    """実機で校正した各辺 ROI。既定は 640x480 の :data:`CALIBRATED_GEOMETRY`。
 
     #56 で RIGHT / BACK を実測した帯 (:data:`CALIBRATED_BANDS`) に合わせ直した。
     #16 の校正写真は手置きで撮ったもので、閉ループ (#17 で ±1mm) の停止位置とは
     十数 px ずれており、RIGHT は帯と 20px しか重なっていなかった (壁ありでも
     赤割合 0.08-0.15 しか出ず、しきい値 0.15 を割って見落としていた)。
-    ずれを疑うときは ``red_mask`` の列/行プロファイルで帯の位置を測ればよい。
+    ずれを疑うときは ``red_mask`` の列/行プロファイルで帯の位置を測ればよい
+    (:func:`band_positions`)。
+
+    **各 ROI の中心が、その辺のオフセット測定のゼロ点**。定規でセル中央に置いた
+    機体で測った帯の中心に一致させてある (#64: ここを合わせて 6mm の偏りを消した)。
+    ``geometry`` を渡せば別の画角 (全画素モードなど) の ROI を同じ形で作れる。
     """
-    # **各 ROI の中心が、その辺のオフセット測定のゼロ点**。定規でセル中央に置いた
-    # 機体で測った帯の中心に一致させてある (x または y = 帯中心 - 長さ/2)。
-    # ここを動かすと位置測定のゼロが動くので、動かすときは必ず定規の姿勢で再確認する。
-    return {
-        FRONT: Roi(230, 105, 180, 50),   # 帯 119-142 の中心 130.5
-        # BACK は x 262-352 の「ケーブルの通らない回廊」に置く (#65)。リボンケーブルは
-        # 柔軟で写る位置が動き、帯探索の窓に入ると幻の壁と偽の前後オフセットを作る。
-        # 辺別しきい値 (BACK=0.25) と併用する。
-        BACK: Roi(262, 417, 90, 38),     # 帯 425-447 の中心 436
-        LEFT: Roi(121, 172, 46, 215),    # 帯 134-155 の中心 144.5
-        RIGHT: Roi(426, 172, 46, 215),   # 帯 438-461 の中心 449.5
-    }
+    return (geometry or CALIBRATED_GEOMETRY).rois(CALIBRATED_ROI_SPECS)
 
 
-def calibrated_config(threshold: float = 0.08) -> "WallDetectorConfig":
+def calibrated_config(threshold: float = 0.08,
+                      size: tuple[int, int] = DEFAULT_FRAME_SIZE) -> "WallDetectorConfig":
     """実機校正済みの WallDetectorConfig を返す (ROI + 赤しきい値 + 帯探索)。
 
     しきい値は #65 の 5x5 手動調査 (``scripts/survey_shot.py``、113 枚 = 452 ラベル、
@@ -140,10 +271,14 @@ def calibrated_config(threshold: float = 0.08) -> "WallDetectorConfig":
     BACK だけ 0.25 に上げる (ケーブルと実壁の完全分離)。他は 0.08 のまま。
     **壁の見落とし (衝突) の方が偽陽性 (回り道) より高くつく**ので、迷ったら
     下げる側に振ること。
+
+    ``size`` は撮影サイズ。ROI はその幾何から作られ、``measure`` が実フレームと
+    突き合わせる (食い違ったまま走ると壁を見落とす)。
     """
+    geometry = geometry_for(size)
     return WallDetectorConfig(
-        rois=calibrated_rois(), threshold=threshold,
-        thresholds={BACK: 0.25}, red=CALIBRATED_RED,
+        rois=calibrated_rois(geometry), threshold=threshold,
+        thresholds={BACK: 0.25}, red=CALIBRATED_RED, frame_size=size,
     )
 
 
@@ -165,6 +300,10 @@ class WallDetectorConfig:
     # 取り違えない。
     search_px: int = 40
     search_step: int = 2
+
+    #: この ROI を作ったときの撮影サイズ。``measure`` が実フレームと突き合わせる。
+    #: None なら検算しない (合成フレームのテスト用)。
+    frame_size: tuple[int, int] | None = None
 
     def threshold_for(self, edge: str) -> float:
         """この辺の壁判定しきい値 (辺別の上書きが無ければ共通値)。"""
@@ -239,6 +378,14 @@ class WallDetector:
 
     def measure(self, bgr: np.ndarray) -> dict[str, tuple[float, int, bool]]:
         """各辺の (赤割合, 帯のずれ[px], 飽和したか)。``search_px=0`` なら固定 ROI。"""
+        if self.cfg.frame_size is not None:
+            h, w = bgr.shape[:2]
+            if (w, h) != self.cfg.frame_size:
+                raise ValueError(
+                    f"フレーム {w}x{h} と ROI の校正サイズ "
+                    f"{self.cfg.frame_size[0]}x{self.cfg.frame_size[1]} が違う。"
+                    "ROI が帯から外れて壁を見落とす (#56)"
+                )
         mask = self._mask(bgr)
         out = {}
         for d, roi in self.cfg.rois.items():

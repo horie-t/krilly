@@ -9,6 +9,9 @@ from krilly.perception.wall_detect import (
     BACK,
     BODY_DIRS,
     CALIBRATED_BANDS,
+    CALIBRATED_GEOMETRIES,
+    CALIBRATED_GEOMETRY,
+    DEFAULT_FRAME_SIZE,
     CALIBRATED_RED,
     FRONT,
     LEFT,
@@ -55,10 +58,13 @@ def test_calibrated_config():
     assert cfg.red.s_min <= 50 and cfg.red.v_min < 70
 
 
+W, H = DEFAULT_FRAME_SIZE      # 合成フレームは既定の撮影サイズに合わせる
+
+
 def _frame_with_vertical_band(x: int, w: int = 26) -> np.ndarray:
     """指定の列位置に赤い縦帯 (壁上面) を描いた合成フレーム。"""
-    img = np.zeros((480, 640, 3), dtype=np.uint8)
-    img[100:400, x : x + w] = (0, 0, 255)
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    img[:, x : x + w] = (0, 0, 255)
     return img
 
 
@@ -212,33 +218,45 @@ def test_per_edge_threshold_override():
 # --- 帯探索がフレーム端で頭打ちになる場合 (#21) -----------------------------
 def _frame_with_horizontal_band(y: int, h: int = 26) -> np.ndarray:
     """指定の行位置に赤い横帯 (前後の壁上面) を描いた合成フレーム。"""
-    img = np.zeros((480, 640, 3), dtype=np.uint8)
-    img[y : y + h, 100:540] = (0, 0, 255)
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    img[y : y + h, :] = (0, 0, 255)
     return img
 
 
-def test_back_search_saturates_at_the_bottom_of_the_frame():
-    """BACK ROI は下端まで +25px しか動かせない。その先の帯は頭打ちになる (#21)。
+def test_back_search_has_much_more_room_after_the_full_fov_move():
+    """全画素モードで BACK の読み取り範囲が大きく広がったこと (#88)。
 
-    実機で機体を 20mm (=34px) 前進させたのに読みは 7mm しか動かなかった事例。
-    頭打ちの値は「小さめのもっともらしいずれ」に化けるので、飽和を知らせる。
+    #21 の飽和 (前進 20mm で読みが 7mm に化ける) は、BACK ROI が下端まで 25px = 15mm
+    しか動かせないことが原因だった。画角が 1.5 倍になり、傾きを直してセル中心が
+    光軸へ寄ったので、余地は 186px = 110mm になった。
     """
     roi = calibrated_rois()[BACK]
-    limit = 480 - roi.h                          # ROI 開始位置の上限
-    far = _frame_with_horizontal_band(roi.y + 34)   # 34px 先 = 20mm 前進相当
+    room_px = H - (roi.y + roi.h)
+    assert room_px > 150, room_px
+    scale = CALIBRATED_GEOMETRY.px_per_mm_y
+    assert room_px / scale > 100.0          # mm に直して 100mm 以上
+
+
+def test_back_search_still_reports_saturation_at_the_very_edge():
+    """余地の外まで帯が動けば、やはり頭打ちになり飽和を知らせること。
+
+    頭打ちの値は「小さめのもっともらしいずれ」に化けるので、検出できないと危ない。
+    """
+    roi = calibrated_rois()[BACK]
+    far = _frame_with_horizontal_band(H - 26)             # フレームの下端いっぱい
     mask = red_mask(far, CALIBRATED_RED)
     _fraction, off, saturated = best_roi_red_fraction(
-        mask, roi, vertical=False, search_px=40)
+        mask, roi, vertical=False, search_px=400)
     assert saturated
-    assert roi.y + off == limit or off % 2 == 0   # 端まで寄せて打ち切られている
-    assert off < 34                               # 本当のずれより小さく出る
+    assert roi.y + off <= H - roi.h
 
 
 def test_saturated_edge_is_dropped_from_the_position_measurement():
     """飽和した辺は位置測定に使わない (中央寄りに居ると誤解させないため)。"""
     roi = calibrated_rois()[BACK]
-    frame = _frame_with_horizontal_band(roi.y + 34)
+    frame = _frame_with_horizontal_band(H - 26)
     det = WallDetector(calibrated_config())
+    det.cfg.search_px = 400
     off = cell_offset(frame, det)
     assert BACK in off.saturated
     assert off.forward_m is None                  # 前後は測れなかった扱いになる
@@ -281,16 +299,17 @@ def test_band_positions_recovers_synthetic_bands():
 
     from krilly.perception.wall_detect import band_positions
 
-    mask = np.zeros((480, 640), np.uint8)
-    mask[120:143, 100:540] = 255      # FRONT (行)
-    mask[425:448, 100:540] = 255      # BACK
-    mask[150:400, 134:156] = 255      # LEFT (列)
-    mask[150:400, 438:462] = 255      # RIGHT
+    mask = np.zeros((H, W), np.uint8)
+    # フレーム中央から外側へ探すので、中央を挟むように置く
+    bands = {FRONT: (H // 2 - 160, H // 2 - 138), BACK: (H // 2 + 138, H // 2 + 160),
+             LEFT: (W // 2 - 160, W // 2 - 138), RIGHT: (W // 2 + 138, W // 2 + 160)}
+    for e in (FRONT, BACK):
+        mask[bands[e][0]:bands[e][1] + 1, :] = 255
+    for e in (LEFT, RIGHT):
+        mask[:, bands[e][0]:bands[e][1] + 1] = 255
     got = band_positions(mask)
-    assert got[FRONT] == (120, 142)
-    assert got[BACK] == (425, 447)
-    assert got[LEFT] == (134, 155)
-    assert got[RIGHT] == (438, 461)
+    for e in (FRONT, BACK, LEFT, RIGHT):
+        assert got[e] == bands[e], e
 
 
 def test_band_positions_skips_edges_with_no_wall():
@@ -299,7 +318,7 @@ def test_band_positions_skips_edges_with_no_wall():
 
     from krilly.perception.wall_detect import band_positions
 
-    mask = np.zeros((480, 640), np.uint8)
+    mask = np.zeros((H, W), np.uint8)
     mask[120:143, 100:540] = 255      # FRONT だけ
     got = band_positions(mask)
     assert FRONT in got
@@ -312,7 +331,7 @@ def test_band_positions_finds_the_calibrated_bands():
 
     from krilly.perception.wall_detect import CALIBRATED_BANDS, band_positions
 
-    mask = np.zeros((480, 640), np.uint8)
+    mask = np.zeros((H, W), np.uint8)
     for edge in (FRONT, BACK):
         lo, hi = CALIBRATED_BANDS[edge]
         mask[lo:hi + 1, 100:540] = 255
@@ -377,3 +396,130 @@ def test_red_mask_parts_finds_the_orange_side_separately():
     h1, h2 = red_mask_parts(img, RedDetectorConfig(morph_kernel=0, s_min=50, v_min=40))
     assert (h2[:, :30] > 0).all() and (h2[:, 30:] == 0).all()
     assert (h1[:, 30:] > 0).all() and (h1[:, :30] == 0).all()
+
+
+# --- 幾何からの校正 (#88) ---------------------------------------------------
+def test_geometry_reproduces_the_measured_band_centres():
+    """壁は必ずセル中心から半ピッチなので、帯の位置は幾何から出る。
+
+    実測 (:data:`CALIBRATED_BANDS`) と一致しなければ、幾何の起こし方が間違っている。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_GEOMETRY
+
+    for edge in (FRONT, BACK, LEFT, RIGHT):
+        lo, hi = CALIBRATED_BANDS[edge]
+        assert CALIBRATED_GEOMETRY.band_center(edge) == pytest.approx((lo + hi) / 2.0)
+
+
+def test_roi_shape_is_the_same_at_every_calibrated_resolution():
+    """ROI の**形**は解像度によらず同じであること (位置だけが変わる)。
+
+    形を mm で持ち、出力解像度を画角と同じ倍率にしているのでこうなる (#88)。
+    形まで変わるなら、どこかで px/mm が変わってしまっている。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_GEOMETRIES
+
+    shapes = [
+        {e: (r.w, r.h) for e, r in calibrated_rois(g).items()}
+        for _, g in sorted(CALIBRATED_GEOMETRIES.items())
+    ]
+    assert len(shapes) >= 2
+    for other in shapes[1:]:
+        assert other == shapes[0]
+
+
+def test_geometry_keeps_the_roi_shape_when_the_field_of_view_changes():
+    """画角を 1.5 倍・出力も 1.5 倍にすると、px/mm が同じなので**形は据え置き**になる。
+
+    #88 の移行がこの性質に乗っている。位置だけが変わる。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_GEOMETRY, CameraGeometry
+
+    g = CALIBRATED_GEOMETRY
+    # 光軸は常に画像中心にあり、セル中心の光軸からのずれ [mm] は取付で決まる固定量。
+    # px/mm が同じなら、そのずれの**画素数も同じ**。だから新しいセル中心は
+    # 「新しい画像中心 + 元のずれ」で予測できる (1.5 倍にはならない)。
+    off = (g.cell_center[0] - g.width / 2, g.cell_center[1] - g.height / 2)
+    wide = CameraGeometry(width=960, height=720,
+                          cell_center=(960 / 2 + off[0], 720 / 2 + off[1]),
+                          px_per_mm_x=g.px_per_mm_x, px_per_mm_y=g.px_per_mm_y)
+    a, b = calibrated_rois(), calibrated_rois(wide)
+    for edge in (FRONT, BACK, LEFT, RIGHT):
+        assert (b[edge].w, b[edge].h) == (a[edge].w, a[edge].h), edge   # 形は同じ
+    # 帯とセル中心の距離 (= 半ピッチ x px/mm) は変わらない
+    for edge in (FRONT, BACK, LEFT, RIGHT):
+        base = 0 if edge in (LEFT, RIGHT) else 1
+        assert (wide.band_center(edge) - wide.cell_center[base]) == pytest.approx(
+            g.band_center(edge) - g.cell_center[base]), edge
+
+
+def test_geometry_scales_the_roi_when_only_the_field_of_view_changes():
+    """出力を据え置きで画角だけ広げると px/mm が下がり、**ROI は小さくなる**。
+
+    分解能が落ちるので壁帯も細くなる。移行では出力も一緒に上げてこれを避ける。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_GEOMETRY, CameraGeometry
+
+    g = CALIBRATED_GEOMETRY
+    coarse = CameraGeometry(width=640, height=480, cell_center=g.cell_center,
+                            px_per_mm_x=g.px_per_mm_x / 1.5,
+                            px_per_mm_y=g.px_per_mm_y / 1.5)
+    a, b = calibrated_rois(), calibrated_rois(coarse)
+    assert b[LEFT].w < a[LEFT].w and b[FRONT].h < a[FRONT].h
+
+
+def test_geometry_from_bands_round_trips():
+    from krilly.perception.wall_detect import CameraGeometry
+
+    bands = {FRONT: (200, 224), BACK: (500, 524), LEFT: (300, 324), RIGHT: (600, 624)}
+    g = CameraGeometry.from_bands(bands, 960, 720)
+    assert g.cell_center == pytest.approx((462.0, 362.0))
+    assert g.px_per_mm_x == pytest.approx(300 / 180.0)
+    for edge in bands:
+        lo, hi = bands[edge]
+        assert g.band_center(edge) == pytest.approx((lo + hi) / 2.0)
+
+
+# --- 解像度と ROI の対応 (#88) -----------------------------------------------
+def test_measure_rejects_a_frame_of_the_wrong_size():
+    """撮影サイズと ROI の校正サイズが違ったら止まること。
+
+    黙って動くと ROI が帯から外れ、**壁ありでも赤割合が出ずに機体が壁へ突っ込む**
+    (#56 で実際に起きた失敗)。回り道より衝突の方が高くつくので、ここは止める。
+    """
+    det = WallDetector(calibrated_config())          # 既定サイズで校正
+    wrong = np.zeros((H // 2, W // 2, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="校正サイズ"):
+        det.measure(wrong)
+
+
+def test_measure_accepts_the_matching_size():
+    det = WallDetector(calibrated_config())
+    det.measure(np.zeros((H, W, 3), dtype=np.uint8))   # 例外が出なければよい
+
+
+def test_config_without_frame_size_skips_the_check():
+    """合成フレームのテスト用に、検算を切れること。"""
+    det = WallDetector(WallDetectorConfig(rois=calibrated_rois(), red=CALIBRATED_RED))
+    det.measure(np.zeros((H // 2, W // 2, 3), dtype=np.uint8))
+
+
+def test_geometry_for_refuses_an_uncalibrated_size():
+    """校正していない解像度は**黙って既定へ落とさず**エラーにすること。"""
+    from krilly.perception.wall_detect import geometry_for
+
+    assert geometry_for(DEFAULT_FRAME_SIZE) is not None
+    with pytest.raises(KeyError, match="校正済み幾何が無い"):
+        geometry_for((1234, 567))
+
+
+def test_camera_default_size_matches_the_calibrated_geometry():
+    """カメラの既定サイズと ROI の校正サイズが一致していること。
+
+    片方だけ変えると ROI が帯から外れ、壁ありでも赤割合が出ずに機体が壁へ突っ込む
+    (#56)。``measure`` の検算は実行時に効くが、ここで作った時点で気づけるようにする。
+    """
+    from krilly.hal.camera import Camera
+
+    assert Camera.DEFAULT_SIZE == DEFAULT_FRAME_SIZE
+    assert DEFAULT_FRAME_SIZE in CALIBRATED_GEOMETRIES

@@ -51,7 +51,8 @@ def parse_size(text: str) -> tuple[int, int]:
 
 
 def measure(cam: Camera, pitch_mm: float, label: str, out_dir: Path | None,
-            wall_height_mm: float = 50.0, camera_height_mm: float = 390.0):
+            wall_height_mm: float = 50.0, camera_height_mm: float = 390.0,
+            emit: bool = False):
     """1 枚撮って帯の位置から px/mm と画角を出し、格子の収束から傾きも測る。"""
     frame = cam.capture()
     h, w = frame.shape[:2]
@@ -97,7 +98,43 @@ def measure(cam: Camera, pitch_mm: float, label: str, out_dir: Path | None,
     for line in tilt.describe().splitlines():
         log.info("[%s]   %s", label, line)
     _report_shim(label, tilt)
+    if emit:
+        _emit_bands(label, bands, w, h, cx, cy, px_x, px_y, tilt)
     return px_x, px_y, cx, cy, w, h
+
+
+def _emit_bands(label, bands, w, h, cx, cy, px_x, px_y, tilt) -> None:
+    """``CALIBRATED_BANDS`` に貼れる形で出す (#88 の再校正用)。
+
+    **定規でセル中央に置いた姿勢で撮ること。** ここで測った帯の中心がそのまま
+    位置測定のゼロ点になる (#64)。置き方がずれていればゼロ点がずれる。
+
+    置き方の確認もここでやる: CAD ではレンズは機体中心 (0,0) にあるので、機体が
+    セル中央にあれば**セル中心は光軸のすぐ近くに写る**。ずれるのは傾きの分
+    (距離 x tan(傾き)) だけのはずなので、それより大きければ置き方がずれている。
+    """
+    log.info("[%s] --- CALIBRATED_BANDS に貼る値 (%dx%d) ---", label, w, h)
+    log.info("[%s] CALIBRATED_BANDS = {", label)
+    for edge, name in ((FRONT, "FRONT"), (BACK, "BACK"), (LEFT, "LEFT"), (RIGHT, "RIGHT")):
+        lo, hi = bands[edge]
+        log.info("[%s]     %-6s (%d, %d),", label, name + ":", lo, hi)
+    log.info("[%s] }", label)
+
+    dx, dy = (cx - w / 2) / px_x, (cy - h / 2) / px_y
+    tilt_mm = 0.0
+    if tilt.roll_deg is not None and tilt.pitch_deg is not None:
+        total = math.hypot(tilt.roll_deg, tilt.pitch_deg)
+        tilt_mm = 340.0 * math.tan(math.radians(total))
+    placed = math.hypot(dx, dy)
+    log.info("[%s] 置き方の確認: セル中心は光軸から 前 %+.0fmm / 右 %+.0fmm",
+             label, -dy, -dx)
+    log.info("[%s]   傾き %.2f° から予想されるずれ %.0fmm に対し、実測 %.0fmm",
+             label, math.hypot(tilt.roll_deg or 0, tilt.pitch_deg or 0), tilt_mm, placed)
+    if placed > tilt_mm + 8.0:
+        log.warning("[%s]   **%.0fmm 余分にずれている。定規でセル中央に置き直すこと。**",
+                    label, placed - tilt_mm)
+    else:
+        log.info("[%s]   -> 置き方は十分中央 (差 %.0fmm)", label, abs(placed - tilt_mm))
 
 
 def _report_walls_used(label, tilt, cx, cy, px_x, px_y, pitch_mm, focal, pp):
@@ -174,6 +211,8 @@ def main() -> None:
     p.add_argument("--current-size", default="640x480", help="比較する現行の出力")
     p.add_argument("--out-dir", default=None, help="フレームの保存先")
     p.add_argument("--full-only", action="store_true", help="全画素モードだけ測る")
+    p.add_argument("--emit-bands", action="store_true",
+                   help="CALIBRATED_BANDS に貼る値を出す (定規でセル中央に置いて撮ること)")
     p.add_argument("--camera-height", type=float, default=390.0,
                    help="床からカメラまでの高さ [mm] (既定 390)。傾きの角度はこれに比例する")
     args = p.parse_args()
@@ -185,14 +224,16 @@ def main() -> None:
 
     if not args.full_only:
         w, h = parse_size(args.current_size)
-        with Camera(width=w, height=h) as cam:
+        with Camera(width=w, height=h, full_fov=False) as cam:
             results["現行"] = measure(cam, pitch_mm, "current", out_dir,
-                                    camera_height_mm=args.camera_height)
+                                    camera_height_mm=args.camera_height,
+                                    emit=args.emit_bands)
 
     w, h = parse_size(args.size)
     with Camera(width=w, height=h, full_fov=True) as cam:
         results["全画素"] = measure(cam, pitch_mm, "full_fov", out_dir,
-                                 camera_height_mm=args.camera_height)
+                                 camera_height_mm=args.camera_height,
+                                 emit=args.emit_bands)
 
     a, b = results.get("現行"), results.get("全画素")
     if a and b:
