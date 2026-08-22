@@ -76,7 +76,9 @@ def turn_label(turn: int) -> str:
     return TURN_LABEL.get(turn, f"{turn * 90}°")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """コマンドライン引数の定義。**``main`` と分けてある**のはテストから触るため
+    (``tests/test_run_scripts.py`` が「main が読む名前が実在するか」を突き合わせる)。"""
     p = argparse.ArgumentParser(description="flood-fill 探索ラン")
     p.add_argument("--devices", type=int, default=3, help="連結台数")
     p.add_argument("--bus", type=int, default=0, help="SPI バス (既定 0)")
@@ -105,13 +107,16 @@ def main() -> None:
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true",
                    help="前進直前の前方壁チェックを無効にする (既定は有効)")
-    p.add_argument("--neighbors", action="store_true",
-                   help="左右の隣セルの壁も読む (#89)。進行先が既知なら止まらずに通過する")
+    p.add_argument("--no-neighbors", action="store_true",
+                   help="左右の隣セルを読まない (#89 を切る。1 セルずつ止まって進む)")
     p.add_argument("--pass-cells", type=int, default=None,
-                   help="止まらずに続けて通過してよいセル数の上限 "
-                        "(既定 --neighbors なら 2、それ以外 1)")
+                   help="止まらずに続けて通過してよいセル数の上限 (既定 2、隣を読まないなら 1)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     setup_logging()
     kin = KiwiKinematics()

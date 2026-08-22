@@ -62,7 +62,9 @@ log = get_logger("krilly.speed_run")
 TURN_LABEL = {0: "直進", 1: "左90°", -1: "右90°", 2: "180°"}
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """コマンドライン引数の定義。**``main`` と分けてある**のはテストから触るため
+    (``tests/test_run_scripts.py`` が「main が読む名前が実在するか」を突き合わせる)。"""
     p = argparse.ArgumentParser(description="競技の通しラン (探索 -> 復帰 -> 最速 xN)")
     p.add_argument("--devices", type=int, default=3)
     p.add_argument("--bus", type=int, default=0)
@@ -91,7 +93,11 @@ def main() -> None:
     p.add_argument("--pass-cells", type=int, default=None,
                    help="探索で止まらずに通過してよいセル数の上限 (既定 2、隣を読まないなら 1)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     setup_logging()
     kin = KiwiKinematics()
