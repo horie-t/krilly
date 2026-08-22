@@ -30,24 +30,22 @@ import numpy as np
 
 from krilly.perception.wall_detect import (
     BACK,
+    CALIBRATED_GEOMETRY,
     FRONT,
     LEFT,
     RIGHT,
-    CALIBRATED_BANDS,
+    CameraGeometry,
     WallDetector,
 )
 
 CELL_PITCH_MM = 180.0
 
-
-def _band_center(edge: str) -> float:
-    lo, hi = CALIBRATED_BANDS[edge]
-    return (lo + hi) / 2.0
-
-
 # 対向する帯の間隔 = 1 セルピッチ。列方向 (左右) と行方向 (前後) で別に持つ。
-PX_PER_MM_X = (_band_center(RIGHT) - _band_center(LEFT)) / CELL_PITCH_MM
-PX_PER_MM_Y = (_band_center(BACK) - _band_center(FRONT)) / CELL_PITCH_MM
+# 実体は :class:`CameraGeometry` にあり、ここはその既定値の別名。**画角を変えたら
+# geometry ごと差し替えること** (出力解像度も同じ倍率にすれば px/mm は変わらないので、
+# #88 の全画素モードへの移行ではこの値は据え置きになる)。
+PX_PER_MM_X = CALIBRATED_GEOMETRY.px_per_mm_x
+PX_PER_MM_Y = CALIBRATED_GEOMETRY.px_per_mm_y
 
 
 @dataclass(frozen=True)
@@ -79,6 +77,7 @@ def cell_offset(
     bgr: np.ndarray,
     detector: WallDetector,
     min_fraction: float = OFFSET_MIN_FRACTION,
+    geometry: CameraGeometry | None = None,
 ) -> CellOffset:
     """フレームから、セル中央に対する機体のずれを推定する。
 
@@ -101,8 +100,9 @@ def cell_offset(
     saturated = tuple(e for e in (FRONT, BACK, LEFT, RIGHT) if measured[e][2])
     # 帯が画像上でずれる向きと機体がずれる向きは同じ符号になる:
     # 機体が左 (+y) へずれると、世界の特徴は機体の右へ動く = 画像の右 (+x) へ動く。
-    left_m = (sum(dx_px) / len(dx_px)) / PX_PER_MM_X / 1000.0 if dx_px else None
-    forward_m = (sum(dy_px) / len(dy_px)) / PX_PER_MM_Y / 1000.0 if dy_px else None
+    g = geometry or CALIBRATED_GEOMETRY
+    left_m = (sum(dx_px) / len(dx_px)) / g.px_per_mm_x / 1000.0 if dx_px else None
+    forward_m = (sum(dy_px) / len(dy_px)) / g.px_per_mm_y / 1000.0 if dy_px else None
     return CellOffset(forward_m, left_m, len(dx_px), len(dy_px), saturated)
 
 

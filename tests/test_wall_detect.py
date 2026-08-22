@@ -377,3 +377,79 @@ def test_red_mask_parts_finds_the_orange_side_separately():
     h1, h2 = red_mask_parts(img, RedDetectorConfig(morph_kernel=0, s_min=50, v_min=40))
     assert (h2[:, :30] > 0).all() and (h2[:, 30:] == 0).all()
     assert (h1[:, 30:] > 0).all() and (h1[:, :30] == 0).all()
+
+
+# --- 幾何からの校正 (#88) ---------------------------------------------------
+def test_geometry_reproduces_the_measured_band_centres():
+    """壁は必ずセル中心から半ピッチなので、帯の位置は幾何から出る。
+
+    実測 (:data:`CALIBRATED_BANDS`) と一致しなければ、幾何の起こし方が間違っている。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_GEOMETRY
+
+    for edge in (FRONT, BACK, LEFT, RIGHT):
+        lo, hi = CALIBRATED_BANDS[edge]
+        assert CALIBRATED_GEOMETRY.band_center(edge) == pytest.approx((lo + hi) / 2.0)
+
+
+def test_geometry_matches_the_hand_tuned_rois():
+    """幾何 + mm の形から作った ROI が、手で追い込んだ画素値と 1px 以内で一致すること。"""
+    hand = {FRONT: (230, 105, 180, 50), BACK: (262, 417, 90, 38),
+            LEFT: (121, 172, 46, 215), RIGHT: (426, 172, 46, 215)}
+    got = calibrated_rois()
+    for edge, (x, y, w, h) in hand.items():
+        r = got[edge]
+        assert abs(r.x - x) <= 1 and abs(r.y - y) <= 1, edge
+        assert (r.w, r.h) == (w, h), edge
+
+
+def test_geometry_keeps_the_roi_shape_when_the_field_of_view_changes():
+    """画角を 1.5 倍・出力も 1.5 倍にすると、px/mm が同じなので**形は据え置き**になる。
+
+    #88 の移行がこの性質に乗っている。位置だけが変わる。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_GEOMETRY, CameraGeometry
+
+    g = CALIBRATED_GEOMETRY
+    # 光軸は常に画像中心にあり、セル中心の光軸からのずれ [mm] は取付で決まる固定量。
+    # px/mm が同じなら、そのずれの**画素数も同じ**。だから新しいセル中心は
+    # 「新しい画像中心 + 元のずれ」で予測できる (1.5 倍にはならない)。
+    off = (g.cell_center[0] - g.width / 2, g.cell_center[1] - g.height / 2)
+    wide = CameraGeometry(width=960, height=720,
+                          cell_center=(960 / 2 + off[0], 720 / 2 + off[1]),
+                          px_per_mm_x=g.px_per_mm_x, px_per_mm_y=g.px_per_mm_y)
+    a, b = calibrated_rois(), calibrated_rois(wide)
+    for edge in (FRONT, BACK, LEFT, RIGHT):
+        assert (b[edge].w, b[edge].h) == (a[edge].w, a[edge].h), edge   # 形は同じ
+    # 帯とセル中心の距離 (= 半ピッチ x px/mm) は変わらない
+    for edge in (FRONT, BACK, LEFT, RIGHT):
+        base = 0 if edge in (LEFT, RIGHT) else 1
+        assert (wide.band_center(edge) - wide.cell_center[base]) == pytest.approx(
+            g.band_center(edge) - g.cell_center[base]), edge
+
+
+def test_geometry_scales_the_roi_when_only_the_field_of_view_changes():
+    """出力を据え置きで画角だけ広げると px/mm が下がり、**ROI は小さくなる**。
+
+    分解能が落ちるので壁帯も細くなる。移行では出力も一緒に上げてこれを避ける。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_GEOMETRY, CameraGeometry
+
+    g = CALIBRATED_GEOMETRY
+    coarse = CameraGeometry(width=640, height=480, cell_center=g.cell_center,
+                            px_per_mm_x=g.px_per_mm_x / 1.5,
+                            px_per_mm_y=g.px_per_mm_y / 1.5)
+    a, b = calibrated_rois(), calibrated_rois(coarse)
+    assert b[LEFT].w < a[LEFT].w and b[FRONT].h < a[FRONT].h
+
+
+def test_geometry_from_bands_round_trips():
+    from krilly.perception.wall_detect import CameraGeometry
+
+    bands = {FRONT: (200, 224), BACK: (500, 524), LEFT: (300, 324), RIGHT: (600, 624)}
+    g = CameraGeometry.from_bands(bands, 960, 720)
+    assert g.cell_center == pytest.approx((462.0, 362.0))
+    assert g.px_per_mm_x == pytest.approx(300 / 180.0)
+    for edge in bands:
+        lo, hi = bands[edge]
+        assert g.band_center(edge) == pytest.approx((lo + hi) / 2.0)

@@ -103,27 +103,111 @@ CALIBRATED_BANDS = {
 }
 
 
-def calibrated_rois() -> dict[str, Roi]:
-    """実機 (640x480, 39cm, セル中央) で校正した各辺 ROI。
+@dataclass(frozen=True)
+class RoiSpec:
+    """帯に対する ROI の**形**だけを mm で持つ (位置は幾何から決まる)。
+
+    寸法を画素ではなく mm で持つ理由は、**カメラの画角を変えても形が保たれる**こと。
+    #88 で 640x480 (センサーの 33% しか使っていなかった) から 960x720 の全画素モードへ
+    移ったとき、px/mm は 1.70 のまま画角だけ 1.5 倍になったので、**ROI の寸法は据え置きで
+    位置だけが変わった**。mm で持っていれば、どちらの場合も同じ定義で書ける。
+    """
+
+    thickness_mm: float      # 帯に直交する向きの長さ (帯 12mm を包む)
+    length_mm: float         # 帯に沿う向きの長さ
+    along_offset_mm: float = 0.0   # 帯に沿う向きのずらし (自機・ケーブルを避ける)
+
+
+@dataclass(frozen=True)
+class CameraGeometry:
+    """校正の実体。**実測できる量だけ**で表す。
+
+    - ``cell_center``: **定規でセル中央に置いた機体**でセル中心が写る画素。
+      ここが位置測定のゼロ点になる (#64: ROI の中心をここに合わせて 6mm の偏りを消した)
+    - ``px_per_mm_*``: 対向する帯の間隔が 1 セルピッチ (180mm) であることから出る
+
+    壁は必ずセル中心から半ピッチ (90mm) の位置にあるので、**帯の位置はこの 2 つから
+    計算できる**。実測の :data:`CALIBRATED_BANDS` と誤差 0.000px で一致する
+    (当然で、この 2 つは帯の実測から作られている)。
+    """
+
+    width: int
+    height: int
+    cell_center: tuple[float, float]
+    px_per_mm_x: float
+    px_per_mm_y: float
+
+    @classmethod
+    def from_bands(cls, bands: dict[str, tuple[int, int]], width: int, height: int,
+                   pitch_mm: float = 180.0) -> "CameraGeometry":
+        """実測した 4 辺の帯位置から幾何を起こす。"""
+        c = {e: (lo + hi) / 2.0 for e, (lo, hi) in bands.items()}
+        return cls(
+            width=width, height=height,
+            cell_center=((c[LEFT] + c[RIGHT]) / 2.0, (c[FRONT] + c[BACK]) / 2.0),
+            px_per_mm_x=(c[RIGHT] - c[LEFT]) / pitch_mm,
+            px_per_mm_y=(c[BACK] - c[FRONT]) / pitch_mm,
+        )
+
+    def scale(self, edge: str) -> float:
+        """その辺の帯に**直交**する向きの px/mm。"""
+        return self.px_per_mm_x if edge in (LEFT, RIGHT) else self.px_per_mm_y
+
+    def band_center(self, edge: str, half_pitch_mm: float = 90.0) -> float:
+        """その辺の帯の中心 (縦帯なら列 x、横帯なら行 y)。"""
+        sign = -1.0 if edge in (FRONT, LEFT) else +1.0
+        base = self.cell_center[0] if edge in (LEFT, RIGHT) else self.cell_center[1]
+        return base + sign * half_pitch_mm * self.scale(edge)
+
+    def roi(self, edge: str, spec: RoiSpec) -> Roi:
+        """帯の上に ROI を置く。**ROI の中心が、その軸の位置測定のゼロ点**になる。"""
+        vertical = edge in (LEFT, RIGHT)
+        cross = self.band_center(edge)
+        along_scale = self.px_per_mm_y if vertical else self.px_per_mm_x
+        along_base = self.cell_center[1] if vertical else self.cell_center[0]
+        along = along_base + spec.along_offset_mm * along_scale
+        thick = spec.thickness_mm * self.scale(edge)
+        length = spec.length_mm * along_scale
+        if vertical:
+            return Roi(int(round(cross - thick / 2)), int(round(along - length / 2)),
+                       int(round(thick)), int(round(length)))
+        return Roi(int(round(along - length / 2)), int(round(cross - thick / 2)),
+                   int(round(length)), int(round(thick)))
+
+    def rois(self, specs: dict[str, RoiSpec]) -> dict[str, Roi]:
+        return {e: self.roi(e, spec) for e, spec in specs.items()}
+
+
+#: 実機校正済みの幾何 (640x480)。:data:`CALIBRATED_BANDS` から起こす。
+CALIBRATED_GEOMETRY = CameraGeometry.from_bands(CALIBRATED_BANDS, 640, 480)
+
+#: 各辺の ROI の形。**画角を変えても据え置き**で、位置だけ幾何が決める。
+#: 値は #16 / #56 / #65 で手で追い込んだ画素値を mm に直したもの。
+CALIBRATED_ROI_SPECS = {
+    FRONT: RoiSpec(thickness_mm=29.5, length_mm=106.2, along_offset_mm=+13.6),
+    # BACK だけ短く、少しずらしてある。リボンケーブルが赤く写るのを避けるため (#65)。
+    # ケーブルは柔軟なので完全には避けられず、辺別しきい値 (BACK=0.25) と併用する。
+    BACK: RoiSpec(thickness_mm=22.4, length_mm=53.1, along_offset_mm=+5.9),
+    LEFT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
+    RIGHT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
+}
+
+
+def calibrated_rois(geometry: CameraGeometry | None = None) -> dict[str, Roi]:
+    """実機で校正した各辺 ROI。既定は 640x480 の :data:`CALIBRATED_GEOMETRY`。
 
     #56 で RIGHT / BACK を実測した帯 (:data:`CALIBRATED_BANDS`) に合わせ直した。
     #16 の校正写真は手置きで撮ったもので、閉ループ (#17 で ±1mm) の停止位置とは
     十数 px ずれており、RIGHT は帯と 20px しか重なっていなかった (壁ありでも
     赤割合 0.08-0.15 しか出ず、しきい値 0.15 を割って見落としていた)。
-    ずれを疑うときは ``red_mask`` の列/行プロファイルで帯の位置を測ればよい。
+    ずれを疑うときは ``red_mask`` の列/行プロファイルで帯の位置を測ればよい
+    (:func:`band_positions`)。
+
+    **各 ROI の中心が、その辺のオフセット測定のゼロ点**。定規でセル中央に置いた
+    機体で測った帯の中心に一致させてある (#64: ここを合わせて 6mm の偏りを消した)。
+    ``geometry`` を渡せば別の画角 (全画素モードなど) の ROI を同じ形で作れる。
     """
-    # **各 ROI の中心が、その辺のオフセット測定のゼロ点**。定規でセル中央に置いた
-    # 機体で測った帯の中心に一致させてある (x または y = 帯中心 - 長さ/2)。
-    # ここを動かすと位置測定のゼロが動くので、動かすときは必ず定規の姿勢で再確認する。
-    return {
-        FRONT: Roi(230, 105, 180, 50),   # 帯 119-142 の中心 130.5
-        # BACK は x 262-352 の「ケーブルの通らない回廊」に置く (#65)。リボンケーブルは
-        # 柔軟で写る位置が動き、帯探索の窓に入ると幻の壁と偽の前後オフセットを作る。
-        # 辺別しきい値 (BACK=0.25) と併用する。
-        BACK: Roi(262, 417, 90, 38),     # 帯 425-447 の中心 436
-        LEFT: Roi(121, 172, 46, 215),    # 帯 134-155 の中心 144.5
-        RIGHT: Roi(426, 172, 46, 215),   # 帯 438-461 の中心 449.5
-    }
+    return (geometry or CALIBRATED_GEOMETRY).rois(CALIBRATED_ROI_SPECS)
 
 
 def calibrated_config(threshold: float = 0.08) -> "WallDetectorConfig":
