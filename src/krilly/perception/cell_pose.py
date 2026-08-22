@@ -78,6 +78,7 @@ def cell_offset(
     detector: WallDetector,
     min_fraction: float = OFFSET_MIN_FRACTION,
     geometry: CameraGeometry | None = None,
+    measured: dict[str, tuple[float, int, bool]] | None = None,
 ) -> CellOffset:
     """フレームから、セル中央に対する機体のずれを推定する。
 
@@ -87,8 +88,12 @@ def cell_offset(
     帯探索がフレーム端で頭打ちになった辺 (飽和) も捨てる。頭打ちの値は「小さめの
     もっともらしいずれ」に化けるので、そのまま使うと**実際より中央寄りに居ると
     誤解した補正**を掛けてしまう (#21: BACK は前方向へ +14.7mm までしか測れない)。
+
+    ``measured`` に :meth:`WallDetector.measure` の結果を渡せば測り直さない。壁判定と
+    同じフレームから位置も出すときに使う (全画素モードでは赤マスクだけで数十 ms かかる)。
     """
-    measured = detector.measure(bgr)
+    if measured is None:
+        measured = detector.measure(bgr)
 
     def usable(e: str) -> bool:
         fraction, _offset, saturated = measured[e]
