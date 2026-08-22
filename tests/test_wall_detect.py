@@ -453,3 +453,36 @@ def test_geometry_from_bands_round_trips():
     for edge in bands:
         lo, hi = bands[edge]
         assert g.band_center(edge) == pytest.approx((lo + hi) / 2.0)
+
+
+# --- 解像度と ROI の対応 (#88) -----------------------------------------------
+def test_measure_rejects_a_frame_of_the_wrong_size():
+    """撮影サイズと ROI の校正サイズが違ったら止まること。
+
+    黙って動くと ROI が帯から外れ、**壁ありでも赤割合が出ずに機体が壁へ突っ込む**
+    (#56 で実際に起きた失敗)。回り道より衝突の方が高くつくので、ここは止める。
+    """
+    det = WallDetector(calibrated_config())          # 640x480 で校正
+    wrong = np.zeros((720, 960, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="校正サイズ"):
+        det.measure(wrong)
+
+
+def test_measure_accepts_the_matching_size():
+    det = WallDetector(calibrated_config())
+    det.measure(np.zeros((480, 640, 3), dtype=np.uint8))   # 例外が出なければよい
+
+
+def test_config_without_frame_size_skips_the_check():
+    """合成フレームのテスト用に、検算を切れること。"""
+    det = WallDetector(WallDetectorConfig(rois=calibrated_rois(), red=CALIBRATED_RED))
+    det.measure(np.zeros((720, 960, 3), dtype=np.uint8))
+
+
+def test_geometry_for_refuses_an_uncalibrated_size():
+    """校正していない解像度は**黙って既定へ落とさず**エラーにすること。"""
+    from krilly.perception.wall_detect import geometry_for
+
+    assert geometry_for((640, 480)) is not None
+    with pytest.raises(KeyError, match="校正済み幾何が無い"):
+        geometry_for((960, 720))

@@ -193,6 +193,28 @@ CALIBRATED_ROI_SPECS = {
 }
 
 
+#: 解像度ごとの校正済み幾何。**撮影サイズと ROI は必ず対で使う。**
+#: 食い違うと ROI が帯から外れ、壁ありでも赤割合が出ずに機体が壁へ突っ込む
+#: (#56 で実際に起きた失敗と同じ形)。:func:`geometry_for` が対応付けを保証する。
+CALIBRATED_GEOMETRIES = {(640, 480): CALIBRATED_GEOMETRY}
+
+
+def geometry_for(size: tuple[int, int]) -> CameraGeometry:
+    """撮影サイズに対応する校正済み幾何。無ければ **エラーにする**。
+
+    黙って既定へ落とすと ROI が帯から外れたまま走ってしまう。校正していない解像度で
+    走らせるくらいなら止まった方が安い。
+    """
+    try:
+        return CALIBRATED_GEOMETRIES[size]
+    except KeyError:
+        known = ", ".join(f"{w}x{h}" for w, h in sorted(CALIBRATED_GEOMETRIES))
+        raise KeyError(
+            f"{size[0]}x{size[1]} の校正済み幾何が無い (あるのは {known})。"
+            "camera_fov --emit-bands で測って CALIBRATED_GEOMETRIES に足すこと"
+        ) from None
+
+
 def calibrated_rois(geometry: CameraGeometry | None = None) -> dict[str, Roi]:
     """実機で校正した各辺 ROI。既定は 640x480 の :data:`CALIBRATED_GEOMETRY`。
 
@@ -210,7 +232,8 @@ def calibrated_rois(geometry: CameraGeometry | None = None) -> dict[str, Roi]:
     return (geometry or CALIBRATED_GEOMETRY).rois(CALIBRATED_ROI_SPECS)
 
 
-def calibrated_config(threshold: float = 0.08) -> "WallDetectorConfig":
+def calibrated_config(threshold: float = 0.08,
+                      size: tuple[int, int] = (640, 480)) -> "WallDetectorConfig":
     """実機校正済みの WallDetectorConfig を返す (ROI + 赤しきい値 + 帯探索)。
 
     しきい値は #65 の 5x5 手動調査 (``scripts/survey_shot.py``、113 枚 = 452 ラベル、
@@ -224,10 +247,14 @@ def calibrated_config(threshold: float = 0.08) -> "WallDetectorConfig":
     BACK だけ 0.25 に上げる (ケーブルと実壁の完全分離)。他は 0.08 のまま。
     **壁の見落とし (衝突) の方が偽陽性 (回り道) より高くつく**ので、迷ったら
     下げる側に振ること。
+
+    ``size`` は撮影サイズ。ROI はその幾何から作られ、``measure`` が実フレームと
+    突き合わせる (食い違ったまま走ると壁を見落とす)。
     """
+    geometry = geometry_for(size)
     return WallDetectorConfig(
-        rois=calibrated_rois(), threshold=threshold,
-        thresholds={BACK: 0.25}, red=CALIBRATED_RED,
+        rois=calibrated_rois(geometry), threshold=threshold,
+        thresholds={BACK: 0.25}, red=CALIBRATED_RED, frame_size=size,
     )
 
 
@@ -249,6 +276,10 @@ class WallDetectorConfig:
     # 取り違えない。
     search_px: int = 40
     search_step: int = 2
+
+    #: この ROI を作ったときの撮影サイズ。``measure`` が実フレームと突き合わせる。
+    #: None なら検算しない (合成フレームのテスト用)。
+    frame_size: tuple[int, int] | None = None
 
     def threshold_for(self, edge: str) -> float:
         """この辺の壁判定しきい値 (辺別の上書きが無ければ共通値)。"""
@@ -323,6 +354,14 @@ class WallDetector:
 
     def measure(self, bgr: np.ndarray) -> dict[str, tuple[float, int, bool]]:
         """各辺の (赤割合, 帯のずれ[px], 飽和したか)。``search_px=0`` なら固定 ROI。"""
+        if self.cfg.frame_size is not None:
+            h, w = bgr.shape[:2]
+            if (w, h) != self.cfg.frame_size:
+                raise ValueError(
+                    f"フレーム {w}x{h} と ROI の校正サイズ "
+                    f"{self.cfg.frame_size[0]}x{self.cfg.frame_size[1]} が違う。"
+                    "ROI が帯から外れて壁を見落とす (#56)"
+                )
         mask = self._mask(bgr)
         out = {}
         for d, roi in self.cfg.rois.items():
