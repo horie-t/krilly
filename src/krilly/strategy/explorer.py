@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from krilly.perception.wall_detect import body_walls_to_maze
+from krilly.perception.wall_detect import maze_direction_for
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.flood_fill import UNREACHABLE, flood_fill, next_direction
 
@@ -94,12 +94,20 @@ class Explorer:
     # 事故になり、偽陽性 (回り道が増えるだけ) より高くつくため既定で有効。
     sticky_walls: bool = True
     conflicts: int = 0   # 既知の壁を「無し」と観測した回数 (姿勢誤差・誤検出の目安)
+    #: 4 壁すべてが観測で確定したセル (#89)。**未観測の壁を持つセルは入らない**ので、
+    #: 「止まらずに通過してよいか」と「最速ランで通してよいか」の判断に使える。
+    #: 自セルを観測すると隣接 4 セルの 1 辺ずつも確定するので、``visited`` より広い。
+    known: set[tuple[int, int]] = field(default_factory=set)
+    #: セル -> 観測で確定した辺の集合 (:attr:`known` の内訳)。
+    observed: dict[tuple[int, int], set[Direction]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.visited.add(self.cell)
 
     # -- 観測 ---------------------------------------------------------------
-    def observe(self, walls_body: dict[str, bool]) -> dict[Direction, bool]:
+    def observe(self, walls_body: dict[str, bool],
+                neighbors: dict[str, dict[str, bool]] | None = None
+                ) -> dict[Direction, bool]:
         """機体相対の壁有無 (front/back/left/right) を現在セルに反映する。
 
         戻り値は迷路方角に写した壁有無 (カメラが何と言ったかのログ用)。共有エッジ
@@ -109,10 +117,28 @@ class Explorer:
           (実機では自機のリボンケーブルや影で外周を「壁なし」と誤判定しうる)
         - ``sticky_walls`` が真なら、既知の壁を「無し」と観測しても消さずに
           :attr:`conflicts` を数える (姿勢がずれている / 誤検出しているサイン)
+
+        ``neighbors`` は隣のセルの壁 (#89)。``{機体から見た隣の向き: そのセルの
+        機体相対の壁}`` で、全画素モードでは左右の隣セルの 4 壁まで読める
+        (:meth:`krilly.perception.wall_detect.WallDetector.neighbor_walls`)。
+        **確定しなかった辺はキーごと落とすこと** — 「壁なし」として渡すと、その
+        セルが :attr:`known` に化けて通過対象になってしまう。
         """
-        walls_maze = body_walls_to_maze(walls_body, self.facing)
-        x, y = self.cell
+        walls_maze = self._apply(self.cell, walls_body)
+        for side, walls in (neighbors or {}).items():
+            cell = self.maze.neighbor(*self.cell, maze_direction_for(side, self.facing))
+            if self.maze.in_bounds(*cell):
+                self._apply(cell, walls)
+        return walls_maze
+
+    def _apply(self, cell: tuple[int, int],
+               walls_body: dict[str, bool]) -> dict[Direction, bool]:
+        """1 セル分の機体相対の壁観測を迷路へ反映する (部分的な観測も受け付ける)。"""
+        walls_maze = {maze_direction_for(edge, self.facing): present
+                      for edge, present in walls_body.items()}
+        x, y = cell
         for d, present in walls_maze.items():
+            self._mark_observed(cell, d)
             if not self.maze.in_bounds(*self.maze.neighbor(x, y, d)):
                 continue                      # 外周は既知なので触らない
             if not present and self.maze.has_wall(x, y, d):
@@ -121,6 +147,25 @@ class Explorer:
                     continue
             self.maze.set_wall(x, y, d, present)
         return walls_maze
+
+    def _mark_observed(self, cell: tuple[int, int], d: Direction) -> None:
+        """辺 ``d`` を観測済みにする。壁は共有なので**隣のセルの裏側も**確定する。"""
+        for c, side in ((cell, d), (self.maze.neighbor(*cell, d), d.opposite)):
+            if not self.maze.in_bounds(*c):
+                continue
+            edges = self.observed.setdefault(c, set())
+            edges.add(side)
+            if self._fully_observed(c, edges):
+                self.known.add(c)
+
+    def _fully_observed(self, cell: tuple[int, int], edges: set[Direction]) -> bool:
+        """4 辺すべてが分かっているか。迷路の外へ出る辺は観測不要 (既知)。"""
+        return all(d in edges or not self.maze.in_bounds(*self.maze.neighbor(*cell, d))
+                   for d in Direction)
+
+    def is_known(self, cell: tuple[int, int]) -> bool:
+        """そのセルの 4 壁がすべて観測で確定しているか (#89)。"""
+        return cell in self.known
 
     # -- 計画 ---------------------------------------------------------------
     @property
@@ -135,17 +180,58 @@ class Explorer:
         """次の 1 手を返す。ゴール到達なら None。到達不能なら Unreachable。"""
         if self.at_goal:
             return None
+        return self._plan_from(self.cell, self.travel, self.visited)
+
+    def _plan_from(self, cell: tuple[int, int], travel: Direction,
+                   visited: set[tuple[int, int]]) -> Step:
+        """``cell`` に居るものとして 1 手を選ぶ (先読み用に状態を引数で受ける)。"""
         dist = self.distances()
         # タイブレークの基準: 旋回レスなら「直前に進んだ方角」、旋回するなら「機体の向き」。
         # facing 固定のまま facing を渡すと、迷路と無関係に北を最優先する静的な偏りになる。
-        reference = self.travel if self.holonomic else self.facing
-        d = next_direction(self.maze, self.cell, reference, dist, self.visited)
+        reference = travel if self.holonomic else self.facing
+        d = next_direction(self.maze, cell, reference, dist, visited)
         if d is None:
             raise Unreachable(
-                f"セル {self.cell} からゴールへ到達できない "
-                f"(距離={dist[self.cell[0]][self.cell[1]]})"
+                f"セル {cell} からゴールへ到達できない "
+                f"(距離={dist[cell[0]][cell[1]]})"
             )
-        return Step(d, self.maze.neighbor(*self.cell, d))
+        return Step(d, self.maze.neighbor(*cell, d))
+
+    def plan_leg(self, max_cells: int = 1) -> list[Step]:
+        """**止まらずに続けて実行できる 1 区間**を返す (#89)。ゴール到達なら空。
+
+        1 手目は :meth:`plan` と同じ。2 手目以降は、通過するセルが
+
+        1. :attr:`known` (4 壁が観測済み) — 通っても新しく見えるものが無く、かつ
+           **その先へ抜ける辺が「壁なし」と観測されている**のが保証される
+        2. ゴールでない (ゴールでは止まる)
+        3. そこからの 1 手が**同じ方角** (向きを変えるなら結局止まる)
+
+        を満たす限り伸ばす。``max_cells`` が上限 (1 なら従来どおり 1 セルずつ)。
+
+        通過したセルの隣は観測できないので**情報は減る**が、大会迷路 31 面の
+        シミュレーションでは経路長はほとんど変わらず、停止回数だけが減る。
+
+        上限を設ける理由は 2 つ: :class:`~krilly.motion.cell_motion.CellMotion` の
+        1 動作が長くなるほど誤差が乗ること、位置補正が停止時にしか入らないこと。
+        """
+        if self.at_goal:
+            return []
+        steps = [self._plan_from(self.cell, self.travel, self.visited)]
+        visited = set(self.visited)
+        while len(steps) < max_cells:
+            cell = steps[-1].to_cell
+            visited.add(cell)
+            if not self.is_known(cell) or self.maze.is_goal(*cell):
+                break
+            try:
+                nxt = self._plan_from(cell, steps[-1].direction, visited)
+            except Unreachable:
+                break
+            if nxt.direction is not steps[-1].direction:
+                break
+            steps.append(nxt)
+        return steps
 
     # -- 前進 ---------------------------------------------------------------
     def advance(self, step: Step) -> tuple[int, int]:

@@ -10,7 +10,7 @@ import pytest
 
 from krilly.config import MazeConfig
 from krilly.perception.wall_detect import BACK, FRONT, LEFT, RIGHT
-from krilly.sim import open_maze, sense       # カメラの代役は krilly.sim にある (#77)
+from krilly.sim import open_maze, sense, sense_neighbors   # カメラの代役 (#77)
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import (
     Explorer,
@@ -224,3 +224,139 @@ def test_search_run_detects_unreachable_goal():
             if step is None:
                 pytest.fail("封鎖されたゴールに到達したことになっている")
             ex.advance(step)
+
+
+# --- 隣のセルを読む / 止まらずに通過する (#89) --------------------------------
+def _spiral_truth() -> Maze:
+    """テスト用の 5x5。壁がそこそこ有り、直進が続く区間もある形。"""
+    truth = Maze(5)
+    truth.set_outer_walls()
+    for x in range(4):
+        truth.set_wall(x, 1, Direction.N)
+    truth.set_wall(4, 1, Direction.W)
+    truth.set_wall(1, 3, Direction.E)
+    return truth
+
+
+def test_observe_marks_the_cell_known_and_the_neighbours_partly():
+    """自セルを 1 回見れば 4 壁が確定する。隣は 1 辺だけなので確定しない。"""
+    truth = open_maze(4)
+    ex = Explorer(open_maze(4))
+    ex.observe(sense(truth, (0, 0), Direction.N))
+    assert ex.is_known((0, 0))
+    assert not ex.is_known((1, 0)) and not ex.is_known((0, 1))
+    # 共有辺なので、隣のセルの「こちら向きの 1 辺」は確定している
+    assert ex.observed[(1, 0)] == {Direction.W}
+
+
+def test_observe_with_neighbours_makes_the_side_cells_known():
+    truth = _spiral_truth()
+    ex = Explorer(open_maze(5), cell=(2, 0))
+    ex.observe(sense(truth, (2, 0), Direction.N),
+               sense_neighbors(truth, (2, 0), Direction.N))
+    assert ex.is_known((1, 0)) and ex.is_known((3, 0))     # 東西の隣は 4 壁とも確定
+    assert not ex.is_known((2, 1))                          # 北の隣は 1 辺だけ
+    assert ex.maze.has_wall(1, 0, Direction.N) is truth.has_wall(1, 0, Direction.N)
+
+
+def test_observe_ignores_neighbours_outside_the_maze():
+    truth = _spiral_truth()
+    ex = Explorer(open_maze(5))          # スタート (0,0) の西は迷路の外
+    ex.observe(sense(truth, (0, 0), Direction.N),
+               sense_neighbors(truth, (0, 0), Direction.N))
+    assert ex.is_known((1, 0))
+    assert (-1, 0) not in ex.known and (-1, 0) not in ex.observed
+
+
+def test_partial_neighbour_observation_leaves_the_cell_unknown():
+    """確定しなかった辺 (キーが無い) があれば、そのセルは通過対象にならない。"""
+    truth = _spiral_truth()
+    ex = Explorer(open_maze(5), cell=(2, 0))
+    walls = sense_neighbors(truth, (2, 0), Direction.N)
+    del walls[LEFT][FRONT]               # 隣の奥の壁が読めなかった状況
+    ex.observe(sense(truth, (2, 0), Direction.N), walls)
+    assert not ex.is_known((1, 0))
+    assert ex.is_known((3, 0))
+
+
+def test_plan_leg_returns_one_step_by_default():
+    truth = _spiral_truth()
+    ex = Explorer(open_maze(5))
+    ex.observe(sense(truth, ex.cell, ex.facing))
+    assert len(ex.plan_leg()) == 1
+
+
+def test_plan_leg_passes_through_a_known_cell_in_the_same_direction():
+    """通過するセルの 4 壁が確定していれば、2 セルを 1 動作にまとめる。"""
+    truth = _spiral_truth()
+    ex = Explorer(open_maze(5), travel=Direction.E)
+    ex.observe(sense(truth, ex.cell, ex.facing),
+               sense_neighbors(truth, ex.cell, ex.facing))
+    steps = ex.plan_leg(2)
+    assert [s.direction for s in steps] == [Direction.E, Direction.E]
+    assert steps[-1].to_cell == (2, 0)      # (1,0) は隣として読んだので通過できる
+
+
+def test_plan_leg_stops_where_it_would_change_direction():
+    """通過するセルが既知でも、そこで曲がるなら止まる (旋回レスでも減速は要る)。"""
+    truth = _spiral_truth()
+    truth.set_wall(1, 0, Direction.E)       # (1,0) から先は北へしか行けない
+    ex = Explorer(open_maze(5), travel=Direction.E)
+    ex.observe(sense(truth, ex.cell, ex.facing),
+               sense_neighbors(truth, ex.cell, ex.facing))
+    assert ex.is_known((1, 0))
+    steps = ex.plan_leg(4)
+    assert [s.direction for s in steps] == [Direction.E]
+
+
+def test_plan_leg_stops_at_the_goal():
+    """ゴールセルは通過しない (そこで走行が終わる)。"""
+    truth = open_maze(5)
+    ex = Explorer(open_maze(5), cell=(0, 2), travel=Direction.E)
+    ex.observe(sense(truth, ex.cell, ex.facing),
+               sense_neighbors(truth, ex.cell, ex.facing))
+    steps = ex.plan_leg(4)
+    assert [s.to_cell for s in steps] == [(1, 2), (2, 2)]
+    assert steps[-1].to_cell == ex.maze.goal_cells()[0]
+
+
+def test_plan_leg_never_passes_through_an_unobserved_cell():
+    """隣を読まなければ、進行先は未確定なので 1 セルずつしか進まない。"""
+    truth = _spiral_truth()
+    ex = Explorer(open_maze(5))
+    for _ in range(6):
+        ex.observe(sense(truth, ex.cell, ex.facing))
+        steps = ex.plan_leg(4)
+        for step in steps:
+            assert ex.is_known(step.to_cell) or step is steps[-1]
+        for step in steps:
+            ex.advance(step)
+
+
+def test_neighbour_sensing_reaches_the_goal_with_fewer_stops():
+    """隣を読んで通過すると、同じ迷路を**より少ない停止**でゴールできる。"""
+
+    def search(neighbors: bool, max_cells: int) -> tuple[int, Explorer]:
+        truth = _spiral_truth()
+        ex = Explorer(open_maze(5))
+        stops = 0
+        for _ in range(200):
+            ex.observe(sense(truth, ex.cell, ex.facing),
+                       sense_neighbors(truth, ex.cell, ex.facing) if neighbors else None)
+            steps = ex.plan_leg(max_cells)
+            if not steps:
+                return stops, ex
+            stops += 1
+            for step in steps:
+                ex.advance(step)
+        pytest.fail("ゴールに到達しなかった")
+
+    base, ex_base = search(False, 1)
+    fast, ex_fast = search(True, 2)
+    assert fast < base
+    # 通過したセルの壁も観測済みなので、地図は真の迷路と食い違わない
+    truth = _spiral_truth()
+    for cell in ex_fast.known:
+        for d in Direction:
+            assert ex_fast.maze.has_wall(*cell, d) is truth.has_wall(*cell, d)
+    assert ex_fast.known >= ex_fast.visited

@@ -21,6 +21,9 @@
     # 見積もりより 40% 遅かったら予算判断が保つか (time_margin=1.5 の検算)
     python -m scripts.maze_sim --generate 20 --size 16 --actual-scale 1.4
 
+    # #89 を切って比べる (自セルの 4 壁だけ / 1 セルずつ止まる)
+    python -m scripts.maze_sim --maze mazes/contest/*.txt --no-neighbors
+
     # 組めるかだけ調べる (実機の準備。壁の枚数と健全性)
     python -m scripts.maze_sim --maze mazes/maze8.txt --check-only --wall-budget 70
 
@@ -83,7 +86,11 @@ def build_args() -> argparse.ArgumentParser:
     cfg.add_argument("--actual-scale", type=float, default=1.0,
                      help="実際は見積もりの何倍かかるか (予算判断の余裕を試す)")
     cfg.add_argument("--search-overhead", type=float, default=0.0,
-                     help="探索 1 手あたりの追加時間 [s] (壁判定・位置補正の分)")
+                     help="探索の停止 1 回あたりの追加時間 [s] (壁判定・位置補正の分)")
+    cfg.add_argument("--no-neighbors", action="store_true",
+                     help="探索で左右の隣セルを読まない (#89 を切る)")
+    cfg.add_argument("--pass-cells", type=int, default=None,
+                     help="止まらずに通過してよいセル数の上限 (既定 2、隣を読まないなら 1)")
 
     out = p.add_argument_group("出力")
     out.add_argument("--check-only", action="store_true", help="健全性チェックだけ行う")
@@ -145,12 +152,17 @@ def main() -> int:
             maze, holonomic=not args.turn_in_place, cost=cost,
             time_limit_s=args.time_limit, max_runs=args.max_runs,
             search_step_overhead_s=args.search_overhead, actual_scale=args.actual_scale,
+            neighbor_sensing=not args.no_neighbors,
+            max_leg_cells=args.pass_cells or (1 if args.no_neighbors else 2),
         )
         good = result.ok is expect_ok
         speed = f"{result.best_speed_s:.1f}s" if result.best_speed_s else "-"
-        log.info("%-24s %s 探索 %.1fs / 最速 %s / 経過 %.1fs / 走行 %d 回%s",
+        log.info("%-24s %s 探索 %.1fs (%d 停止 / %d セル) / 最速 %s / 経過 %.1fs / "
+                 "走行 %d 回%s",
                  "", "OK " if good else "NG ",
                  result.search.duration_s if result.search else float("nan"),
+                 result.search.legs if result.search else 0,
+                 result.search.cells if result.search else 0,
                  speed, result.elapsed_s, result.runs_used,
                  "" if good else "  <- 要調査")
         if args.verbose or not good:

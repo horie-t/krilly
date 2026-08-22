@@ -43,9 +43,9 @@ from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
     WallDetector,
-    body_edge_for,
-    path_block_threshold,
     calibrated_config,
+    path_block_threshold,
+    path_check_slots,
 )
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import (
@@ -76,7 +76,9 @@ def turn_label(turn: int) -> str:
     return TURN_LABEL.get(turn, f"{turn * 90}°")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """コマンドライン引数の定義。**``main`` と分けてある**のはテストから触るため
+    (``tests/test_run_scripts.py`` が「main が読む名前が実在するか」を突き合わせる)。"""
     p = argparse.ArgumentParser(description="flood-fill 探索ラン")
     p.add_argument("--devices", type=int, default=3, help="連結台数")
     p.add_argument("--bus", type=int, default=0, help="SPI バス (既定 0)")
@@ -105,8 +107,16 @@ def main() -> None:
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true",
                    help="前進直前の前方壁チェックを無効にする (既定は有効)")
+    p.add_argument("--no-neighbors", action="store_true",
+                   help="左右の隣セルを読まない (#89 を切る。1 セルずつ止まって進む)")
+    p.add_argument("--pass-cells", type=int, default=None,
+                   help="止まらずに続けて通過してよいセル数の上限 (既定 2、隣を読まないなら 1)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     setup_logging()
     kin = KiwiKinematics()
@@ -115,7 +125,10 @@ def main() -> None:
     maze = Maze(args.size) if args.size else Maze.from_config(maze_cfg)
     maze.set_outer_walls()
     explorer = Explorer(maze, holonomic=not args.turn_in_place)
-    detector = WallDetector(calibrated_config())
+    neighbors = not args.no_neighbors
+    detector = WallDetector(calibrated_config(neighbors=neighbors))
+    # 隣を読めるときだけ「進行先が既知なら通過」が効く (既知でなければ結局止まる)。
+    pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
 
@@ -123,6 +136,8 @@ def main() -> None:
              maze.size, maze.size, maze.goal_cells(), maze.start,
              "旋回して走る (従来モード)" if args.turn_in_place
              else "旋回せず平行移動する (#76)")
+    log.info("観測: 自セルの 4 壁%s / 1 動作で最大 %d セル",
+             " + 左右の隣セル (#89)" if neighbors else "", pass_cells)
     log.info("チューニング: %s", tuning.describe())
     for warning in check_limits(tuning, kin):
         log.warning("%s", warning)
@@ -215,7 +230,8 @@ def main() -> None:
             frame = camera.capture()
             measured = detector.measure(frame)
             walls_body = {d: measured[d][0] >= detector.cfg.threshold_for(d) for d in BODY_DIRS}
-            walls_maze = explorer.observe(walls_body)
+            walls_nb = detector.neighbor_walls(measured) if neighbors else None
+            walls_maze = explorer.observe(walls_body, walls_nb)
             if args.save_frames:
                 import cv2
 
@@ -223,6 +239,14 @@ def main() -> None:
             log.info("  壁 赤割合 %s -> 迷路 %s",
                      {d: f"{measured[d][0]:.2f}" for d in BODY_DIRS},
                      {d.name: p for d, p in sorted(walls_maze.items())})
+            if walls_nb is not None:
+                # 隣セルは 3 値 (壁 / 壁なし / 未確定)。未確定の辺は辞書に入らないので、
+                # 4 辺そろわなかった側はそのまま「既知セル」にならず、通過対象から外れる。
+                log.info("  隣セル 赤割合 %s -> %s",
+                         {k: f"{v[0]:.2f}" for k, v in measured.items()
+                          if k not in BODY_DIRS},
+                         {side: {e: w for e, w in sorted(walls.items())}
+                          for side, walls in sorted(walls_nb.items())})
             # 迷路軸に対する方位を測って絶対補正する。ジャイロの基準は「走行開始時の
             # 機体の向き」なので、放置すると走行のたびに迷路軸から傾いていく。
             if not args.no_correct:
@@ -239,7 +263,7 @@ def main() -> None:
                                     "(線分 %d 本 / 総長 %.0fpx)。誤測定の疑い。",
                                     yaw.angle_deg, yaw.segments, yaw.total_length_px)
             # 帯のずれからセル内の位置ずれを測り、推定位置を絶対補正する
-            off = cell_offset(frame, detector)
+            off = cell_offset(frame, detector, measured=measured)
             if off.saturated:
                 # フレーム端で頭打ちになった辺は「中央寄り」の嘘を返す (#21)
                 log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
@@ -264,49 +288,66 @@ def main() -> None:
                      f"補正 X{est.pose[0] - before[0]:+.4f} Y{est.pose[1] - before[1]:+.4f}"
                      if applied else "補正なし")
 
-        def path_is_clear(direction: Direction) -> bool:
+        def path_is_clear(direction: Direction, cells: int = 1,
+                          facing: Direction | None = None) -> bool:
             """進む直前に、いま見えている**進行方角の**壁を確認する。
 
             計画は地図に基づくので、地図が正しければ進路は空いている。ここで壁が
             見えたら**自機の姿勢がずれている**サインなので、突っ込む前に止める。
 
-            見る辺は進行方角から決める (:func:`body_edge_for`)。ホロノミック走行では
+            見る辺は進行方角から決める (:func:`path_check_slots`)。ホロノミック走行では
             進行方向と機体の向きが一致しないので「前方を見る」では足りない。
-            しきい値は必ず ``threshold_for(edge)`` を使うこと — BACK はリボンケーブルの
-            偽帯があるため 0.25 に上げてあり、共通値 (0.08) で判定すると**南向きの移動で
-            毎回誤って中止する**。
+            2 セル続けて進むときは**通過するセルの出口も**見る (#89) — 左右方向なら
+            隣セルの遠い側の帯として写る。前後方向の 2 セル目は画角の外なので見えない。
+            しきい値は必ず ``path_block_threshold`` を使うこと (辺別の壁しきい値と
+            進路チェックの下限の大きい方)。
+
+            ``facing`` は**確認する時点の**機体の向き。旋回する走り方では旋回を
+            済ませてから確認するので、``explorer.facing`` (まだ更新前) ではなく
+            旋回後の向きを渡すこと — でないと見る辺が 90° ずれる。
             """
             if args.no_front_check:
                 return True
-            edge = body_edge_for(direction, explorer.facing)
-            fraction = detector.measure(camera.capture())[edge][0]
-            threshold = path_block_threshold(detector.cfg, edge)
-            if fraction >= threshold:
-                log.error("進行中止: %s 方向 (%s 辺) に壁が見える (赤割合 %.2f >= %.2f)。"
-                          "姿勢がずれている可能性が高い。",
-                          direction.name, edge, fraction, threshold)
-                return False
+            slots = path_check_slots(direction, facing or explorer.facing, cells,
+                                     neighbors)
+            measured = detector.measure(camera.capture())
+            for i, slot in enumerate(slots):
+                fraction = measured[slot][0]
+                threshold = path_block_threshold(detector.cfg, slot)
+                if fraction >= threshold:
+                    log.error("進行中止: %s 方向 %d セル目 (%s) に壁が見える "
+                              "(赤割合 %.2f >= %.2f)。姿勢がずれている可能性が高い。",
+                              direction.name, i + 1, slot, fraction, threshold)
+                    return False
+            if len(slots) < cells:
+                log.info("  進路確認: %d セル目までしか見えない (残りは観測済みの地図で担保)",
+                         len(slots))
             return True
 
-        def execute(step: Step) -> bool:
-            """1 手を実行する。安全チェックで中止したら False。
+        def execute(steps: list[Step]) -> bool:
+            """1 区間 (同じ方角へ ``len(steps)`` セル) を 1 動作で実行する。
 
             旋回レス走行 (#76) では機体を回さず、進行方角へ平行移動する。旧モードでは
-            従来どおり「その方角を向いてから 1 セル前進」。
+            従来どおり「その方角を向いてから前進」。2 セル以上になるのは、通過する
+            セルの 4 壁が観測済み (:attr:`Explorer.known`) のときだけ (#89)。
+            安全チェックで中止したら False。
             """
-            axis = quarter_turns(explorer.facing, step.direction)
+            direction, cells = steps[0].direction, len(steps)
+            axis = quarter_turns(explorer.facing, direction)
+            facing = explorer.facing
             if args.turn_in_place and axis:
                 motion.start_turn_left(axis)
                 run_primitive(turn_label(axis))
                 coast(args.pause)
-            if not path_is_clear(step.direction):
+                facing = direction          # 旋回後は進行方角を向いている
+            if not path_is_clear(direction, cells, facing):
                 return False
             if args.turn_in_place:
-                motion.start_move_cells(1, 0)          # 旋回済みなので前へ
-                run_primitive("1セル前進")
+                motion.start_move_cells(cells, 0)      # 旋回済みなので前へ
+                run_primitive(f"{cells}セル前進")
             else:
-                motion.start_move_cells(1, axis)       # 向きは変えずにその方角へ
-                run_primitive(f"{step.direction.name}へ1セル")
+                motion.start_move_cells(cells, axis)   # 向きは変えずにその方角へ
+                run_primitive(f"{direction.name}へ{cells}セル")
             # 平行移動では回転を一切指令しないので、**測れた回転は異常の証拠**。
             # 実機 (#76) では壁に接触した移動が -3.01° を残し、その後カメラの軸角測定が
             # 壊れて走行が崩壊した。通常の移動の残差は 0.9° 以下なので、ここで止める。
@@ -320,34 +361,38 @@ def main() -> None:
             return True
 
         # -- 探索ラン本体 ---------------------------------------------------
+        stops = 0
         for _ in range(args.max_steps):
             log.info("%s", explorer.progress())
             observe_here()
             if args.verbose:
                 log.info("現在の迷路:\n%s", maze.to_ascii())
             try:
-                step = explorer.plan()
+                steps = explorer.plan_leg(pass_cells)
             except Unreachable as e:
                 log.error("探索中止: %s", e)
                 break
-            if step is None:
-                log.info("ゴール到達! %d 手 / 訪問 %d セル",
-                         explorer.steps, len(explorer.visited))
+            if not steps:
+                log.info("ゴール到達! %d 手 / %d 停止 / 訪問 %d セル / 壁が確定 %d セル",
+                         explorer.steps, stops, len(explorer.visited),
+                         len(explorer.known))
                 break
-            log.info("  次の1手: %s へ -> %s (%s)",
-                     step.direction.name, step.to_cell, step.direction.name)
+            log.info("  次の1手: %s へ %d セル -> %s",
+                     steps[0].direction.name, len(steps), steps[-1].to_cell)
             if args.dry_run:
                 log.info("dry-run のため走行しない。終了。")
                 break
-            if not execute(step):
+            if not execute(steps):
                 log.error("安全チェックで中止した (セル %s 向き %s)。",
                           explorer.cell, explorer.facing.name)
                 break
-            explorer.advance(step)
+            stops += 1
+            for step in steps:
+                explorer.advance(step)
             x, y = est.pose[0], est.pose[1]
             log.info("  推定 X=%.4f Y=%.4f φ=%+.1f° (セル %s の中心は %s)",
-                     x, y, math.degrees(est.pose[2]), step.to_cell,
-                     tuple(round(c * maze_cfg.cell_pitch_m, 4) for c in step.to_cell))
+                     x, y, math.degrees(est.pose[2]), explorer.cell,
+                     tuple(round(c * maze_cfg.cell_pitch_m, 4) for c in explorer.cell))
         else:
             log.warning("%d 手で終わらなかった (現在 %s)", args.max_steps, explorer.cell)
 
@@ -358,19 +403,21 @@ def main() -> None:
 def report_shortest_path(explorer: Explorer, cost: MoveCost) -> None:
     """確定した壁情報から最速ランの最短経路を求めて表示する (#19)。
 
-    通すのは**観測済みセルのみ** (未探索セルは壁が未確定なので最速では走れない)。
+    通すのは**4 壁が確定したセルのみ** (壁が未確定なら最速では走れない)。隣のセルを
+    読めば (#89) 入っていないセルも確定するので、``visited`` より広く使える。
     """
     maze = explorer.maze
     path = shortest_path(
         maze,
         maze.start,
         start_facing=Direction.N,
-        known=explorer.visited,
+        known=explorer.known,
         cost=cost,
     )
     if not path:
-        log.warning("最速経路なし: 観測済みセルだけではゴールへ繋がっていない "
-                    "(訪問 %d セル)。探索を続ける必要がある。", len(explorer.visited))
+        log.warning("最速経路なし: 壁が確定したセルだけではゴールへ繋がっていない "
+                    "(確定 %d セル / 訪問 %d セル)。探索を続ける必要がある。",
+                    len(explorer.known), len(explorer.visited))
         return
     legs = path_to_legs(path)
     # 旋回レスでは旋回しないので回数は出さない (区間の本数が時間を決める)

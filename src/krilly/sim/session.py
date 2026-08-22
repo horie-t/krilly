@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from krilly.app.run_manager import RunManager, RunPhase, facing_after
 from krilly.sim.check import map_agrees
 from krilly.sim.generate import open_maze
-from krilly.sim.sense import sense
+from krilly.sim.sense import sense, sense_neighbors
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import Explorer, Unreachable
 from krilly.strategy.shortest_path import DEFAULT_COST, Leg, MoveCost
@@ -112,12 +112,19 @@ def simulate_session(
     search_step_overhead_s: float = 0.0,
     actual_scale: float = 1.0,
     max_steps: int = 5000,
+    neighbor_sensing: bool = True,
+    max_leg_cells: int = 2,
 ) -> SessionResult:
     """真の迷路 ``truth`` を相手に 7 分 5 走 (クラシック競技規定) のセッションを丸ごと回す。
 
-    ``search_step_overhead_s`` は探索 1 手あたりの追加時間。最速ランの実測から出た
-    区間の固定費には**壁判定と位置補正の時間が入っていない**ので、探索はそのぶん
-    遅い。実測があれば :func:`fit_search_overhead` で求められる。
+    ``search_step_overhead_s`` は探索の**停止 1 回あたり**の追加時間。最速ランの実測から
+    出た区間の固定費には**壁判定と位置補正の時間が入っていない**ので、探索はそのぶん
+    遅い。カメラを見るのは止まったときだけなので、セル数ではなく停止回数に比例する。
+    実測があれば :func:`fit_search_overhead` で求められる。
+
+    ``neighbor_sensing`` は左右の隣セルまで読むか (#89)。``max_leg_cells`` は
+    止まらずに続けて通過してよいセル数の上限。両方そろって初めて停止回数が減る
+    (隣を読むと進行先のセルが「4 壁とも既知」になり、通過してよくなる)。
 
     ``actual_scale`` は「実際は見積もりの何倍かかるか」。1.0 なら見積もりが定義上
     ぴったり当たるので、予算判断の余裕を試すには 1.2-1.5 を入れる。
@@ -144,26 +151,32 @@ def simulate_session(
     cells = 0
 
     # --- 探索ラン -----------------------------------------------------------
+    stops = 0
     for _ in range(max_steps):
-        ex.observe(sense(truth, ex.cell, ex.facing))
+        ex.observe(sense(truth, ex.cell, ex.facing),
+                   sense_neighbors(truth, ex.cell, ex.facing) if neighbor_sensing else None)
         try:
-            step = ex.plan()
+            steps = ex.plan_leg(max_leg_cells)
         except Unreachable as exc:
             result.aborted = f"探索中に到達不能: {exc}"
             mgr.abort()
             break
-        if step is None:
+        if not steps:
             result.reached_goal = True
             break
-        now += (mgr.estimate_s([Leg(step.direction, 1)], ex.facing)
-                + search_step_overhead_s) * actual_scale
-        ex.advance(step)
-        cells += 1
+        # 1 区間 = 1 停止。止まらずに通過したセルではカメラを見ないので、
+        # 壁判定の時間 (search_step_overhead_s) も掛からない。
+        leg = Leg(steps[0].direction, len(steps))
+        now += (mgr.estimate_s([leg], ex.facing) + search_step_overhead_s) * actual_scale
+        for step in steps:
+            ex.advance(step)
+        cells += len(steps)
+        stops += 1
     else:
         result.aborted = f"{max_steps} 手でゴールに到達しなかった (現在 {ex.cell})"
         mgr.abort()
 
-    result.records.append(RunRecord(RunPhase.SEARCH, started, now - started, cells, cells))
+    result.records.append(RunRecord(RunPhase.SEARCH, started, now - started, cells, stops))
     result.mismatches = map_agrees(truth, ex.maze, ex.visited)
 
     # --- 復帰 → 最速 の繰り返し ---------------------------------------------
@@ -194,15 +207,15 @@ def simulate_session(
 
 
 def fit_search_overhead(truth: Maze, measured_s: float, **kwargs) -> float:
-    """探索ランの実測時間から 1 手あたりの追加時間を求める。
+    """探索ランの実測時間から**停止 1 回あたり**の追加時間を求める。
 
-    移動そのものの時間は最速ランの実測定数から出るので、残りを手数で割れば
+    移動そのものの時間は最速ランの実測定数から出るので、残りを停止回数で割れば
     「壁判定 + 位置補正 + 進路チェック」に費やしている時間になる。ASCII に
     書き起こした迷路で ``search_run`` を回した実測があるときに使う。
     """
     kwargs.pop("search_step_overhead_s", None)
     base = simulate_session(truth, search_step_overhead_s=0.0, **kwargs)
     rec = base.search
-    if rec is None or rec.cells == 0:
+    if rec is None or rec.legs == 0:
         raise ValueError("探索の記録が無い (迷路かパラメータを確認)")
-    return (measured_s - rec.duration_s) / rec.cells
+    return (measured_s - rec.duration_s) / rec.legs

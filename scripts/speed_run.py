@@ -37,10 +37,10 @@ from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
 from krilly.perception.wall_detect import (
     BODY_DIRS,
-    body_edge_for,
-    path_block_threshold,
     WallDetector,
     calibrated_config,
+    path_block_threshold,
+    path_check_slots,
 )
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import (
@@ -62,7 +62,9 @@ log = get_logger("krilly.speed_run")
 TURN_LABEL = {0: "直進", 1: "左90°", -1: "右90°", 2: "180°"}
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """コマンドライン引数の定義。**``main`` と分けてある**のはテストから触るため
+    (``tests/test_run_scripts.py`` が「main が読む名前が実在するか」を突き合わせる)。"""
     p = argparse.ArgumentParser(description="競技の通しラン (探索 -> 復帰 -> 最速 xN)")
     p.add_argument("--devices", type=int, default=3)
     p.add_argument("--bus", type=int, default=0)
@@ -86,8 +88,16 @@ def main() -> None:
     p.add_argument("--max-heading-residual", type=float, default=2.5,
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true", help="前進前の前方確認を無効化")
+    p.add_argument("--no-neighbors", action="store_true",
+                   help="左右の隣セルを読まない (#89 を切る。1 セルずつ止まって進む)")
+    p.add_argument("--pass-cells", type=int, default=None,
+                   help="探索で止まらずに通過してよいセル数の上限 (既定 2、隣を読まないなら 1)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     setup_logging()
     kin = KiwiKinematics()
@@ -99,11 +109,15 @@ def main() -> None:
     manager = RunManager(explorer, time_limit_s=args.time_limit, max_runs=args.max_runs,
                          holonomic=not args.turn_in_place,
                          cost=LEGACY_COST if args.turn_in_place else DEFAULT_COST)
-    detector = WallDetector(calibrated_config())
+    neighbors = not args.no_neighbors
+    detector = WallDetector(calibrated_config(neighbors=neighbors))
+    pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
     log.info("迷路 %dx%d / ゴール %s / 持ち時間 %.0fs / 最大 %d 走",
              maze.size, maze.size, maze.goal_cells(), args.time_limit, args.max_runs)
+    log.info("探索の観測: 自セルの 4 壁%s / 1 動作で最大 %d セル",
+             " + 左右の隣セル (#89)" if neighbors else "", pass_cells)
     log.info("チューニング: %s", tuning.describe())
     for warning in check_limits(tuning, kin):
         log.warning("%s", warning)
@@ -191,7 +205,8 @@ def main() -> None:
                 cv2.imwrite(f"{args.save_frames}_{frame_no[0]:03d}.png", frame)
             return frame
 
-        def correct_at(cell: tuple[int, int], facing: Direction, frame=None) -> None:
+        def correct_at(cell: tuple[int, int], facing: Direction, frame=None,
+                       measured=None) -> None:
             """停止中に方位と位置を絶対補正する (強い帯のみ、#54/#65)。"""
             if args.no_correct:
                 return
@@ -200,7 +215,7 @@ def main() -> None:
             yaw = axis_yaw(frame, yaw_cfg)
             if yaw is not None:
                 apply_axis_heading(est, yaw.angle_rad)
-            off = cell_offset(frame, detector)
+            off = cell_offset(frame, detector, measured=measured)
             if off.saturated:
                 log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
                          "/".join(off.saturated))
@@ -209,22 +224,28 @@ def main() -> None:
             apply_cell_offset(est, cell_center(cell, maze_cfg.cell_pitch_m),
                               off.forward_m, off.left_m, phi=heading_rad(facing))
 
-        def path_is_clear(direction: Direction, facing: Direction) -> bool:
+        def path_is_clear(direction: Direction, facing: Direction,
+                          cells: int = 1) -> bool:
             """進む直前に、進行方角の壁が見えていないか確認する。
 
             見る辺は進行方角から決める (ホロノミック走行では進行方向と機体の向きが
-            一致しない)。しきい値は辺ごとの値を使うこと — BACK はケーブルの偽帯があるため
-            0.25 に上げてある。
+            一致しない)。2 セル以上進むときは通過するセルの出口も見る — ただし
+            左右方向だけで、前後方向の 2 セル目は画角の外 (:func:`path_check_slots`)。
+            しきい値は ``path_block_threshold`` (辺別の壁しきい値と進路チェックの
+            下限の大きい方) を使う。
             """
             if args.no_front_check:
                 return True
-            edge = body_edge_for(direction, facing)
-            fraction = detector.measure(capture())[edge][0]
-            threshold = path_block_threshold(detector.cfg, edge)
-            if fraction >= threshold:
-                log.error("進行中止: %s 方向 (%s 辺) に壁が見える (赤割合 %.2f >= %.2f)。"
-                          "姿勢ずれの可能性。", direction.name, edge, fraction, threshold)
-                return False
+            measured = detector.measure(capture())
+            for i, slot in enumerate(path_check_slots(direction, facing, cells,
+                                                      neighbors)):
+                fraction = measured[slot][0]
+                threshold = path_block_threshold(detector.cfg, slot)
+                if fraction >= threshold:
+                    log.error("進行中止: %s 方向 %d セル目 (%s) に壁が見える "
+                              "(赤割合 %.2f >= %.2f)。姿勢ずれの可能性。",
+                              direction.name, i + 1, slot, fraction, threshold)
+                    return False
             return True
 
         def move_was_clean(label: str, timeout: float | None = None,
@@ -257,32 +278,42 @@ def main() -> None:
 
         # -- 探索ラン (search_run と同じ閉ループ) ------------------------------
         def search_to_goal() -> tuple[tuple[int, int], Direction] | None:
+            stops = 0
             for _ in range(args.max_steps):
                 frame = capture()
                 measured = detector.measure(frame)
                 walls_body = {d: measured[d][0] >= detector.cfg.threshold_for(d)
                               for d in BODY_DIRS}
-                explorer.observe(walls_body)
-                correct_at(explorer.cell, explorer.facing, frame=frame)
+                explorer.observe(walls_body,
+                                 detector.neighbor_walls(measured) if neighbors
+                                 else None)
+                correct_at(explorer.cell, explorer.facing, frame=frame,
+                           measured=measured)
                 try:
-                    step = explorer.plan()
+                    steps = explorer.plan_leg(pass_cells)
                 except Unreachable as e:
                     log.error("探索中止: %s", e)
                     return None
-                if step is None:
-                    log.info("ゴール到達! %d 手 / 訪問 %d セル",
-                             explorer.steps, len(explorer.visited))
+                if not steps:
+                    log.info("ゴール到達! %d 手 / %d 停止 / 訪問 %d セル / 壁が確定 %d セル",
+                             explorer.steps, stops, len(explorer.visited),
+                             len(explorer.known))
                     return (explorer.cell, explorer.facing)
-                axis = quarter_turns(explorer.facing, step.direction)
+                direction, cells = steps[0].direction, len(steps)
+                axis = quarter_turns(explorer.facing, direction)
+                facing = explorer.facing
                 if args.turn_in_place:
-                    turn_to(explorer.facing, step.direction)
+                    facing = turn_to(explorer.facing, direction)   # 旋回後の向きで確認する
                     axis = 0
-                if not path_is_clear(step.direction, explorer.facing):
+                if not path_is_clear(direction, facing, cells):
                     return None
-                motion.start_move_cells(1, axis)
-                if not move_was_clean(f"{step.direction.name}へ1セル"):
+                motion.start_move_cells(cells, axis)
+                if not move_was_clean(f"{direction.name}へ{cells}セル",
+                                      timeout=max(args.timeout, cells * 3.0)):
                     return None
-                explorer.advance(step)
+                stops += 1
+                for step in steps:
+                    explorer.advance(step)
             log.error("探索が %d 手で終わらなかった", args.max_steps)
             return None
 
@@ -297,7 +328,7 @@ def main() -> None:
                     facing = turn_to(facing, leg.direction)
                     axis = 0
                 correct_at(cell, facing)
-                if not path_is_clear(leg.direction, facing):
+                if not path_is_clear(leg.direction, facing, leg.cells):
                     return None
                 motion.start_move_cells(leg.cells, axis)
                 # 実測の集計は**進行軸で分ける**。旋回レスでは南北が機体の前後軸、

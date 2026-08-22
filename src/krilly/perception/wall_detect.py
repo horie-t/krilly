@@ -176,18 +176,41 @@ class CameraGeometry:
         """その辺の帯に**直交**する向きの px/mm。"""
         return self.px_per_mm_x if edge in (LEFT, RIGHT) else self.px_per_mm_y
 
+    def wall_center(self, edge: str, cell: tuple[int, int] = (0, 0),
+                    half_pitch_mm: float = 90.0,
+                    pitch_mm: float = 180.0) -> tuple[float, float]:
+        """機体から ``cell`` セル離れたセルの ``edge`` 側の壁が写る位置 [px]。
+
+        ``cell`` は**機体相対**の (前方セル数, 左方セル数)。戻り値は
+        (帯に直交する座標, 帯に沿う座標) で、縦帯 (LEFT/RIGHT) なら (x, y)、
+        横帯 (FRONT/BACK) なら (y, x)。
+
+        画像と機体の対応は「画像の上 = 機体前方 (+x)、画像の左 = 機体左 (+y)」なので、
+        機体座標 [mm] から画素へは**符号が反転**する (前へ行くほど画像の上 = y が小)。
+        """
+        forward_mm, left_mm = cell[0] * pitch_mm, cell[1] * pitch_mm
+        sign = +1.0 if edge in (FRONT, LEFT) else -1.0
+        if edge in (LEFT, RIGHT):
+            cross = self.cell_center[0] - (left_mm + sign * half_pitch_mm) * self.px_per_mm_x
+            along = self.cell_center[1] - forward_mm * self.px_per_mm_y
+        else:
+            cross = self.cell_center[1] - (forward_mm + sign * half_pitch_mm) * self.px_per_mm_y
+            along = self.cell_center[0] - left_mm * self.px_per_mm_x
+        return (cross, along)
+
     def band_center(self, edge: str, half_pitch_mm: float = 90.0) -> float:
         """その辺の帯の中心 (縦帯なら列 x、横帯なら行 y)。"""
-        sign = -1.0 if edge in (FRONT, LEFT) else +1.0
-        base = self.cell_center[0] if edge in (LEFT, RIGHT) else self.cell_center[1]
-        return base + sign * half_pitch_mm * self.scale(edge)
+        return self.wall_center(edge, half_pitch_mm=half_pitch_mm)[0]
 
-    def roi(self, edge: str, spec: RoiSpec) -> Roi:
-        """帯の上に ROI を置く。**ROI の中心が、その軸の位置測定のゼロ点**になる。"""
+    def roi(self, edge: str, spec: RoiSpec, cell: tuple[int, int] = (0, 0)) -> Roi:
+        """帯の上に ROI を置く。**ROI の中心が、その軸の位置測定のゼロ点**になる。
+
+        ``cell`` を与えると隣のセルの壁を見る ROI になる (#89)。自セル (既定) では
+        従来どおり。
+        """
         vertical = edge in (LEFT, RIGHT)
-        cross = self.band_center(edge)
+        cross, along_base = self.wall_center(edge, cell)
         along_scale = self.px_per_mm_y if vertical else self.px_per_mm_x
-        along_base = self.cell_center[1] if vertical else self.cell_center[0]
         along = along_base + spec.along_offset_mm * along_scale
         thick = spec.thickness_mm * self.scale(edge)
         length = spec.length_mm * along_scale
@@ -199,6 +222,58 @@ class CameraGeometry:
 
     def rois(self, specs: dict[str, RoiSpec]) -> dict[str, Roi]:
         return {e: self.roi(e, spec) for e, spec in specs.items()}
+
+    def target_roi(self, target: "WallTarget", spec: RoiSpec) -> Roi:
+        return self.roi(target.edge, spec, target.cell)
+
+    def contains(self, roi: Roi) -> bool:
+        """ROI がフレームに収まっているか (隣セルの ROI は端に来るので要確認)。"""
+        return (roi.x >= 0 and roi.y >= 0
+                and roi.x + roi.w <= self.width and roi.y + roi.h <= self.height)
+
+
+@dataclass(frozen=True)
+class WallTarget:
+    """「どのセルのどの辺の壁を見るか」(機体相対) (#89)。
+
+    ``cell`` は機体からの (前方セル数, 左方セル数)。自セルは (0, 0)。全画素モード
+    (#88) では左右の隣セルが画角に入るので、その 4 壁まで読める。
+    """
+
+    edge: str
+    cell: tuple[int, int] = (0, 0)
+
+    @property
+    def vertical(self) -> bool:
+        """帯が縦 (LEFT/RIGHT) か。帯探索の向きを決める。"""
+        return self.edge in (LEFT, RIGHT)
+
+
+#: 隣セルとして読む側 (機体の左右)。前後の隣は画角が 66mm 足りず読めない (#89)。
+NEIGHBOR_SIDES = (LEFT, RIGHT)
+
+#: 隣セルの向き -> 機体相対のセル座標 (前方セル数, 左方セル数)。
+_NEIGHBOR_CELL = {LEFT: (0, +1), RIGHT: (0, -1)}
+
+
+def neighbor_slot(side: str, edge: str) -> str:
+    """隣セルの壁を指すスロット名 (``"left:front"`` など)。"""
+    return f"{side}:{edge}"
+
+
+def neighbor_targets(sides: tuple[str, ...] = NEIGHBOR_SIDES) -> dict[str, WallTarget]:
+    """隣セルの「自分では見えない 3 辺」の観測対象。
+
+    共有辺 (左の隣セルの RIGHT = 自セルの LEFT) は自セルの測定をそのまま使うので
+    ROI を作らない。1 枚の壁を 2 つの ROI で測ると、食い違ったときにどちらを信じるか
+    という問題が増えるだけで、得るものが無い。
+    """
+    out: dict[str, WallTarget] = {}
+    for side in sides:
+        cell = _NEIGHBOR_CELL[side]
+        for edge in (FRONT, BACK, side):
+            out[neighbor_slot(side, edge)] = WallTarget(edge, cell)
+    return out
 
 
 #: 解像度ごとの校正済み幾何。実測した帯から起こす。
@@ -221,6 +296,57 @@ CALIBRATED_ROI_SPECS = {
     LEFT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
     RIGHT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
 }
+
+
+#: 隣セルの壁を見る ROI の形 (#89)。**自セルより薄い**のが要点:
+#:
+#: - 遠い側の壁 (自セル中心から 270mm) は 960 幅のフレームの端 (x=14.5 / 935.5) に写る。
+#:   自セルと同じ 27mm 厚 (46px) では枠から食み出すので 16mm (27px) に絞る。
+#: - 隣セルの前後の壁は自セルの帯と同じ行に、180mm 横へずれて写る。ケーブルは画像の
+#:   中央下なので、BACK でも自セルのように短くする必要はない (支柱を避ける 106mm)。
+#:
+#: 実機実測 (5x5、壁あり / 壁なし): 前後 0.46-0.48 / 0.00、遠い側 0.81-0.82 / 0.00。
+#: **遠い側が一番強い**のは ROI を薄くしてあるから (12mm の帯が 16mm の ROI をほぼ
+#: 埋める)。隣の BACK も 0.47 出るので、自セルの BACK を短くしている理由 (ケーブル) は
+#: 180mm 横では効かないことが確認できている。
+NEIGHBOR_ROI_SPECS = {
+    FRONT: RoiSpec(thickness_mm=26.0, length_mm=106.2),
+    BACK: RoiSpec(thickness_mm=26.0, length_mm=106.2),
+    LEFT: RoiSpec(thickness_mm=16.0, length_mm=126.7),
+    RIGHT: RoiSpec(thickness_mm=16.0, length_mm=126.7),
+}
+
+#: 隣セルを「壁なし」と言い切れる赤割合の上限 (#89)。
+#:
+#: 自セルの判定は 2 値 (しきい値以上なら壁、未満なら壁なし) でよいが、**隣セルは
+#: 3 値**にする — 壁 / 壁なし / **未確定**。理由は、未確定を「壁なし」と書くと
+#: そのセルが「4 壁が分かったセル」に化け、**止まらずに通過する対象になってしまう**
+#: から。見えなかっただけの壁へ全速で突っ込むことになる。
+#: 判定が割れる帯 (この値以上・壁しきい値未満) のときは何も書かず、そのセルは
+#: 通過対象から外れて普通に停止して観測する。停止 1 回で済むので安い。
+NEIGHBOR_CLEAR_MAX_FRACTION = 0.04
+
+#: 遠い側の帯の中心が、フレーム端からこれだけ内側に無ければ「壁なし」と言わない [px]。
+#:
+#: 遠い側の壁はセル中心から 270mm、フレーム端まで 281mm しかないので、帯の中心は
+#: x=14.5 (左) / 935.5 (右) に写る。機体がその側へ寄ると帯は枠外へ出ていき、
+#: **完全に出ると赤割合が 0 に落ちて「壁なし」と区別がつかなくなる**。
+#: 逆に、帯の中心さえフレーム内にあれば帯の半分以上が写るので、赤割合は 0.4 前後出て
+#: 壁として検出できる (半分に切れても十分しきい値を超える)。つまり
+#: **危ないのは「中心が枠外」のときだけ**で、そこを 3px の余裕付きで除外すれば足りる。
+#: 左の遠い帯なら、機体が右へ約 7mm ずれるまでは判定してよいということ。
+#:
+#: 実機で確かめた (5x5、左の遠い側に壁を立てて機体を右へずらす): 左右のずれ実測
+#: +4.7mm で赤割合 0.82、-8.2mm で 0.36 (まだ壁と判定できる)、**-15.2mm で 0.00**。
+#: つまり読めなくなるのは -15mm 付近で、この 3px は -6.7mm で止める = 13px ぶん
+#: 保守側。**その余裕は残すこと** — 浮いた壁は単独でも弱く写る (#88 の 0.24)。
+NEIGHBOR_FAR_MIN_MARGIN_PX = 3.0
+
+#: 帯のずれを「機体のずれ」として信じてよい最低赤割合。位置の測定なので壁判定 (0.08)
+#: より厳しくする — 弱い証拠で位置を語ってはいけない (#64)。
+#: :data:`krilly.perception.cell_pose.OFFSET_MIN_FRACTION` と同じ値・同じ根拠で、
+#: ``tests/test_wall_detect.py`` が両者の一致を固定している。
+BAND_SHIFT_MIN_FRACTION = 0.25
 
 
 def geometry_for(size: tuple[int, int]) -> CameraGeometry:
@@ -256,8 +382,22 @@ def calibrated_rois(geometry: CameraGeometry | None = None) -> dict[str, Roi]:
     return (geometry or CALIBRATED_GEOMETRY).rois(CALIBRATED_ROI_SPECS)
 
 
+def calibrated_neighbor_rois(geometry: CameraGeometry | None = None,
+                             sides: tuple[str, ...] = NEIGHBOR_SIDES) -> dict[str, Roi]:
+    """左右の隣セルの壁を見る ROI (#89)。キーは ``"left:front"`` 形式のスロット名。
+
+    位置は自セルと同じ幾何から出る (壁は 180mm 格子の上にしか無い) ので、
+    **新しく校正するものは無い**。確かめることがあるとすれば、フレーム端に来る
+    遠い側の帯が本当にそこに写るかで、それは ``wall_detect --neighbors`` で見る。
+    """
+    g = geometry or CALIBRATED_GEOMETRY
+    return {name: g.target_roi(t, NEIGHBOR_ROI_SPECS[t.edge])
+            for name, t in neighbor_targets(sides).items()}
+
+
 def calibrated_config(threshold: float = 0.08,
-                      size: tuple[int, int] = DEFAULT_FRAME_SIZE) -> "WallDetectorConfig":
+                      size: tuple[int, int] = DEFAULT_FRAME_SIZE,
+                      neighbors: bool = False) -> "WallDetectorConfig":
     """実機校正済みの WallDetectorConfig を返す (ROI + 赤しきい値 + 帯探索)。
 
     しきい値は #65 の 5x5 手動調査 (``scripts/survey_shot.py``、113 枚 = 452 ラベル、
@@ -268,17 +408,34 @@ def calibrated_config(threshold: float = 0.08,
     - left : 開 max 0.036 / 壁 min 0.344
     - right: 開 max 0.016 / 壁 min 0.379
 
-    BACK だけ 0.25 に上げる (ケーブルと実壁の完全分離)。他は 0.08 のまま。
+    #65 当時は BACK だけ 0.25 に上げていた (ケーブルの偽帯 0.09-0.12 と分けるため)。
+    **これは #88 で 0.08 へ下げた。** 理由が 2 つ:
+
+    1. ケーブルに全長テープを貼り、全画素モードへ移った後の実測で、**壁なしの BACK は
+       0.00** になった (偽帯が消えた)。0.25 を保つ理由が無くなった
+    2. **0.25 のままで実際に壁を突き破った。** 5x5 の探索ランで本物の後方の壁が
+       0.24 と出て、検出 (0.25) も進路確認 (max(0.25, 0.20) = 0.25) も**同時に**
+       すり抜けた。辺別しきい値を上げると進路確認まで鈍るので、二重の防護が
+       一重になっていた
+
     **壁の見落とし (衝突) の方が偽陽性 (回り道) より高くつく**ので、迷ったら
     下げる側に振ること。
 
     ``size`` は撮影サイズ。ROI はその幾何から作られ、``measure`` が実フレームと
     突き合わせる (食い違ったまま走ると壁を見落とす)。
+
+    ``neighbors=True`` で左右の隣セルを読む ROI も足す (#89)。既定で切ってあるのは、
+    フレーム端に来る遠い側の帯が実機で本当に読めるかを確かめてから使うため。
     """
     geometry = geometry_for(size)
+    rois = calibrated_rois(geometry)
+    slots = {e: WallTarget(e) for e in rois}
+    if neighbors:
+        rois |= calibrated_neighbor_rois(geometry)
+        slots |= neighbor_targets()
     return WallDetectorConfig(
-        rois=calibrated_rois(geometry), threshold=threshold,
-        thresholds={BACK: 0.25}, red=CALIBRATED_RED, frame_size=size,
+        rois=rois, slots=slots, threshold=threshold,
+        red=CALIBRATED_RED, frame_size=size,
     )
 
 
@@ -305,9 +462,24 @@ class WallDetectorConfig:
     #: None なら検算しない (合成フレームのテスト用)。
     frame_size: tuple[int, int] | None = None
 
-    def threshold_for(self, edge: str) -> float:
-        """この辺の壁判定しきい値 (辺別の上書きが無ければ共通値)。"""
-        return self.thresholds.get(edge, self.threshold)
+    #: スロット名 -> 「どのセルのどの辺を見るか」(#89)。``rois`` に有って
+    #: ここに無いキーは自セルのその辺として扱う (従来の 4 辺だけの設定と互換)。
+    slots: dict[str, WallTarget] = field(default_factory=dict)
+    #: 隣セルを「壁なし」と言い切れる赤割合の上限 (これ以上・壁しきい値未満は未確定)。
+    neighbor_clear: float = NEIGHBOR_CLEAR_MAX_FRACTION
+
+    def target(self, name: str) -> WallTarget:
+        """スロット名が見ている対象 (既定は自セルの同名の辺)。"""
+        return self.slots.get(name) or WallTarget(name)
+
+    def threshold_for(self, name: str) -> float:
+        """このスロットの壁判定しきい値 (辺別の上書きが無ければ共通値)。
+
+        隣セルのスロット (``"left:front"``) はまずスロット名で、無ければ**辺**で引く。
+        """
+        if name in self.thresholds:
+            return self.thresholds[name]
+        return self.thresholds.get(self.target(name).edge, self.threshold)
 
 
 def _band_profile(mask: np.ndarray, roi: Roi, vertical: bool) -> np.ndarray:
@@ -388,12 +560,12 @@ class WallDetector:
                 )
         mask = self._mask(bgr)
         out = {}
-        for d, roi in self.cfg.rois.items():
-            vertical = d in (LEFT, RIGHT)
+        for name, roi in self.cfg.rois.items():
+            vertical = self.cfg.target(name).vertical
             if self.cfg.search_px <= 0:
-                out[d] = (roi_red_fraction(mask, roi), 0, False)
+                out[name] = (roi_red_fraction(mask, roi), 0, False)
             else:
-                out[d] = best_roi_red_fraction(
+                out[name] = best_roi_red_fraction(
                     mask, roi, vertical, self.cfg.search_px, self.cfg.search_step
                 )
         return out
@@ -410,7 +582,89 @@ class WallDetector:
         return {
             d: f >= self.cfg.threshold_for(d)
             for d, f in self.red_fractions(bgr).items()
+            if self.cfg.target(d).cell == (0, 0)
         }
+
+    def lateral_shift_px(
+        self, measured: dict[str, tuple[float, int, bool]]
+    ) -> float | None:
+        """自セルの左右の帯から、機体が左右にどれだけずれているか [px] (+ = 画像の右)。
+
+        :func:`krilly.perception.cell_pose.cell_offset` の左右成分と同じもの
+        (あちらは mm に直して推定へ入れる)。ここでは**遠い側の帯がまだ写っているか**を
+        判断するためだけに使うので、px のまま扱う。測れなければ None。
+        """
+        offsets = [float(measured[e][1]) for e in (LEFT, RIGHT)
+                   if e in measured and not measured[e][2]
+                   and measured[e][0] >= max(self.cfg.threshold_for(e),
+                                             BAND_SHIFT_MIN_FRACTION)]
+        return sum(offsets) / len(offsets) if offsets else None
+
+    def neighbor_walls(
+        self, measured: dict[str, tuple[float, int, bool]],
+        sides: tuple[str, ...] = NEIGHBOR_SIDES,
+        shift_px: float | None = None,
+    ) -> dict[str, dict[str, bool]]:
+        """左右の隣セルの壁有無を機体相対で返す (#89)。**未確定の辺はキーごと落とす。**
+
+        戻り値は ``{"left": {"front": True, "back": False, ...}, ...}`` で、
+        :meth:`krilly.strategy.explorer.Explorer.observe` の ``neighbors`` にそのまま渡せる。
+
+        判定は 3 値 (:data:`NEIGHBOR_CLEAR_MAX_FRACTION` 参照):
+
+        - 赤割合 >= しきい値 → 壁
+        - 赤割合 <= ``neighbor_clear`` かつ**帯探索が飽和していない** → 壁なし
+        - それ以外 → 未確定 (キーを入れない)
+
+        **飽和を「壁なし」にしないこと**が要点。遠い側の壁はフレーム端 (x=14.5) に
+        写るので、機体がその側へ 10mm ずれるだけで帯が枠外へ出て赤割合が 0 に落ちる
+        (:func:`best_roi_red_fraction` が飽和フラグを立てる)。これを「壁なし」と
+        書くと、見えなかった壁の向こうへ止まらずに突っ込む。
+
+        **飽和だけでは足りない**ので、遠い側の辺はさらに「帯の中心がまだフレーム内か」を
+        見る (:data:`NEIGHBOR_FAR_MIN_MARGIN_PX`)。帯が枠外へ**完全に**出ると赤割合は
+        0 に落ち、探索プロファイルは平坦になるので飽和フラグすら立たない — 見えない
+        ことと壁が無いことが区別できなくなる。機体の左右のずれは自セルの帯から測れる
+        (:meth:`lateral_shift_px`) ので、測れなければ「壁なし」とは言わない。
+
+        共有辺 (左の隣セルの RIGHT = 自セルの LEFT) は自セルの測定から埋める。
+        """
+        if shift_px is None:
+            shift_px = self.lateral_shift_px(measured)
+        out: dict[str, dict[str, bool]] = {}
+        for side in sides:
+            walls: dict[str, bool] = {}
+            shared = _BODY_EDGE_BY_QUARTER[(_QUARTER_BY_BODY_EDGE[side] + 2) % 4]
+            for edge, name in [(shared, side)] + [
+                (e, neighbor_slot(side, e)) for e in (FRONT, BACK, side)
+            ]:
+                if name not in measured:
+                    continue
+                fraction, _offset, saturated = measured[name]
+                if fraction >= self.cfg.threshold_for(name):
+                    walls[edge] = True
+                elif (fraction <= self.cfg.neighbor_clear and not saturated
+                      and (edge is not side or self._far_band_in_frame(name, shift_px))):
+                    walls[edge] = False
+            if walls:
+                out[side] = walls
+        return out
+
+    def _far_band_in_frame(self, name: str, shift_px: float | None) -> bool:
+        """遠い側の帯が、いまの機体のずれでもフレーム内に写っているか。"""
+        width = (self.cfg.frame_size or (0, 0))[0]
+        if shift_px is None or not width:
+            return False
+        roi = self.cfg.rois[name]
+        center = roi.x + roi.w / 2.0 + shift_px
+        return (NEIGHBOR_FAR_MIN_MARGIN_PX <= center
+                <= width - NEIGHBOR_FAR_MIN_MARGIN_PX)
+
+    def detect_neighbors(self, bgr: np.ndarray,
+                         sides: tuple[str, ...] = NEIGHBOR_SIDES
+                         ) -> dict[str, dict[str, bool]]:
+        """1 フレームから左右の隣セルの壁を読む (:meth:`neighbor_walls` の簡易版)。"""
+        return self.neighbor_walls(self.measure(bgr), sides)
 
 
 def band_positions(mask: np.ndarray, min_fraction: float = 0.25) -> dict[str, tuple[int, int]]:
@@ -495,7 +749,14 @@ PATH_BLOCK_MIN_FRACTION = 0.20
 
 
 def path_block_threshold(cfg: "WallDetectorConfig", edge: str) -> float:
-    """進路チェックのしきい値 (辺ごとの壁判定値と :data:`PATH_BLOCK_MIN_FRACTION` の大きい方)。"""
+    """進路チェックのしきい値 (辺ごとの壁判定値と :data:`PATH_BLOCK_MIN_FRACTION` の大きい方)。
+
+    **辺別しきい値をこの値より上げてはいけない。** 上げると進路確認まで一緒に鈍り、
+    「壁検出をすり抜けたものを進路確認が拾う」という二重の防護が一重になる。
+    #88 の探索ランで実際に起きた: BACK を 0.25 にしていたため、本物の壁の 0.24 が
+    検出も進路確認も 0.01 差ですり抜け、機体が壁を突き破った。
+    ``tests/test_wall_detect.py`` がこの関係を固定している。
+    """
     return max(cfg.threshold_for(edge), PATH_BLOCK_MIN_FRACTION)
 
 
@@ -512,6 +773,38 @@ def body_edge_for(direction: Direction, facing: Direction) -> str:
 
 # facing からの時計回りの 90° 単位のずれ -> 機体の辺
 _BODY_EDGE_BY_QUARTER = {0: FRONT, 1: RIGHT, 2: BACK, 3: LEFT}
+
+# 機体の辺 -> facing からの時計回りの 90° 単位のずれ (上の逆写像)
+_QUARTER_BY_BODY_EDGE = {edge: q for q, edge in _BODY_EDGE_BY_QUARTER.items()}
+
+
+def maze_direction_for(edge: str, facing: Direction) -> Direction:
+    """機体の辺 ``edge`` が向いている迷路方角を返す (:func:`body_edge_for` の逆)。
+
+    隣のセルを読むとき (#89) に「LEFT 側の隣」が迷路のどのセルかを決めるのに使う。
+    ``facing`` を北に固定すると FRONT→N / RIGHT→E / BACK→S / LEFT→W の定数写像になる。
+    """
+    return Direction((facing + _QUARTER_BY_BODY_EDGE[edge]) % 4)
+
+
+def path_check_slots(direction: Direction, facing: Direction, cells: int = 1,
+                     neighbors: bool = False) -> list[str]:
+    """進む前に「本当に開いているか」を確認できるスロット名を、進む順に返す。
+
+    1 セル目の出口は自セルの辺に写る (:func:`body_edge_for`)。2 セル目の出口は
+    **左右方向のときだけ**、隣セルの遠い側の帯として写る (#89)。前後方向の 2 セル目の
+    出口は 270mm 先で、フレームの外 (±212mm) なので確認できない。
+
+    確認できない分をここで返さないのは、**進路チェックの意味が「地図の確認」ではなく
+    「自機の姿勢の確認」**だから (#76)。見えないものは見えないと言い、通過するセルの
+    壁が観測済みであること (:attr:`~krilly.strategy.explorer.Explorer.known`) の方で
+    担保する。
+    """
+    edge = body_edge_for(direction, facing)
+    slots = [edge]
+    if cells >= 2 and neighbors and edge in NEIGHBOR_SIDES:
+        slots.append(neighbor_slot(edge, edge))
+    return slots
 
 
 def update_maze_walls(maze, x: int, y: int, walls_maze: dict[Direction, bool]) -> None:

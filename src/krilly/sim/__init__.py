@@ -23,13 +23,13 @@ from krilly.sim.generate import (
     serpentine_maze,
     walled_maze,
 )
-from krilly.sim.sense import sense
+from krilly.sim.sense import sense, sense_neighbors
 from krilly.sim.session import RunRecord, SessionResult, fit_search_overhead, simulate_session
 
 __all__ = [
     "MazeReport", "check_maze", "map_agrees", "wall_counts",
     "comb_maze", "diagonal_goal", "open_maze", "random_maze", "seal_goal",
     "serpentine_maze", "walled_maze",
-    "sense",
+    "sense", "sense_neighbors",
     "RunRecord", "SessionResult", "fit_search_overhead", "simulate_session",
 ]

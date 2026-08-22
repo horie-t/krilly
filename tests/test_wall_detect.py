@@ -7,6 +7,7 @@ from krilly.perception.cell_pose import cell_offset
 from krilly.perception.red_wall import red_mask
 from krilly.perception.wall_detect import (
     BACK,
+    NEIGHBOR_SIDES,
     BODY_DIRS,
     CALIBRATED_BANDS,
     CALIBRATED_GEOMETRIES,
@@ -23,8 +24,13 @@ from krilly.perception.wall_detect import (
     body_edge_for,
     body_walls_to_maze,
     calibrated_config,
+    calibrated_neighbor_rois,
+    maze_direction_for,
     maze_walls_to_body,
     calibrated_rois,
+    neighbor_slot,
+    neighbor_targets,
+    path_check_slots,
     default_rois,
     roi_red_fraction,
     update_maze_walls,
@@ -32,8 +38,10 @@ from krilly.perception.wall_detect import (
 from krilly.solver.maze import Direction, Maze
 
 
-def _blank_bgr(h=480, w=640):
-    return np.zeros((h, w, 3), dtype=np.uint8)
+def _blank_bgr(h=None, w=None):
+    """既定の撮影サイズの黒フレーム。**旧サイズのままにすると ROI が枠外に出る**
+    (BACK ROI は y 496-534 で、480 高のフレームには収まらない)。"""
+    return np.zeros((h or H, w or W, 3), dtype=np.uint8)
 
 
 def _fill_red(img, roi: Roi):
@@ -53,7 +61,7 @@ def test_calibrated_config():
     rois = calibrated_rois()
     assert set(rois) == set(BODY_DIRS)
     cfg = calibrated_config()
-    assert set(cfg.rois) == set(BODY_DIRS)
+    assert set(cfg.rois) == set(BODY_DIRS)      # 隣セルは明示しない限り足さない
     # 右壁が白飛びして彩度が落ちるため、赤しきい値は既定より緩い (#56)
     assert cfg.red.s_min <= 50 and cfg.red.v_min < 70
 
@@ -199,20 +207,29 @@ def test_update_maze_walls_sets_and_shares():
     assert m.has_wall(1, 1, Direction.S) is False
 
 
-def test_per_edge_threshold_override():
-    """辺別しきい値 (#65): BACK はケーブルの偽帯 (<=0.12) と実壁 (>=0.51) を分離する。"""
-    cfg = calibrated_config()
-    assert cfg.threshold_for(BACK) == pytest.approx(0.25)
-    for edge in (FRONT, LEFT, RIGHT):
-        assert cfg.threshold_for(edge) == pytest.approx(cfg.threshold)
-    # detect() が辺別しきい値を使うこと: BACK に薄い赤 (0.12 相当) を置いても壁なし
+def test_per_edge_threshold_override_mechanism_still_works():
+    """辺別しきい値の仕組み自体は残っていること (使う先が無くなっただけ)。
+
+    #65 では BACK だけ 0.25 にしてケーブルの偽帯 (<=0.12) と実壁を分けていた。
+    #88 でテープと全画素モードにより偽帯が消え、逆に**本物の壁 0.24 を取りこぼして
+    衝突した**ので 0.08 へ戻した。仕組みは将来また要るかもしれないので残す。
+    """
     rois = calibrated_rois()
     img = _blank_bgr()
     r = rois[BACK]
     img[r.y : r.y + int(r.h * 0.12) + 1, r.x : r.x + r.w] = (0, 0, 255)
-    det = WallDetector(WallDetectorConfig(rois=rois, threshold=0.08,
-                                          thresholds={BACK: 0.25}, search_px=0))
-    assert det.detect(img)[BACK] is False
+    lenient = WallDetector(WallDetectorConfig(rois=rois, threshold=0.08,
+                                              thresholds={BACK: 0.25}, search_px=0))
+    strict = WallDetector(WallDetectorConfig(rois=rois, threshold=0.08, search_px=0))
+    assert lenient.detect(img)[BACK] is False     # 上書きが効いている
+    assert strict.detect(img)[BACK] is True       # 上書きが無ければ拾う
+
+
+def test_calibrated_thresholds_are_uniform_now():
+    """校正済みの設定は全辺 0.08 であること (#88 で BACK の上書きを外した)。"""
+    cfg = calibrated_config()
+    for edge in BODY_DIRS:
+        assert cfg.threshold_for(edge) == pytest.approx(0.08), edge
 
 
 # --- 帯探索がフレーム端で頭打ちになる場合 (#21) -----------------------------
@@ -523,3 +540,184 @@ def test_camera_default_size_matches_the_calibrated_geometry():
 
     assert Camera.DEFAULT_SIZE == DEFAULT_FRAME_SIZE
     assert DEFAULT_FRAME_SIZE in CALIBRATED_GEOMETRIES
+
+
+# --- 二重の防護が一重にならないこと (#88 の衝突から) -------------------------
+def test_no_edge_threshold_exceeds_the_path_check_floor():
+    """辺別の壁判定しきい値が、進路確認の下限を超えないこと。
+
+    超えると ``path_block_threshold`` の ``max()`` が進路確認まで鈍らせ、
+    「壁検出をすり抜けたものを進路確認が拾う」という二重の防護が一重になる。
+    #88 の探索ランで実際に起きた: BACK を 0.25 にしていたため、本物の壁の 0.24 が
+    検出 (0.25) も進路確認 (max(0.25,0.20)=0.25) も 0.01 差ですり抜け、
+    機体が壁を突き破った。**辺別しきい値を上げたくなったら、まずここを読むこと。**
+    """
+    from krilly.perception.wall_detect import PATH_BLOCK_MIN_FRACTION
+
+    cfg = calibrated_config()
+    for edge in BODY_DIRS:
+        assert cfg.threshold_for(edge) <= PATH_BLOCK_MIN_FRACTION, edge
+
+
+def test_the_missed_wall_would_now_be_caught():
+    """#88 で見落とした 0.24 の壁が、検出でも進路確認でも拾えること (回帰)。"""
+    from krilly.perception.wall_detect import PATH_BLOCK_MIN_FRACTION, path_block_threshold
+
+    cfg = calibrated_config()
+    measured = 0.24                       # 実機で本物の後方の壁が出した値
+    assert measured >= cfg.threshold_for(BACK)          # 1. 壁として検出できる
+    assert measured >= path_block_threshold(cfg, BACK)  # 2. 進路確認でも止まる
+    assert PATH_BLOCK_MIN_FRACTION <= measured
+
+
+# --- 隣のセルを読む (#89) ---------------------------------------------------
+def _paint_wall(img, edge, cell=(0, 0), geometry=None, length_mm=180.0,
+                thickness_mm=13.5, shift_px=0.0):
+    """機体相対で ``cell`` のセルの ``edge`` 側に壁上面 (赤帯) を描く。
+
+    帯の位置は :class:`CameraGeometry` が持つ幾何そのもの (壁は 180mm 格子の上に
+    しか無い) なので、ROI の位置が正しければ必ず重なる。
+    """
+    g = geometry or CALIBRATED_GEOMETRY
+    cross, along = g.wall_center(edge, cell)
+    cross += shift_px                       # 機体がずれた分だけ帯も画像上を動く
+    vertical = edge in (LEFT, RIGHT)
+    thick = thickness_mm * g.scale(edge)
+    length = length_mm * (g.px_per_mm_y if vertical else g.px_per_mm_x)
+    x0, x1 = ((cross - thick / 2, cross + thick / 2) if vertical
+              else (along - length / 2, along + length / 2))
+    y0, y1 = ((along - length / 2, along + length / 2) if vertical
+              else (cross - thick / 2, cross + thick / 2))
+    h, w = img.shape[:2]
+    img[max(0, int(y0)):max(0, int(y1)), max(0, int(x0)):max(0, int(x1))] = (0, 0, 255)
+    return img
+
+
+def test_neighbor_rois_fit_in_the_frame():
+    """隣セルの ROI がフレームに収まること。
+
+    遠い側の壁はセル中心から 270mm で、960 幅では x=14.5 / 935.5 とほぼ端に写る。
+    自セルと同じ 27mm 厚では枠から食み出すので薄くしてある。食み出すと ROI の
+    一部が評価できず、赤割合が下がって壁を見落とす。
+    """
+    g = CALIBRATED_GEOMETRY
+    for name, roi in calibrated_neighbor_rois().items():
+        assert g.contains(roi), f"{name}: {roi} がフレーム {g.width}x{g.height} に収まらない"
+
+
+def test_neighbor_rois_sit_on_the_180mm_lattice():
+    """隣セルの ROI が壁の格子位置に乗っていること。"""
+    g = CALIBRATED_GEOMETRY
+    # 左の隣セルの遠い側 = 自セル中心から 270mm (= 90 + 180)
+    assert g.wall_center(LEFT, (0, 1))[0] == pytest.approx(g.band_center(LEFT, 270.0))
+    # 左の隣セルの手前側 = 自セルの LEFT の帯 (共有辺)
+    assert g.wall_center(RIGHT, (0, 1))[0] == pytest.approx(g.band_center(LEFT))
+    # 隣セルの前後の帯は自セルと同じ行で、180mm 横へずれる
+    cross, along = g.wall_center(FRONT, (0, 1))
+    assert cross == pytest.approx(g.band_center(FRONT))
+    assert along == pytest.approx(g.cell_center[0] - 180.0 * g.px_per_mm_x)
+
+
+def test_neighbor_targets_skip_the_shared_wall():
+    """共有辺には ROI を作らない (自セルの測定を使う)。"""
+    names = set(neighbor_targets())
+    assert names == {neighbor_slot(side, edge)
+                     for side in NEIGHBOR_SIDES for edge in (FRONT, BACK, side)}
+    assert neighbor_slot(LEFT, RIGHT) not in names
+
+
+def test_neighbor_walls_reads_all_four_walls_of_the_side_cell():
+    det = WallDetector(calibrated_config(neighbors=True))
+    img = _blank_bgr()
+    _paint_wall(img, LEFT)                 # 自セルの左壁 = 左の隣セルの右壁 (共有)
+    _paint_wall(img, LEFT, (0, 1))         # 左の隣セルの遠い側
+    _paint_wall(img, FRONT, (0, 1))        # 左の隣セルの前の壁
+    walls = det.detect_neighbors(img)
+    assert walls[LEFT] == {RIGHT: True, FRONT: True, BACK: False, LEFT: True}
+    # 右側は壁を描いていないので 4 辺とも「壁なし」で確定する
+    assert walls[RIGHT] == {LEFT: False, FRONT: False, BACK: False, RIGHT: False}
+
+
+def test_neighbor_walls_call_the_far_wall_unknown_when_the_band_left_the_frame():
+    """帯が枠外へ出た辺は「壁なし」にせず**未確定**にする (#89)。
+
+    遠い側の帯はフレーム端 (x=14.5) に写るので、機体が右へ 15mm ずれるだけで完全に
+    枠外へ出る。そのとき赤割合は 0 に落ち、探索プロファイルは平坦になるので飽和
+    フラグも立たない — **見えないことと壁が無いことの区別がつかない**。これを
+    「壁なし」と書くと、見えなかった壁の向こうへ止まらずに突っ込む。
+    """
+    det = WallDetector(calibrated_config(neighbors=True))
+    img = _blank_bgr()
+    shift = -26.0                            # 機体が右へ約 15mm ずれた状態
+    _paint_wall(img, LEFT, shift_px=shift)   # 自セルの左壁 (ここからずれ量が分かる)
+    _paint_wall(img, RIGHT, shift_px=shift)
+    _paint_wall(img, RIGHT, (0, -1), shift_px=shift)   # 右の遠い壁は写る
+    walls = det.detect_neighbors(img)
+    assert det.lateral_shift_px(det.measure(img)) == pytest.approx(shift, abs=3)
+    assert LEFT not in walls[LEFT], "枠外へ出た帯を「壁なし」と断定してはいけない"
+    assert walls[RIGHT][RIGHT] is True       # 反対側は写っているので判定できる
+
+
+def test_neighbor_walls_need_the_lateral_offset_to_clear_the_far_wall():
+    """左右のずれが測れないときは遠い側を「壁なし」と言わない (#89)。
+
+    ずれが測れないのは自セルの左右に壁が無いときで、そのとき遠い側の帯が見えないのが
+    「壁が無い」からなのか「枠外へ出た」からなのか判断できない。
+    """
+    det = WallDetector(calibrated_config(neighbors=True))
+    img = _blank_bgr()
+    _paint_wall(img, FRONT, (0, 1))          # 左の隣セルの前壁だけ (左右のずれは測れない)
+    walls = det.detect_neighbors(img)
+    assert LEFT not in walls[LEFT] and RIGHT not in walls[RIGHT]
+    assert walls[LEFT][FRONT] is True        # 前後の帯は画角の中央寄りなので判定できる
+
+
+def test_neighbor_walls_clear_the_far_wall_when_the_machine_is_near_the_centre():
+    """ずれが小さければ、遠い側も「壁なし」と言い切れる。"""
+    det = WallDetector(calibrated_config(neighbors=True))
+    img = _blank_bgr()
+    _paint_wall(img, LEFT, shift_px=4.0)     # 機体が 2mm ほど左 (帯は右へ) ずれただけ
+    _paint_wall(img, RIGHT, shift_px=4.0)
+    walls = det.detect_neighbors(img)
+    assert walls[LEFT] == {RIGHT: True, FRONT: False, BACK: False, LEFT: False}
+
+
+def test_neighbor_walls_are_absent_when_the_rois_are_not_configured():
+    """隣セルの ROI が無い設定では、隣の 3 辺は返らない (共有辺だけ埋まる)。"""
+    det = WallDetector(calibrated_config())
+    walls = det.detect_neighbors(_blank_bgr())
+    assert set(walls[LEFT]) == {RIGHT}
+
+
+def test_maze_direction_for_is_the_inverse_of_body_edge_for():
+    for facing in Direction:
+        for d in Direction:
+            assert maze_direction_for(body_edge_for(d, facing), facing) is d
+
+
+def test_path_check_slots_only_promises_what_the_camera_can_see():
+    # 左右方向なら 2 セル目の出口も隣セルの遠い帯として見える
+    assert path_check_slots(Direction.E, Direction.N, 2, True) == [
+        RIGHT, neighbor_slot(RIGHT, RIGHT)]
+    # 前後方向の 2 セル目は 270mm 先で画角の外
+    assert path_check_slots(Direction.N, Direction.N, 2, True) == [FRONT]
+    # 隣を読まない設定では 1 セル目だけ
+    assert path_check_slots(Direction.E, Direction.N, 2, False) == [RIGHT]
+    assert path_check_slots(Direction.W, Direction.N, 1, True) == [LEFT]
+
+
+def test_no_threshold_exceeds_the_path_check_minimum_for_neighbors():
+    """隣セルのしきい値も進路チェックの下限を超えないこと (#88 の二重防護)。"""
+    from krilly.perception.wall_detect import PATH_BLOCK_MIN_FRACTION
+
+    cfg = calibrated_config(neighbors=True)
+    for name in cfg.rois:
+        assert cfg.threshold_for(name) <= PATH_BLOCK_MIN_FRACTION
+
+
+def test_band_shift_threshold_matches_the_position_fix_threshold():
+    """帯のずれを信じる下限は、位置補正の下限と同じ根拠・同じ値であること。"""
+    from krilly.perception.cell_pose import OFFSET_MIN_FRACTION
+    from krilly.perception.wall_detect import BAND_SHIFT_MIN_FRACTION
+
+    assert BAND_SHIFT_MIN_FRACTION == OFFSET_MIN_FRACTION

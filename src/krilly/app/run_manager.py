@@ -141,10 +141,16 @@ class RunManager:
     def _route(
         self, start: tuple[int, int], goals: list[tuple[int, int]], facing: Direction
     ) -> list[Leg] | None:
-        """観測済みセルだけを通る最小コスト経路。繋がっていなければ None。"""
+        """観測済みセルだけを通る最小コスト経路。繋がっていなければ None。
+
+        通してよいのは **4 壁が観測で確定したセル** (:attr:`Explorer.known`)。
+        通ったセルは必ずそこに入るので ``visited`` はその部分集合だが、隣のセルを
+        読めば (#89) **入っていないセルも確定する**ので、そのぶん経路の選択肢が増える。
+        未確定のセルを最速で走るのは、見ていない壁に突っ込むということ。
+        """
         path = shortest_path(
             self.explorer.maze, start, goals,
-            start_facing=facing, known=self.explorer.visited, cost=self.cost,
+            start_facing=facing, known=self.explorer.known, cost=self.cost,
         )
         return path_to_legs(path) if path else None
 
