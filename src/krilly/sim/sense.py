@@ -11,7 +11,14 @@
 
 from __future__ import annotations
 
-from krilly.perception.wall_detect import BACK, FRONT, LEFT, RIGHT
+from krilly.perception.wall_detect import (
+    BACK,
+    FRONT,
+    LEFT,
+    NEIGHBOR_SIDES,
+    RIGHT,
+    maze_direction_for,
+)
 from krilly.solver.maze import Direction, Maze
 
 
@@ -28,3 +35,25 @@ def sense(truth: Maze, cell: tuple[int, int], facing: Direction) -> dict[str, bo
         LEFT: truth.has_wall(x, y, Direction((facing - 1) % 4)),
         RIGHT: truth.has_wall(x, y, Direction((facing + 1) % 4)),
     }
+
+
+def sense_neighbors(
+    truth: Maze, cell: tuple[int, int], facing: Direction,
+    sides: tuple[str, ...] = NEIGHBOR_SIDES,
+) -> dict[str, dict[str, bool]]:
+    """左右の隣セルの壁 (#89)。:meth:`Explorer.observe` の ``neighbors`` にそのまま渡せる。
+
+    全画素モード (#88) では左右の隣セルの奥の壁まで画角に入るので、そのセルの 4 壁が
+    すべて分かる。迷路の外にはみ出す側は返さない。
+
+    **実機との違いに注意**: 実機の
+    :meth:`~krilly.perception.wall_detect.WallDetector.neighbor_walls` は確信の
+    持てない辺を落とすので、辺が欠けた辞書が返る。ここは常に 4 辺そろう「上限の
+    性能」なので、停止回数の削減もここで出る値が上限になる。
+    """
+    out: dict[str, dict[str, bool]] = {}
+    for side in sides:
+        x, y = truth.neighbor(*cell, maze_direction_for(side, facing))
+        if truth.in_bounds(x, y):
+            out[side] = sense(truth, (x, y), facing)
+    return out

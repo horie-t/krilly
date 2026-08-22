@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 
 from krilly.app.run_manager import RunPhase
-from krilly.perception.wall_detect import BACK, FRONT, LEFT, RIGHT, body_walls_to_maze
+from krilly.perception.wall_detect import (
+    BACK,
+    FRONT,
+    LEFT,
+    RIGHT,
+    body_walls_to_maze,
+)
+from krilly.sim.sense import sense_neighbors
 from krilly.sim import (
     check_maze,
     comb_maze,
@@ -285,8 +292,8 @@ def test_records_line_up_with_the_phases():
 def test_fit_search_overhead_recovers_what_it_is_given():
     truth = random_maze(10, seed=8)
     base = simulate_session(truth)
-    steps = base.search.cells
-    measured = base.search.duration_s + 0.37 * steps
+    stops = base.search.legs          # カメラを見るのは止まったときだけ (#89)
+    measured = base.search.duration_s + 0.37 * stops
     assert fit_search_overhead(truth, measured) == pytest.approx(0.37)
 
 
@@ -390,3 +397,54 @@ def test_contest_mazes_are_harder_than_generated_ones():
     fake_walls = statistics.median(wall_counts(m).inner for m in fake)
     assert abs(real_walls - fake_walls) < 40      # 壁の枚数は近いのに
     assert real_sol > 3 * fake_sol               # 解の長さは 3 倍以上違う
+
+
+# --- 左右の隣セルを読む (#89) -----------------------------------------------
+def test_sense_neighbors_returns_the_side_cells_as_they_would_look():
+    truth = open_maze(5)
+    truth.set_wall(1, 0, Direction.N)
+    truth.set_wall(2, 0, Direction.E)
+    walls = sense_neighbors(truth, (1, 0), Direction.N)
+    assert walls[LEFT] == sense(truth, (0, 0), Direction.N)
+    assert walls[RIGHT] == sense(truth, (2, 0), Direction.N)
+    assert walls[RIGHT][RIGHT] is True          # (2,0) の東壁
+
+
+def test_sense_neighbors_skips_cells_outside_the_maze():
+    truth = open_maze(5)
+    walls = sense_neighbors(truth, (0, 2), Direction.N)
+    assert set(walls) == {RIGHT}                # 西は迷路の外
+
+
+def test_sense_neighbors_follows_the_facing():
+    """旋回する走り方では「左右の隣」も機体の向きで変わる。"""
+    truth = open_maze(5)
+    walls = sense_neighbors(truth, (2, 2), Direction.E)
+    assert set(walls) == {LEFT, RIGHT}          # 東を向くと左=北・右=南の隣
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+def test_neighbour_sensing_cuts_stops_without_breaking_the_map(seed):
+    """隣を読んで既知セルを通過しても、地図は真の迷路と一致したままであること。"""
+    truth = random_maze(12, seed=seed)
+    base = simulate_session(truth)
+    fast = simulate_session(truth, neighbor_sensing=True, max_leg_cells=2)
+    assert fast.reached_goal and not fast.mismatches
+    assert fast.search.legs < base.search.legs           # 停止回数が減る
+    assert fast.search.legs <= fast.search.cells         # 1 停止で 1 セル以上進む
+
+
+def test_neighbour_sensing_needs_the_pass_through_to_save_stops():
+    """隣を読むだけでは停止は減らない (通過を許して初めて減る)。"""
+    truth = random_maze(12, seed=3)
+    looked = simulate_session(truth, neighbor_sensing=True, max_leg_cells=1)
+    assert looked.search.legs == looked.search.cells
+
+
+def test_pass_through_never_enters_a_cell_with_unobserved_walls():
+    """止まらずに通過したセルも 4 壁が観測済みであること (見ていない壁へ突っ込まない)。"""
+    truth = random_maze(12, seed=5)
+    result = simulate_session(truth, neighbor_sensing=True, max_leg_cells=4)
+    ex = result.explorer
+    assert ex.visited <= ex.known
+    assert not map_agrees(truth, ex.maze, ex.known)      # 確定した壁は真の迷路と一致
