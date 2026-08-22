@@ -31,6 +31,9 @@ N フレーム撮り、辺ごとの赤割合と帯のずれ、そこから出る
     python -m scripts.wall_detect --out walls.png --thickness 70 --span 0.5
     # 位置測定の再現性 (実機・静止のまま 10 フレーム)
     python -m scripts.wall_detect --measure 10
+    # 左右の隣セルまで読めているか (#89)。紫の枠は「未確定」
+    python -m scripts.wall_detect --image shot.png --neighbors --out /tmp/walls.png
+    python -m scripts.wall_detect --measure 5 --neighbors
 
 ROI (front/back/left/right) を自機・ケーブル・支柱の外へ、壁が写る辺に合わせて
 --thickness / --span / --threshold で調整する。カメラ取付の回転に応じて画像の
@@ -57,20 +60,25 @@ from krilly.perception.cell_pose import (
 from krilly.perception.red_wall import RedDetectorConfig, red_mask, red_mask_parts
 from krilly.perception.wall_detect import (
     BACK,
+    BODY_DIRS,
     CALIBRATED_RED,
     FRONT,
     LEFT,
     RIGHT,
     WallDetector,
     WallDetectorConfig,
+    WallTarget,
     calibrated_config,
+    calibrated_neighbor_rois,
     calibrated_rois,
+    neighbor_targets,
 )
 
 log = get_logger("krilly.wall_detect")
 
 
-def measure_repeatability(count: int, interval: float, save_prefix: str | None) -> None:
+def measure_repeatability(count: int, interval: float, save_prefix: str | None,
+                          neighbors: bool = False) -> None:
     """静止したまま N フレーム撮り、位置測定のばらつきを表にする (#21)。
 
     帯探索は ROI を ±40px スライドして赤割合が最大の位置を採るので、本物の帯の
@@ -82,7 +90,7 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
 
     from krilly.hal.camera import Camera
 
-    det = WallDetector(calibrated_config())
+    det = WallDetector(calibrated_config(neighbors=neighbors))
     yaw_cfg = calibrated_axis_yaw_config()
     px_per_mm = {FRONT: PX_PER_MM_Y, BACK: PX_PER_MM_Y,
                  LEFT: PX_PER_MM_X, RIGHT: PX_PER_MM_X}
@@ -114,6 +122,13 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None) 
             )
             log.info("      軸角 %s (+ = 迷路の軸より CCW)",
                      "測定不能" if yaw is None else "%+.3f°" % yaw.angle_deg)
+            if neighbors:
+                nb = det.neighbor_walls(measured)
+                log.info("      隣セル %s | 4 壁が確定 %s",
+                         " ".join("%s %.2f%s" % (k, v[0], "!" if v[2] else "")
+                                  for k, v in measured.items() if k not in edges),
+                         ", ".join("%s(%d/4)" % (side, len(w))
+                                   for side, w in sorted(nb.items())) or "なし")
 
     def spread(values: list[float]) -> str:
         if not values:
@@ -194,6 +209,8 @@ def main() -> None:
     p.add_argument("--v-min", type=int, default=CALIBRATED_RED.v_min, help="赤HSVのV下限")
     p.add_argument("--h2-lo", type=int, default=CALIBRATED_RED.h2_lo,
                    help="赤とみなす色相の上側の帯の下限 (#65 で 160->140 に広げた)")
+    p.add_argument("--neighbors", action="store_true",
+                   help="左右の隣セルを読む ROI も重ねる (#89)")
     p.add_argument("--hue-split", action="store_true",
                    help="赤マスクを色相の 2 帯に分けて塗り分ける (異物の切り分け用)")
     p.add_argument("--zoom", default=None, metavar="X0,X1,Y0,Y1",
@@ -202,7 +219,8 @@ def main() -> None:
 
     setup_logging()
     if args.measure:
-        measure_repeatability(args.measure, args.interval, args.save_prefix)
+        measure_repeatability(args.measure, args.interval, args.save_prefix,
+                              args.neighbors)
         return
     if args.image:
         frame = cv2.imread(args.image)
@@ -225,26 +243,54 @@ def main() -> None:
         hue_split(frame, red, args.out, args.zoom)
         return
     rois = calibrated_rois()  # 実機校正済みの各辺 ROI
-    det = WallDetector(WallDetectorConfig(rois=rois, threshold=args.threshold, red=red))
+    slots = {e: WallTarget(e) for e in rois}
+    if args.neighbors:
+        rois = rois | calibrated_neighbor_rois()
+        slots = slots | neighbor_targets()
+    # frame_size は**読み込んだ画像そのもの**にする。ROI は 960x720 の校正から作るので
+    # 違うサイズの画像では帯から外れるが、調整用に眺めること自体は許したい。ここで
+    # 実サイズを入れておくと、遠い側の帯が枠内かの判定 (#89) だけは効く。
+    det = WallDetector(WallDetectorConfig(rois=rois, slots=slots, red=red,
+                                          threshold=args.threshold,
+                                          frame_size=(frame.shape[1], frame.shape[0])))
 
-    fractions = det.red_fractions(frame)
-    walls = det.detect(frame)
+    measured = det.measure(frame)
+    neighbors = det.neighbor_walls(measured) if args.neighbors else {}
+
+    def verdict(name: str) -> tuple[str, tuple[int, int, int]]:
+        """そのスロットの判定と色。隣セルは 3 値なので「未確定」がある (#89)。"""
+        fraction = measured[name][0]
+        if name in BODY_DIRS:
+            present = fraction >= det.cfg.threshold_for(name)
+            return ("WALL", (0, 255, 0)) if present else ("-", (0, 200, 255))
+        target = det.cfg.target(name)
+        side = name.split(":")[0]
+        walls = neighbors.get(side, {})
+        if target.edge not in walls:                    # 未確定 (紫)
+            return ("?", (255, 0, 255))
+        return ("WALL", (0, 255, 0)) if walls[target.edge] else ("-", (0, 200, 255))
 
     # 可視化: 検出した赤を薄く重ね、ROI 矩形とラベルを描く
     out = frame.copy()
     mask = red_mask(frame, red)
     out[mask > 0] = (0.4 * out[mask > 0] + np.array([0, 0, 255]) * 0.6).astype(np.uint8)
     for d, roi in rois.items():
-        present = walls[d]
-        color = (0, 255, 0) if present else (0, 200, 255)  # 緑=壁あり / 黄=なし
+        label, color = verdict(d)
         cv2.rectangle(out, (roi.x, roi.y), (roi.x + roi.w, roi.y + roi.h), color, 2)
-        cv2.putText(out, f"{d} {fractions[d]:.2f} {'WALL' if present else '-'}",
+        cv2.putText(out, f"{d} {measured[d][0]:.2f} {label}",
                     (roi.x + 2, max(roi.y + 16, 16)), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, color, 1, cv2.LINE_AA)
 
     cv2.imwrite(args.out, out)
     for d in rois:
-        log.info("%-6s red=%.3f -> %s", d, fractions[d], "壁あり" if walls[d] else "なし")
+        label, _color = verdict(d)
+        log.info("%-12s red=%.3f ずれ=%+3dpx%s -> %s", d, measured[d][0], measured[d][1],
+                 " 飽和" if measured[d][2] else "    ",
+                 {"WALL": "壁あり", "-": "なし", "?": "未確定"}[label])
+    if args.neighbors:
+        log.info("隣セルの 4 壁が確定した側: %s",
+                 ", ".join(f"{side}({len(w)}/4)" for side, w in sorted(neighbors.items()))
+                 or "なし")
     log.info("注釈画像を保存: %s", args.out)
 
 
