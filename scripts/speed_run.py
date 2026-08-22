@@ -88,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-heading-residual", type=float, default=2.5,
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true", help="前進前の前方確認を無効化")
+    p.add_argument("--chain-legs", type=int, default=1,
+                   help="最速・復帰で止まらずに繋ぐ区間の本数の上限 (#80)。"
+                        "1 = 区間ごとに停止 (従来)。繋ぐと位置補正の間隔も伸びる")
     p.add_argument("--no-neighbors", action="store_true",
                    help="左右の隣セルを読まない (#89 を切る。1 セルずつ止まって進む)")
     p.add_argument("--pass-cells", type=int, default=None,
@@ -118,6 +121,9 @@ def main() -> None:
              maze.size, maze.size, maze.goal_cells(), args.time_limit, args.max_runs)
     log.info("探索の観測: 自セルの 4 壁%s / 1 動作で最大 %d セル",
              " + 左右の隣セル (#89)" if neighbors else "", pass_cells)
+    log.info("最速・復帰: 1 動作で最大 %d 区間%s",
+             args.chain_legs,
+             " (止まらずに曲がる #80)" if args.chain_legs > 1 else " (区間ごとに停止)")
     log.info("チューニング: %s", tuning.describe())
     for warning in check_limits(tuning, kin):
         log.warning("%s", warning)
@@ -318,28 +324,53 @@ def main() -> None:
             return None
 
         # -- Leg 列の実行 (復帰・最速: 複数セルを 1 動作で) ---------------------
+        def leg_chunks(legs: list[Leg]) -> list[list[Leg]]:
+            """止まらずに走る区間のまとまりに切る (#80)。
+
+            旋回する走り方では繋がない (区間の間に旋回が入るので必ず止まる)。
+            まとまりの**先頭でしか位置補正もカメラの進路確認もできない**ので、
+            長くするほど誤差の蓄積に賭けることになる。
+            """
+            size = 1 if args.turn_in_place else max(1, args.chain_legs)
+            return [legs[i:i + size] for i in range(0, len(legs), size)]
+
         def execute_legs(
             legs: list[Leg], cell: tuple[int, int], facing: Direction, label: str
         ) -> tuple[tuple[int, int], Direction] | None:
             log.info("%s: %s", label, describe_legs(legs))
-            for leg in legs:
-                axis = quarter_turns(facing, leg.direction)
+            for chunk in leg_chunks(legs):
+                head = chunk[0]
                 if args.turn_in_place:
-                    facing = turn_to(facing, leg.direction)
-                    axis = 0
+                    facing = turn_to(facing, head.direction)
                 correct_at(cell, facing)
-                if not path_is_clear(leg.direction, facing, leg.cells):
+                # 進路確認は**いま居るセルから見える範囲だけ**。まとまりの 2 本目以降は
+                # 画角の外なので、観測済みの地図に賭けることになる (#89 と同じ扱い)。
+                if not path_is_clear(head.direction, facing, head.cells):
                     return None
-                motion.start_move_cells(leg.cells, axis)
+                motion.start_path_cells([
+                    (leg.cells, 0 if args.turn_in_place
+                     else quarter_turns(facing, leg.direction))
+                    for leg in chunk
+                ])
+                cells = sum(leg.cells for leg in chunk)
                 # 実測の集計は**進行軸で分ける**。旋回レスでは南北が機体の前後軸、
                 # 東西が左右軸になり、所要時間が違いうる (時間定数の校正に要る)。
-                axis_name = "ns" if leg.direction in (Direction.N, Direction.S) else "ew"
-                if not move_was_clean(f"{leg.direction.name}へ{leg.cells}",
-                                      timeout=max(args.timeout, leg.cells * 3.0),
-                                      kind=f"{axis_name}{leg.cells}"):
+                # 繋いだ動作は軸が混ざるので別の名前で数える。
+                if len(chunk) > 1:
+                    kind = f"chain{len(chunk)}"
+                else:
+                    axis_name = ("ns" if head.direction in (Direction.N, Direction.S)
+                                 else "ew")
+                    kind = f"{axis_name}{head.cells}"
+                if not move_was_clean(
+                        "->".join(f"{leg.direction.name}へ{leg.cells}" for leg in chunk),
+                        timeout=max(args.timeout, cells * 3.0), kind=kind):
                     return None
-                for _ in range(leg.cells):
-                    cell = maze.neighbor(*cell, leg.direction)
+                if len(chunk) > 1:
+                    log.info("  止まらずに曲がった回数 %d", motion.corners)
+                for leg in chunk:
+                    for _ in range(leg.cells):
+                        cell = maze.neighbor(*cell, leg.direction)
             correct_at(cell, facing)
             return (cell, facing)
 

@@ -34,6 +34,7 @@ from enum import Enum
 
 from krilly.config import MazeConfig, load_maze_config
 from krilly.localization.estimator import DeadReckoning
+from krilly.motion.corner import blend_distance_m
 from krilly.motion.velocity_driver import VelocityDriver
 
 
@@ -174,6 +175,9 @@ class CellMotion:
         self._axis_k = 0              # 主軸の向き: 基準方位からの 90° 単位 (0=前/+1=左/-1=右/2=後)
         self._settle_elapsed = 0.0    # 指令が 0 になってからの経過 [s]
         self._retry_remaining = 0.0   # やり直しを決めた時点の残量 (不感帯の調整用)
+        self._queue: list[tuple[float, int]] = []   # 予約した区間 (距離, 軸) (#80)
+        self._blending = False        # 直前の区間の残りをエンベロープで詰めている最中
+        self._corners = 0             # 止まらずに曲がった回数 (ログ・検証用)
 
     @property
     def retries(self) -> int:
@@ -223,11 +227,18 @@ class CellMotion:
         旋回して前進するより速い。実測で旋回は走行時間の半分を占めており、
         ホロノミック機ではそれを丸ごと省ける。
         """
+        self._queue.clear()
+        self._blending = False
+        self._corners = 0
+        self._extend_reference(distance_m, axis_quarter_turns)
         self._axis_k = axis_quarter_turns
-        axis = self._axis_phi
+        self._begin(Kind.FORWARD)
+
+    def _extend_reference(self, distance_m: float, axis_quarter_turns: int) -> None:
+        """基準点を「基準方位から k×90° の向きへ ``distance_m``」だけ進める。"""
+        axis = _wrap_angle(self.phi_ref + axis_quarter_turns * math.pi / 2.0)
         self.x_ref += distance_m * math.cos(axis)
         self.y_ref += distance_m * math.sin(axis)
-        self._begin(Kind.FORWARD)
 
     def start_move_cells(self, cells: float = 1.0, axis_quarter_turns: int = 0) -> None:
         """``cells`` セル分 (既定 1 セル = 180mm) 平行移動する。"""
@@ -241,6 +252,85 @@ class CellMotion:
         """``cells`` セル分 (既定 1 セル = 180mm) 前進する。"""
         self.start_move(cells * self.cell_pitch_m, 0)
 
+    def queue_move(self, distance_m: float, axis_quarter_turns: int = 0) -> None:
+        """次の区間を**予約**する。前の区間の残量がブレンド距離を切ったら、
+        止まらずにそのまま次の区間へ移る (#80)。
+
+        進行中でなければその場で開始する。予約が残っている間 :attr:`done` は False
+        なので、呼び出し側のループは「1 つの動作」として回せばよい。
+
+        丸められるのは**直交する向き**への変更だけ。同じ向きなら区間が延びるだけ
+        (``start_move_cells(2)`` と同じ) で、**反転 (180°) は丸めない** — 速度を
+        逆向きにするには一度 0 を通るしかないので、素直に停止してから始める。
+        """
+        self._queue.append((distance_m, axis_quarter_turns))
+        if self._phase in (Phase.IDLE, Phase.DONE):
+            self._start_queued()
+
+    def queue_move_cells(self, cells: float = 1.0, axis_quarter_turns: int = 0) -> None:
+        """``cells`` セル分の区間を予約する。"""
+        self.queue_move(cells * self.cell_pitch_m, axis_quarter_turns)
+
+    def start_path(self, legs) -> None:
+        """区間の列 ``[(距離[m], 軸), ...]`` を 1 つの動作として走る (#80)。"""
+        legs = list(legs)
+        if not legs:
+            return
+        distance, axis = legs[0]
+        self.start_move(distance, axis)
+        for distance, axis in legs[1:]:
+            self.queue_move(distance, axis)
+
+    def start_path_cells(self, legs) -> None:
+        """``[(セル数, 軸), ...]`` 版の :meth:`start_path`。"""
+        self.start_path([(c * self.cell_pitch_m, k) for c, k in legs])
+
+    def _start_queued(self) -> None:
+        """予約の先頭を、止まった状態から普通の区間として開始する。"""
+        distance, axis = self._queue.pop(0)
+        self._extend_reference(distance, axis)
+        self._axis_k = axis
+        self._blending = False
+        self._begin(Kind.FORWARD)
+
+    @property
+    def blend_distance(self) -> float:
+        """コーナーを丸め始める残量 [m] (:func:`~krilly.motion.corner.blend_distance_m`)。"""
+        return blend_distance_m(self.cfg.v_max, self._decel)
+
+    @property
+    def queued(self) -> int:
+        """まだ実行していない予約区間の本数。"""
+        return len(self._queue)
+
+    @property
+    def corners(self) -> int:
+        """止まらずに曲がった回数 (直前の ``start_*`` からの累計)。"""
+        return self._corners
+
+    def _maybe_blend(self) -> None:
+        """残量がブレンド距離を切ったら、止まらずに次の区間へ移る (#80)。
+
+        切り替えた瞬間、**古い区間の残りは新しい主軸から見た「直交ずれ」になる**
+        (軸は直交しているので厳密に一致する)。それをエンベロープで詰めれば、
+        片方が v→0・もう片方が 0→v となってコーナーが丸まる。切り替え時点の残量が
+        ちょうどブレンド距離なので、古い軸のエンベロープが出す速度は ``v_max`` で、
+        **指令は継ぎ目で連続**になる。
+        """
+        if not self._queue or self._kind is not Kind.FORWARD or self._retries:
+            return
+        distance, axis = self._queue[0]
+        if (axis - self._axis_k) % 4 == 2:
+            return                     # 反転は丸められない (停止してから始める)
+        if abs(self._axis_remaining()) > self.blend_distance:
+            return
+        self._queue.pop(0)
+        self._extend_reference(distance, axis)
+        if axis != self._axis_k:
+            self._axis_k = axis
+            self._blending = True
+            self._corners += 1
+
     def start_turn(self, delta_rad: float) -> None:
         """基準方位を ``delta_rad`` 回して、その絶対方位まで旋回する (+ = CCW)。
 
@@ -251,6 +341,9 @@ class CellMotion:
         self.phi_ref = _wrap_angle(self.phi_ref + delta_rad)
         self._angle_remaining = delta_rad + heading_error
         self._axis_k = 0
+        self._queue.clear()
+        self._blending = False
+        self._corners = 0
         self._begin(Kind.TURN)
 
     def start_turn_left(self, quarter_turns: int = 1) -> None:
@@ -271,6 +364,8 @@ class CellMotion:
         """進行中のプリミティブを打ち切って停止指令にする (基準姿勢は触らない)。"""
         self._kind = None
         self._phase = Phase.IDLE
+        self._queue.clear()
+        self._blending = False
         self.driver.stop()
 
     # -- 状態 ---------------------------------------------------------------
@@ -284,8 +379,12 @@ class CellMotion:
 
     @property
     def done(self) -> bool:
-        """プリミティブが完了 (または未開始) なら True。"""
-        return self._phase in (Phase.DONE, Phase.IDLE)
+        """プリミティブが完了 (または未開始) なら True。
+
+        **予約した区間が残っている間は False** (#80)。呼び出し側から見ると
+        「区間の列ぜんぶで 1 つの動作」になる。
+        """
+        return self._phase in (Phase.DONE, Phase.IDLE) and not self._queue
 
     @property
     def remaining(self) -> float:
@@ -372,11 +471,19 @@ class CellMotion:
         cfg = self.cfg
         retry = self._retries > 0
         if self._kind is Kind.FORWARD:
+            self._maybe_blend()
             v_max = cfg.retry_v_max if retry else cfg.v_max
             remaining = self._axis_remaining()
             v_along = _envelope(remaining, v_max, self._decel, dt)
             v_along = self._with_floor(v_along, cfg.min_v, remaining)
-            v_cross = _clamp(cfg.k_cross * self._axis_cross(), cfg.v_cross_max)
+            cross = self._axis_cross()
+            if self._blending and abs(cross) > cfg.pos_tol_m:
+                # コーナー中: 直交成分は「保持すべきずれ」ではなく「詰めるべき残量」。
+                # 下限速度は掛けない (詰め切れなかった分は下の P 保持が引き取る)。
+                v_cross = _envelope(cross, v_max, self._decel, dt)
+            else:
+                self._blending = False
+                v_cross = _clamp(cfg.k_cross * cross, cfg.v_cross_max)
             # 主軸フレームの (主軸, 直交) を車体フレームの (vx, vy) へ回す。
             # k=0 では (vx, vy) = (v_along, v_cross) に厳密に還元される。
             c, s = self._axis_unit()
@@ -439,6 +546,8 @@ class CellMotion:
                 self._retries += 1
                 self._settle_elapsed = 0.0
                 self._phase = Phase.RUN
+            elif self._queue:
+                self._start_queued()   # 丸められなかった区間 (反転など) をここから
             else:
                 self._phase = Phase.DONE
 

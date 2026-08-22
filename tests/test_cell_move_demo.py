@@ -9,7 +9,13 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.velocity_driver import VelocityDriver
-from scripts.cell_move_demo import Move, parse_seq, world_components, wrapped_deg
+from scripts.cell_move_demo import (
+    Move,
+    chain_groups,
+    parse_seq,
+    world_components,
+    wrapped_deg,
+)
 
 ROBOT = RobotConfig(
     wheel_diameter_m=0.048,
@@ -128,3 +134,21 @@ def test_world_components_drops_unmeasured_axes():
     assert world_components(0.01, None, 0.0) == {"前後": 0.01}
     assert world_components(None, 0.01, 0.0) == {"左右": 0.01}
     assert world_components(None, None, 0.0) == {}
+
+
+# --- 止まらずに繋ぐグループ分け (#80) ---------------------------------------
+def test_chain_groups_joins_consecutive_translations():
+    groups = chain_groups(parse_seq("F,H,F,G"))
+    assert len(groups) == 1 and len(groups[0]) == 4
+
+
+def test_chain_groups_breaks_at_a_turn():
+    """旋回は繋げない (機体が回っている間は進めない)。"""
+    groups = chain_groups(parse_seq("F,F,L,H,G"))
+    assert [[m.token for m in g] for g in groups] == [["F", "F"], ["L"], ["H", "G"]]
+
+
+def test_only_translations_have_an_axis():
+    assert Move("F").axis == 0 and Move("B").axis == 2
+    assert Move("H").axis == +1 and Move("G").axis == -1
+    assert Move("L").axis is None and Move("R").axis is None

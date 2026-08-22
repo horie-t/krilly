@@ -28,6 +28,11 @@ from dataclasses import dataclass, replace
 
 from krilly.hal.l6470 import L6470Profile, fault_flags
 from krilly.kinematics.kiwi import KiwiKinematics
+from krilly.motion.corner import (
+    blend_distance_m,
+    corridor_clearance_m,
+    min_post_clearance_m,
+)
 from krilly.motion.cell_motion import CellMotionConfig
 from krilly.motion.velocity_driver import RampLimits
 
@@ -151,10 +156,11 @@ def peak_wheel_value(
     )
 
 
-def check_limits(tuning: TuningProfile, kin: KiwiKinematics | None = None) -> list[str]:
+def check_limits(tuning: TuningProfile, kin: KiwiKinematics | None = None,
+                 maze_pitch_m: float = 0.180) -> list[str]:
     """設定の整合性を実際の運動学で検算し、警告文のリストを返す (空なら健全)。
 
-    見るのは 3 点:
+    見るのは 4 点:
 
     1. 指令速度のピークが L6470 の MAX_SPEED を超えないか (超えると頭打ちになり、
        3 輪の速度比が崩れて経路が曲がる)。
@@ -162,9 +168,10 @@ def check_limits(tuning: TuningProfile, kin: KiwiKinematics | None = None) -> li
        減速が指令より遅れて停止位置が行き過ぎる)。
     3. 減速エンベロープがランプ上限を超えていないか (:class:`CellMotion` 側で
        丸められるので危険ではないが、指定した値が効かない)。
+    4. 止まらない方向転換 (#80) のコーナーが幾何に収まるか。
     """
     kin = kin or KiwiKinematics()
-    m = tuning.motion
+    m = m_cfg = tuning.motion
     warnings: list[str] = []
 
     # 1. 速度のピーク: 前進 / **横移動** / 旋回のうち最大。
@@ -210,6 +217,27 @@ def check_limits(tuning: TuningProfile, kin: KiwiKinematics | None = None) -> li
             "--angular-decel %.1f は --angular-accel %.1f に丸められる。"
             % (m.angular_decel_radps2, tuning.limits.max_angular_accel_radps2)
         )
+    # 4. 止まらない方向転換 (#80): コーナーの膨らみが幾何に収まるか。
+    #    ブレンド距離は v^2/(2a) なので、**速度を上げるか減速度を下げると二乗で伸びる**。
+    #    半セルを超えると機体が前のセルの廊下に居るうちに横へ動き出すことになり、
+    #    「膨らむ先は開いている象限」という前提そのものが崩れる。
+    blend = blend_distance_m(m_cfg.v_max, min(m_cfg.decel_mps2,
+                                              tuning.limits.max_linear_accel_mps2))
+    half_cell = maze_pitch_m / 2.0
+    if blend > half_cell:
+        warnings.append(
+            "コーナーのブレンド距離 %.0fmm が半セル %.0fmm を超える。前のセルの廊下に"
+            "居るうちに横へ動き出す (--v を下げるか --decel を上げること)。"
+            % (blend * 1000, half_cell * 1000)
+        )
+    elif min_post_clearance_m(blend, maze_pitch_m) < corridor_clearance_m(maze_pitch_m):
+        warnings.append(
+            "コーナーの柱との余裕 %.0fmm が廊下の余裕 %.0fmm を下回る "
+            "(ブレンド距離 %.0fmm)。丸め方が通行の制約になる。"
+            % (min_post_clearance_m(blend, maze_pitch_m) * 1000,
+               corridor_clearance_m(maze_pitch_m) * 1000, blend * 1000)
+        )
+
     return warnings
 
 
