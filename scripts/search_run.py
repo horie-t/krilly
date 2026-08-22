@@ -120,9 +120,10 @@ def main() -> None:
     maze = Maze(args.size) if args.size else Maze.from_config(maze_cfg)
     maze.set_outer_walls()
     explorer = Explorer(maze, holonomic=not args.turn_in_place)
-    detector = WallDetector(calibrated_config(neighbors=args.neighbors))
+    neighbors = not args.no_neighbors
+    detector = WallDetector(calibrated_config(neighbors=neighbors))
     # 隣を読めるときだけ「進行先が既知なら通過」が効く (既知でなければ結局止まる)。
-    pass_cells = args.pass_cells if args.pass_cells else (2 if args.neighbors else 1)
+    pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
 
@@ -131,7 +132,7 @@ def main() -> None:
              "旋回して走る (従来モード)" if args.turn_in_place
              else "旋回せず平行移動する (#76)")
     log.info("観測: 自セルの 4 壁%s / 1 動作で最大 %d セル",
-             " + 左右の隣セル (#89)" if args.neighbors else "", pass_cells)
+             " + 左右の隣セル (#89)" if neighbors else "", pass_cells)
     log.info("チューニング: %s", tuning.describe())
     for warning in check_limits(tuning, kin):
         log.warning("%s", warning)
@@ -224,8 +225,8 @@ def main() -> None:
             frame = camera.capture()
             measured = detector.measure(frame)
             walls_body = {d: measured[d][0] >= detector.cfg.threshold_for(d) for d in BODY_DIRS}
-            neighbors = detector.neighbor_walls(measured) if args.neighbors else None
-            walls_maze = explorer.observe(walls_body, neighbors)
+            walls_nb = detector.neighbor_walls(measured) if neighbors else None
+            walls_maze = explorer.observe(walls_body, walls_nb)
             if args.save_frames:
                 import cv2
 
@@ -233,14 +234,14 @@ def main() -> None:
             log.info("  壁 赤割合 %s -> 迷路 %s",
                      {d: f"{measured[d][0]:.2f}" for d in BODY_DIRS},
                      {d.name: p for d, p in sorted(walls_maze.items())})
-            if neighbors is not None:
+            if walls_nb is not None:
                 # 隣セルは 3 値 (壁 / 壁なし / 未確定)。未確定の辺は辞書に入らないので、
                 # 4 辺そろわなかった側はそのまま「既知セル」にならず、通過対象から外れる。
                 log.info("  隣セル 赤割合 %s -> %s",
                          {k: f"{v[0]:.2f}" for k, v in measured.items()
                           if k not in BODY_DIRS},
                          {side: {e: w for e, w in sorted(walls.items())}
-                          for side, walls in sorted(neighbors.items())})
+                          for side, walls in sorted(walls_nb.items())})
             # 迷路軸に対する方位を測って絶対補正する。ジャイロの基準は「走行開始時の
             # 機体の向き」なので、放置すると走行のたびに迷路軸から傾いていく。
             if not args.no_correct:
@@ -303,7 +304,7 @@ def main() -> None:
             if args.no_front_check:
                 return True
             slots = path_check_slots(direction, facing or explorer.facing, cells,
-                                     args.neighbors)
+                                     neighbors)
             measured = detector.measure(camera.capture())
             for i, slot in enumerate(slots):
                 fraction = measured[slot][0]

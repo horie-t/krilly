@@ -86,11 +86,10 @@ def main() -> None:
     p.add_argument("--max-heading-residual", type=float, default=2.5,
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true", help="前進前の前方確認を無効化")
-    p.add_argument("--neighbors", action="store_true",
-                   help="左右の隣セルの壁も読む (#89)。進行先が既知なら止まらずに通過する")
+    p.add_argument("--no-neighbors", action="store_true",
+                   help="左右の隣セルを読まない (#89 を切る。1 セルずつ止まって進む)")
     p.add_argument("--pass-cells", type=int, default=None,
-                   help="探索で止まらずに通過してよいセル数の上限 "
-                        "(既定 --neighbors なら 2、それ以外 1)")
+                   help="探索で止まらずに通過してよいセル数の上限 (既定 2、隣を読まないなら 1)")
     p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
     args = p.parse_args()
 
@@ -104,14 +103,15 @@ def main() -> None:
     manager = RunManager(explorer, time_limit_s=args.time_limit, max_runs=args.max_runs,
                          holonomic=not args.turn_in_place,
                          cost=LEGACY_COST if args.turn_in_place else DEFAULT_COST)
-    detector = WallDetector(calibrated_config(neighbors=args.neighbors))
-    pass_cells = args.pass_cells if args.pass_cells else (2 if args.neighbors else 1)
+    neighbors = not args.no_neighbors
+    detector = WallDetector(calibrated_config(neighbors=neighbors))
+    pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
     log.info("迷路 %dx%d / ゴール %s / 持ち時間 %.0fs / 最大 %d 走",
              maze.size, maze.size, maze.goal_cells(), args.time_limit, args.max_runs)
     log.info("探索の観測: 自セルの 4 壁%s / 1 動作で最大 %d セル",
-             " + 左右の隣セル (#89)" if args.neighbors else "", pass_cells)
+             " + 左右の隣セル (#89)" if neighbors else "", pass_cells)
     log.info("チューニング: %s", tuning.describe())
     for warning in check_limits(tuning, kin):
         log.warning("%s", warning)
@@ -232,7 +232,7 @@ def main() -> None:
                 return True
             measured = detector.measure(capture())
             for i, slot in enumerate(path_check_slots(direction, facing, cells,
-                                                      args.neighbors)):
+                                                      neighbors)):
                 fraction = measured[slot][0]
                 threshold = path_block_threshold(detector.cfg, slot)
                 if fraction >= threshold:
@@ -279,7 +279,7 @@ def main() -> None:
                 walls_body = {d: measured[d][0] >= detector.cfg.threshold_for(d)
                               for d in BODY_DIRS}
                 explorer.observe(walls_body,
-                                 detector.neighbor_walls(measured) if args.neighbors
+                                 detector.neighbor_walls(measured) if neighbors
                                  else None)
                 correct_at(explorer.cell, explorer.facing, frame=frame,
                            measured=measured)

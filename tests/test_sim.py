@@ -427,8 +427,8 @@ def test_sense_neighbors_follows_the_facing():
 def test_neighbour_sensing_cuts_stops_without_breaking_the_map(seed):
     """隣を読んで既知セルを通過しても、地図は真の迷路と一致したままであること。"""
     truth = random_maze(12, seed=seed)
-    base = simulate_session(truth)
-    fast = simulate_session(truth, neighbor_sensing=True, max_leg_cells=2)
+    base = simulate_session(truth, neighbor_sensing=False, max_leg_cells=1)
+    fast = simulate_session(truth)          # 既定 = 実機の既定 (隣を読む / 2 セル通過)
     assert fast.reached_goal and not fast.mismatches
     assert fast.search.legs < base.search.legs           # 停止回数が減る
     assert fast.search.legs <= fast.search.cells         # 1 停止で 1 セル以上進む

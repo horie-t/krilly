@@ -112,8 +112,8 @@ def simulate_session(
     search_step_overhead_s: float = 0.0,
     actual_scale: float = 1.0,
     max_steps: int = 5000,
-    neighbor_sensing: bool = False,
-    max_leg_cells: int = 1,
+    neighbor_sensing: bool = True,
+    max_leg_cells: int = 2,
 ) -> SessionResult:
     """真の迷路 ``truth`` を相手に 7 分 5 走 (クラシック競技規定) のセッションを丸ごと回す。
 
