@@ -32,8 +32,10 @@ from krilly.perception.wall_detect import (
 from krilly.solver.maze import Direction, Maze
 
 
-def _blank_bgr(h=480, w=640):
-    return np.zeros((h, w, 3), dtype=np.uint8)
+def _blank_bgr(h=None, w=None):
+    """既定の撮影サイズの黒フレーム。**旧サイズのままにすると ROI が枠外に出る**
+    (BACK ROI は y 496-534 で、480 高のフレームには収まらない)。"""
+    return np.zeros((h or H, w or W, 3), dtype=np.uint8)
 
 
 def _fill_red(img, roi: Roi):
@@ -199,20 +201,29 @@ def test_update_maze_walls_sets_and_shares():
     assert m.has_wall(1, 1, Direction.S) is False
 
 
-def test_per_edge_threshold_override():
-    """辺別しきい値 (#65): BACK はケーブルの偽帯 (<=0.12) と実壁 (>=0.51) を分離する。"""
-    cfg = calibrated_config()
-    assert cfg.threshold_for(BACK) == pytest.approx(0.25)
-    for edge in (FRONT, LEFT, RIGHT):
-        assert cfg.threshold_for(edge) == pytest.approx(cfg.threshold)
-    # detect() が辺別しきい値を使うこと: BACK に薄い赤 (0.12 相当) を置いても壁なし
+def test_per_edge_threshold_override_mechanism_still_works():
+    """辺別しきい値の仕組み自体は残っていること (使う先が無くなっただけ)。
+
+    #65 では BACK だけ 0.25 にしてケーブルの偽帯 (<=0.12) と実壁を分けていた。
+    #88 でテープと全画素モードにより偽帯が消え、逆に**本物の壁 0.24 を取りこぼして
+    衝突した**ので 0.08 へ戻した。仕組みは将来また要るかもしれないので残す。
+    """
     rois = calibrated_rois()
     img = _blank_bgr()
     r = rois[BACK]
     img[r.y : r.y + int(r.h * 0.12) + 1, r.x : r.x + r.w] = (0, 0, 255)
-    det = WallDetector(WallDetectorConfig(rois=rois, threshold=0.08,
-                                          thresholds={BACK: 0.25}, search_px=0))
-    assert det.detect(img)[BACK] is False
+    lenient = WallDetector(WallDetectorConfig(rois=rois, threshold=0.08,
+                                              thresholds={BACK: 0.25}, search_px=0))
+    strict = WallDetector(WallDetectorConfig(rois=rois, threshold=0.08, search_px=0))
+    assert lenient.detect(img)[BACK] is False     # 上書きが効いている
+    assert strict.detect(img)[BACK] is True       # 上書きが無ければ拾う
+
+
+def test_calibrated_thresholds_are_uniform_now():
+    """校正済みの設定は全辺 0.08 であること (#88 で BACK の上書きを外した)。"""
+    cfg = calibrated_config()
+    for edge in BODY_DIRS:
+        assert cfg.threshold_for(edge) == pytest.approx(0.08), edge
 
 
 # --- 帯探索がフレーム端で頭打ちになる場合 (#21) -----------------------------
@@ -523,3 +534,31 @@ def test_camera_default_size_matches_the_calibrated_geometry():
 
     assert Camera.DEFAULT_SIZE == DEFAULT_FRAME_SIZE
     assert DEFAULT_FRAME_SIZE in CALIBRATED_GEOMETRIES
+
+
+# --- 二重の防護が一重にならないこと (#88 の衝突から) -------------------------
+def test_no_edge_threshold_exceeds_the_path_check_floor():
+    """辺別の壁判定しきい値が、進路確認の下限を超えないこと。
+
+    超えると ``path_block_threshold`` の ``max()`` が進路確認まで鈍らせ、
+    「壁検出をすり抜けたものを進路確認が拾う」という二重の防護が一重になる。
+    #88 の探索ランで実際に起きた: BACK を 0.25 にしていたため、本物の壁の 0.24 が
+    検出 (0.25) も進路確認 (max(0.25,0.20)=0.25) も 0.01 差ですり抜け、
+    機体が壁を突き破った。**辺別しきい値を上げたくなったら、まずここを読むこと。**
+    """
+    from krilly.perception.wall_detect import PATH_BLOCK_MIN_FRACTION
+
+    cfg = calibrated_config()
+    for edge in BODY_DIRS:
+        assert cfg.threshold_for(edge) <= PATH_BLOCK_MIN_FRACTION, edge
+
+
+def test_the_missed_wall_would_now_be_caught():
+    """#88 で見落とした 0.24 の壁が、検出でも進路確認でも拾えること (回帰)。"""
+    from krilly.perception.wall_detect import PATH_BLOCK_MIN_FRACTION, path_block_threshold
+
+    cfg = calibrated_config()
+    measured = 0.24                       # 実機で本物の後方の壁が出した値
+    assert measured >= cfg.threshold_for(BACK)          # 1. 壁として検出できる
+    assert measured >= path_block_threshold(cfg, BACK)  # 2. 進路確認でも止まる
+    assert PATH_BLOCK_MIN_FRACTION <= measured

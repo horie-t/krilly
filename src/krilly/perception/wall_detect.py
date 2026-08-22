@@ -268,7 +268,16 @@ def calibrated_config(threshold: float = 0.08,
     - left : 開 max 0.036 / 壁 min 0.344
     - right: 開 max 0.016 / 壁 min 0.379
 
-    BACK だけ 0.25 に上げる (ケーブルと実壁の完全分離)。他は 0.08 のまま。
+    #65 当時は BACK だけ 0.25 に上げていた (ケーブルの偽帯 0.09-0.12 と分けるため)。
+    **これは #88 で 0.08 へ下げた。** 理由が 2 つ:
+
+    1. ケーブルに全長テープを貼り、全画素モードへ移った後の実測で、**壁なしの BACK は
+       0.00** になった (偽帯が消えた)。0.25 を保つ理由が無くなった
+    2. **0.25 のままで実際に壁を突き破った。** 5x5 の探索ランで本物の後方の壁が
+       0.24 と出て、検出 (0.25) も進路確認 (max(0.25, 0.20) = 0.25) も**同時に**
+       すり抜けた。辺別しきい値を上げると進路確認まで鈍るので、二重の防護が
+       一重になっていた
+
     **壁の見落とし (衝突) の方が偽陽性 (回り道) より高くつく**ので、迷ったら
     下げる側に振ること。
 
@@ -278,7 +287,7 @@ def calibrated_config(threshold: float = 0.08,
     geometry = geometry_for(size)
     return WallDetectorConfig(
         rois=calibrated_rois(geometry), threshold=threshold,
-        thresholds={BACK: 0.25}, red=CALIBRATED_RED, frame_size=size,
+        red=CALIBRATED_RED, frame_size=size,
     )
 
 
@@ -495,7 +504,14 @@ PATH_BLOCK_MIN_FRACTION = 0.20
 
 
 def path_block_threshold(cfg: "WallDetectorConfig", edge: str) -> float:
-    """進路チェックのしきい値 (辺ごとの壁判定値と :data:`PATH_BLOCK_MIN_FRACTION` の大きい方)。"""
+    """進路チェックのしきい値 (辺ごとの壁判定値と :data:`PATH_BLOCK_MIN_FRACTION` の大きい方)。
+
+    **辺別しきい値をこの値より上げてはいけない。** 上げると進路確認まで一緒に鈍り、
+    「壁検出をすり抜けたものを進路確認が拾う」という二重の防護が一重になる。
+    #88 の探索ランで実際に起きた: BACK を 0.25 にしていたため、本物の壁の 0.24 が
+    検出も進路確認も 0.01 差ですり抜け、機体が壁を突き破った。
+    ``tests/test_wall_detect.py`` がこの関係を固定している。
+    """
     return max(cfg.threshold_for(edge), PATH_BLOCK_MIN_FRACTION)
 
 
