@@ -97,6 +97,10 @@ TOKENS = {
 #: U は Q2 (180°) の別名で、これは元からの表記。
 ALIASES = {"H": ("A", 1), "G": ("D", 1), "L": ("Q", 1), "R": ("E", 1), "U": ("Q", 2)}
 
+#: 置き方の傾きの目安 [deg]。これを超えたら警告する (#80)。1° の傾きで 8 セル
+#: 進むと 25mm 横へ流れるので、動作どうしを比べる測定では致命的な交絡になる。
+PLACEMENT_TILT_WARN_DEG = 1.0
+
 #: その場旋回のトークン (回数を角度で書くのに使う)。
 TURN_TOKENS = ("Q", "E")
 
@@ -392,6 +396,17 @@ def main() -> None:
             if apply_axis_heading(est, yaw_before.angle_rad):
                 log.info("迷路軸へ整列: 推定方位を %+.3f° 補正 (基準との差を次の動作で詰める)",
                          math.degrees(est.phi - motion.reference[2]))
+                # 傾いて置くと、機体は走りながらその分を回して直す。回っている間は
+                # 進行方向も傾いているので **横流れが位置の測定に乗る**。動作どうしを
+                # 比べたいときは、この値を揃えないと比較にならない (#80 の実測で
+                # 2.3° の置き方が 4 区間ぶんの誤差に化けた疑いがある)。
+                tilt = abs(yaw_before.angle_deg)
+                if tilt > PLACEMENT_TILT_WARN_DEG:
+                    log.warning(
+                        "置き方が迷路軸から %+.2f° 傾いている (目安 %.1f° 以内)。"
+                        "走りながら直すぶんの横流れが位置の実測に乗る。"
+                        "動作を比べる測定なら置き直すこと。",
+                        yaw_before.angle_deg, PLACEMENT_TILT_WARN_DEG)
             else:
                 log.warning("迷路軸への整列を見送った (補正量が大きすぎる)")
         pose_before = measure_pose("before")
