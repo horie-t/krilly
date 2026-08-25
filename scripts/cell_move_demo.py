@@ -12,20 +12,21 @@
 **理想からの行き過ぎ量 (+ = CCW 側)** になるので、方位の真値として使える。
 
 例:
-    python -m scripts.cell_move_demo                       # 既定 F,L,F,R (L字)
-    python -m scripts.cell_move_demo --seq F,F,L,F         # 任意のシーケンス
+    python -m scripts.cell_move_demo                       # 既定 F,Q,F,E (L字)
+    python -m scripts.cell_move_demo --seq F,F,Q,F         # 任意のシーケンス
     python -m scripts.cell_move_demo --seq U --no-imu      # 180°ターンをオドメトリのみで
     python -m scripts.cell_move_demo --v 0.08 --omega 1.0  # ゆっくり
-    python -m scripts.cell_move_demo --seq L --camera-yaw   # 90°ターンの方位をカメラで実測
+    python -m scripts.cell_move_demo --seq Q --camera-yaw   # 90°ターンの方位をカメラで実測
     python -m scripts.cell_move_demo --seq F4               # 4セルを 1 動作で (速度調整用)
-    python -m scripts.cell_move_demo --seq F,H,F,G --chain --camera-pose --camera-yaw
+    python -m scripts.cell_move_demo --seq F,A,F,D --chain --camera-pose --camera-yaw
                                                            # 止まらずに曲がる (#80) の実測
     python -m scripts.cell_move_demo --v 0.24 --accel 0.8 --decel 0.8 --max-speed 600
 
-シーケンスのトークン:
-  平行移動 (機体は回らない): F=前 / B=後 / H=左へ / G=右へ
-  その場旋回 (機体が回る):   L=左90° / R=右90° / U=180°
-数字を付けると 1 動作でその回数ぶん動く (``F4``=4セルを 1 動作、``L2``=180°)。
+シーケンスのトークン (**WASD 系**。``scripts/teleop.py`` の w/s・a/d・q/e と同じ配置):
+  平行移動 (機体は回らない): F=前 / B=後 / A=左へ / D=右へ
+  その場旋回 (機体が回る):   Q=左90° / E=右90° / U=180°
+数字を付けると 1 動作でその回数ぶん動く (``F4``=4セルを 1 動作、``Q2``=180°)。
+旧表記 **H/G/L/R も別名として通る** (H=A / G=D / L=Q / R=E)。
 
 ``F,F,F,F`` (4 動作) と ``F4`` (1 動作) の比較が、距離誤差がスケール由来か
 動作あたりの固定オーバーラン由来かの切り分けになる (#21)。
@@ -34,7 +35,7 @@
 回らないので、``wheel_diameter_m`` は実質 W1/W2 の実効径になっている。横移動を決めるのは W0 で、
 1x15 の通路を使い、機体の置き方だけ変えて (東向き=前進 / 北向き=横移動) 同じ距離を比べる:
     python -m scripts.cell_move_demo --seq F15 --camera-pose --camera-yaw   # 東向きに置く
-    python -m scripts.cell_move_demo --seq H15 --camera-pose --camera-yaw   # 北向きに置く
+    python -m scripts.cell_move_demo --seq A15 --camera-pose --camera-yaw   # 北向きに置く
 
 配線: L6470×3 デイジーチェーン + BNO055 (I2C 0x28)。座標系 +x前 / +y左 / +omega=CCW。
 """
@@ -70,22 +71,38 @@ from krilly.perception.wall_detect import WallDetector, calibrated_config
 
 log = get_logger("krilly.cell_move_demo")
 
+# トークンは **WASD 系の配置**に合わせてある。平行移動 (機体は回らない) が
+# F/B/A/D、その場旋回が Q/E。ゲームのキー配置と ``scripts/teleop.py`` (w/s・a/d・q/e)
+# のどちらとも一致する。
+#
+# **旋回と平行移動に別のキー群を割り当てる**のは恣意的な選択ではない。初期の FPS は
+# 矢印キーの左右が「旋回」で、ストレイフ (平行移動) は修飾キー扱いだった。その後
+# 向きはマウスが受け持つようになり、キーボードは平行移動専用になって A/D に落ち着いた。
+# この機体は #76 以降、主役が平行移動で旋回は例外 (ジャイロ校正など) なので、
+# 平行移動に一等地の A/D を、旋回に Q/E を当てるのが機体の性質とも合う。
 TOKENS = {
     # 平行移動 (機体は回らない、#76)。数字は 1 動作で進むセル数。
     "F": ("%dセル前進", lambda m, n: m.start_move_cells(n, 0)),
     "B": ("%dセル後退", lambda m, n: m.start_move_cells(n, 2)),
-    "H": ("左へ%dセル", lambda m, n: m.start_move_cells(n, +1)),
-    "G": ("右へ%dセル", lambda m, n: m.start_move_cells(n, -1)),
+    "A": ("左へ%dセル", lambda m, n: m.start_move_cells(n, +1)),
+    "D": ("右へ%dセル", lambda m, n: m.start_move_cells(n, -1)),
     # その場旋回 (機体が回る)
-    "L": ("左%d°", lambda m, n: m.start_turn_left(n)),
-    "R": ("右%d°", lambda m, n: m.start_turn_right(n)),
+    "Q": ("左%d°", lambda m, n: m.start_turn_left(n)),
+    "E": ("右%d°", lambda m, n: m.start_turn_right(n)),
 }
-# U は L2 (180°) の別名。過去のシーケンス表記との互換のため残す。
-ALIASES = {"U": ("L", 2)}
+#: 旧トークン -> (新トークン, 回数の倍率)。**過去のシーケンス表記をそのまま動かす**
+#: ための別名で、``--seq F,H,B,G`` や ``--seq L,L,L,L`` は今も同じ意味で通る。
+#: H/G は「L/R が旋回で埋まっていたので余った文字を当てた」もので由来が無く、
+#: G が H の左隣なのに右を意味するなど覚え方も無かったため、名前だけ差し替えた。
+#: U は Q2 (180°) の別名で、これは元からの表記。
+ALIASES = {"H": ("A", 1), "G": ("D", 1), "L": ("Q", 1), "R": ("E", 1), "U": ("Q", 2)}
+
+#: その場旋回のトークン (回数を角度で書くのに使う)。
+TURN_TOKENS = ("Q", "E")
 
 #: 平行移動のトークン -> 基準方位からの軸 (90°単位)。旋回のトークンは入らない。
 #: ``--chain`` で区間を繋ぐとき、どの軸へ予約するかを引くのに使う (#80)。
-TRANSLATION_AXIS = {"F": 0, "B": 2, "H": +1, "G": -1}
+TRANSLATION_AXIS = {"F": 0, "B": 2, "A": +1, "D": -1}
 
 
 @dataclass(frozen=True)
@@ -98,8 +115,8 @@ class Move:
     @property
     def label(self) -> str:
         fmt = TOKENS[self.token][0]
-        # 回転は角度で書いた方が読みやすい (L2 -> 左180°)
-        return fmt % (self.count * 90 if self.token in ("L", "R") else self.count)
+        # 回転は角度で書いた方が読みやすい (Q2 -> 左180°)
+        return fmt % (self.count * 90 if self.token in TURN_TOKENS else self.count)
 
     @property
     def axis(self) -> int | None:
@@ -197,7 +214,9 @@ def main() -> None:
     p.add_argument("--devices", type=int, default=3, help="連結台数")
     p.add_argument("--bus", type=int, default=0, help="SPI バス (既定 0)")
     p.add_argument("--device", type=int, default=0, help="SPI デバイス/CE (既定 0)")
-    p.add_argument("--seq", default="F,L,F,R", help="動作シーケンス: 平行移動 F/B/H/G + 旋回 L/R/U、数字で回数 (例 F15, H4,G4)")
+    p.add_argument("--seq", default="F,Q,F,E",
+                   help="動作シーケンス: 平行移動 F/B/A/D (前/後/左/右) + 旋回 Q/E "
+                        "(左/右)、数字で回数 (例 F15, A4,D4)。旧表記 H/G/L/R/U も通る")
     add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.5, help="プリミティブ間の停止秒数")
