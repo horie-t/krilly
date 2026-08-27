@@ -46,9 +46,11 @@ import argparse
 import contextlib
 import math
 import re
+import statistics
 import time
 from dataclasses import dataclass
 
+from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
@@ -230,6 +232,10 @@ def main() -> None:
     p.add_argument("--gyro-sign", type=float, default=1.0, help="ジャイロz符号 (+1/-1)")
     p.add_argument("--gyro-scale", type=float, default=None,
                    help="ジャイロzスケール補正 (既定 robot.yaml の gyro_scale_z)")
+    p.add_argument("--gyro-sample", type=float, default=0.0, metavar="秒",
+                   help="ジャイロを別スレッドでこの間隔で連続サンプルし、1 tick 分を"
+                        "積分して使う (#81)。0 = 従来どおり tick ごとに 1 回だけ読む。"
+                        "BNO055 は NDOF で 100Hz 出力なので 0.005 が目安")
     p.add_argument("--timeout", type=float, default=10.0, help="1プリミティブの上限秒数")
     p.add_argument("--camera-yaw", action="store_true",
                    help="動作前後の方位をカメラで実測してジャイロ推定と突き合わせる")
@@ -291,11 +297,50 @@ def main() -> None:
         est = DeadReckoning(kin)
         motion = CellMotion(driver, est, config=tuning.motion)
 
+        # #81: BNO055 は NDOF モードで 100Hz 出力しているのに、制御ループは 20ms に
+        # 1 回しか読んでいない = チップが出すサンプルの半分を捨てている。捨てた側と
+        # 読んだ側の統計が同じなら平均は正しいが、動きの過渡が制御周期と同期していると
+        # 偏る。--gyro-sample を与えると別スレッドで連続サンプルして 1 tick 分を積分する。
+        sampler = None
+        if imu is not None and args.gyro_sample > 0.0:
+            sampler = stack.enter_context(GyroSampler(
+                imu, bias_dps=bias_z, scale=gyro_scale, sign=args.gyro_sign,
+                interval_s=args.gyro_sample))
+            log.info("ジャイロを %.0fms 間隔で連続サンプルする (#81 の切り分け)",
+                     args.gyro_sample * 1000)
+        spread = []          # tick ごとの角速度の振れ [deg/s] (速い成分があるかの証拠)
+        point_rad = [0.0]    # 従来の点サンプルで積んだ回転 [rad] (比較用)
+
         def gyro_rate() -> float | None:
             """バイアス減算・符号・スケール補正を掛けた角速度 [rad/s]。"""
             if imu is None:
                 return None
-            return math.radians(imu.gyro[2] - bias_z) * args.gyro_sign * gyro_scale
+            if sampler is None:
+                return math.radians(imu.gyro[2] - bias_z) * args.gyro_sign * gyro_scale
+            sample = sampler.take()
+            if sample.count:
+                spread.append(sample.spread_dps)
+            return sample.rate_rad_s
+
+        def drain_gyro() -> None:
+            """溜まっている積分を捨てる (#81)。
+
+            カメラの測定などで長い間 ``take`` されないと、次の 1 回が数秒ぶんの
+            平均になる。それを 20ms の tick に掛けると回転量が薄まるので、
+            動作を始める前に区切り直す。
+            """
+            if sampler is not None:
+                sampler.take()
+
+        def accumulate_point_sample(dt: float) -> None:
+            """**従来の点サンプル**での回転を並行して積む (#81)。
+
+            制御 tick の瞬間の 1 サンプルだけを見て ``rate * dt`` を積むのが従来の
+            実装。連続積分 (推定器が使っている方) と**同じ走行で**比べられるので、
+            走行ごとのばらつきが入らない。両者が食い違えば、原因はサンプリング。
+            """
+            if sampler is not None:
+                point_rad[0] += sampler.last_rate_rad_s * dt
 
         def measure_yaw(tag: str) -> AxisYaw | None:
             """カメラで軸角を実測する (複数フレームの中央値)。"""
@@ -339,6 +384,7 @@ def main() -> None:
 
         def run_primitive(label: str, timeout: float) -> None:
             """完了 (または timeout) までループを回す。update は純計算なので寝るのはここ。"""
+            drain_gyro()
             t0 = time.monotonic()
             last = t0
             while True:
@@ -346,6 +392,7 @@ def main() -> None:
                 now = time.monotonic()
                 dt = now - last
                 last = now
+                accumulate_point_sample(dt)
                 if motion.update(dt, gyro_rate=gyro_rate()):
                     break
                 if now - t0 > timeout:
@@ -372,11 +419,13 @@ def main() -> None:
 
         def coast(seconds: float) -> None:
             """停止指令のまま update を回して減速しきる (推定も継続)。"""
+            drain_gyro()
             last = time.monotonic()
             deadline = last + seconds
             while time.monotonic() < deadline:
                 time.sleep(args.dt)
                 now = time.monotonic(); dt = now - last; last = now
+                accumulate_point_sample(dt)
                 motion.update(dt, gyro_rate=gyro_rate())
 
         log.info("シーケンス %s を実行 (1セル=%.3fm)",
@@ -451,6 +500,16 @@ def main() -> None:
             if missing:
                 log.info("  %s 方向は動作の前後どちらかで測れなかったので比較しない",
                          "/".join(missing))
+        if sampler is not None:
+            # **振れが小さいのに方位がずれるなら、原因はサンプリングではない。**
+            # 制御周期の中で大きく振れているなら、20ms に 1 回の点サンプルは
+            # 当たり外れの大きい賭けになっている。
+            log.info("ジャイロのサンプル: %d 個 / %d tick (1 tick あたり %.1f 個) / "
+                     "tick 内の角速度の振れ 中央値 %.2f°/s 最大 %.2f°/s",
+                     sampler.total_samples, sampler.intervals,
+                     sampler.total_samples / max(1, sampler.intervals),
+                     statistics.median(spread) if spread else 0.0,
+                     max(spread) if spread else 0.0)
         if yaw_before is not None and yaw_after is not None:
             # 軸は 90° 周期なので、ジャイロ側の総回転も同じ折り返しで比べる
             gyro_delta = fold_deg(math.degrees(est.phi - phi_before))
@@ -460,6 +519,16 @@ def main() -> None:
                 " / 差 %+.3f°  (+ = CCW 側へ行き過ぎ)",
                 cam_delta, gyro_delta, cam_delta - gyro_delta,
             )
+            if sampler is not None:
+                # **同じ走行での A/B** (#81)。推定器が使ったのは連続積分の方。
+                # 点サンプルだけがカメラから離れているなら、原因はサンプリング。
+                point_delta = fold_deg(math.degrees(point_rad[0]))
+                log.info(
+                    "  同じ走行での比較: 連続積分 %+.3f° (カメラとの差 %+.3f°) / "
+                    "点サンプル相当 %+.3f° (差 %+.3f°)",
+                    gyro_delta, cam_delta - gyro_delta,
+                    point_delta, cam_delta - point_delta,
+                )
         # with 終了で hard_hiz により出力を解放
 
 
