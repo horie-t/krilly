@@ -102,6 +102,24 @@ class CellMotionConfig:
     k_position: float = 3.0                # 旋回中の位置ずれ[m] -> vx,vy [1/s]
     v_hold_max: float = 0.04               # 位置保持の速度上限 [m/s]
 
+    # ジャイロの遅れ [s] (#73)。**旋回の終端判定だけ**に効く。
+    #
+    # 推定方位はジャイロの積分なので、報告が遅れているぶんだけ実機より遅れる。
+    # 終端は「残量 <= angle_tol_rad」で切るので、遅れた読みで「あと 0.3°」と判断した
+    # 時点で機体は既に `遅れ x 角速度` だけ余分に回っている。2.0 rad/s = 114°/s なら
+    # 30ms の遅れが 3.4° になる。実測の行き過ぎ 2.3-3.2° と桁が合う。
+    #
+    # ここに実測した遅れを入れると、終端判定と減速エンベロープが
+    # `残量 - 遅れ x 測定角速度` を見るようになる (一次遅れを一次進みで打ち消す形)。
+    # **既定は 0 = 補正なし。** 遅れ時間は実測してから入れること — 当て推量の値を
+    # 入れると、今度は手前で止まる側へ倒れる。
+    #
+    # なお遅れの中身は「BNO055 の内部フィルタ」だけではない。#81 以前は制御ループが
+    # 20ms に 1 回の点サンプルで済ませており、零次ホールドぶん (~20ms) がここに
+    # 乗っていた。連続サンプル (hal/gyro_sampler.py) にした今、その分は消えている
+    # はずなので、**#81 の後で測り直した値を使うこと**。
+    gyro_delay_s: float = 0.0
+
     # 主軸の下限速度 (エンベロープの終端で静止摩擦に負けて止まらないように)
     # 許容値を詰めるとエンベロープの終端指令が小さくなり、実機では動かないまま
     # creep し続けることがある。残量が許容外の間は下限を保証する。
@@ -178,6 +196,7 @@ class CellMotion:
         self._queue: list[tuple[float, int]] = []   # 予約した区間 (距離, 軸) (#80)
         self._blending = False        # 直前の区間の残りをエンベロープで詰めている最中
         self._corners = 0             # 止まらずに曲がった回数 (ログ・検証用)
+        self._gyro_rate = 0.0         # 直近に渡された角速度 [rad/s] (旋回の先読み用)
 
     @property
     def retries(self) -> int:
@@ -392,8 +411,16 @@ class CellMotion:
         if self._kind is Kind.FORWARD:
             return self._axis_remaining()
         if self._kind is Kind.TURN:
-            return self._angle_remaining
+            return self._turn_remaining()
         return 0.0
+
+    def _turn_remaining(self) -> float:
+        """旋回の残角 [rad]。``gyro_delay_s`` があればジャイロの遅れを先読みする (#73)。
+
+        推定方位はジャイロの積分なので、報告が遅れているぶん実機より遅れる。
+        その間に回った ``遅れ x 角速度`` を引いて「いま実際に残っている角度」にする。
+        """
+        return self._angle_remaining - self.cfg.gyro_delay_s * self._gyro_rate
 
     def residual(self) -> tuple[float, float, float]:
         """基準姿勢に対する推定姿勢の残差 (前後[m], 左右[m], 方位[rad])。
@@ -453,6 +480,7 @@ class CellMotion:
         車輪から積分する (#13 の融合方針)。省略時は車輪のみ。
         完了 (``done``) を返す。
         """
+        self._gyro_rate = 0.0 if gyro_rate is None else gyro_rate
         self._command(dt)
         cur = self.driver.update(dt)
         wheel_mps = self.kin.body_to_wheels(*cur)
@@ -492,8 +520,9 @@ class CellMotion:
             omega = _clamp(cfg.k_heading * self._heading_error(), cfg.omega_hold_max)
         else:  # Kind.TURN
             omega_max = cfg.retry_omega_max if retry else cfg.omega_max
-            omega = _envelope(self._angle_remaining, omega_max, self._angular_decel, dt)
-            omega = self._with_floor(omega, cfg.min_omega, self._angle_remaining)
+            remaining = self._turn_remaining()
+            omega = _envelope(remaining, omega_max, self._angular_decel, dt)
+            omega = self._with_floor(omega, cfg.min_omega, remaining)
             e_fwd, e_left = self._position_error_body()
             vx = _clamp(cfg.k_position * e_fwd, cfg.v_hold_max)
             vy = _clamp(cfg.k_position * e_left, cfg.v_hold_max)

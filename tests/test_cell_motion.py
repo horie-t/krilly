@@ -651,3 +651,109 @@ def test_abort_drops_the_queue(motion):
     motion.update(DT)
     motion.abort()
     assert motion.queued == 0 and motion.done
+
+
+# --- ジャイロの遅れの先読み (#73) -------------------------------------------
+#: 遅れの効果だけを見るための細かい制御周期。既定の 20ms では、**周期そのものが
+#: 行き過ぎを作る** (下の test 参照) ので、遅れの効果が埋もれる。
+FINE_DT = 0.005
+
+
+class LaggedGyro:
+    """報告が ``delay_s`` 秒遅れるジャイロ (内部フィルタ + 零次ホールドの模擬)。
+
+    指令された角速度を履歴に積み、``delay_s`` 前の値を返す。**推定はこの遅れた値で
+    積分される**ので、推定方位は実機より遅れる — 実機で観測されている行き過ぎと
+    同じ形になる。
+    """
+
+    def __init__(self, driver, delay_s: float, dt: float):
+        self.driver = driver
+        self.ticks = max(0, int(round(delay_s / dt)))
+        self.history: list[float] = []
+
+    def rate(self) -> float:
+        self.history.append(self.driver.current_velocity[2])
+        i = len(self.history) - 1 - self.ticks
+        return self.history[i] if i >= 0 else 0.0
+
+
+def turn_with_lagged_gyro(delay_s: float, gyro_delay_s: float,
+                          dt: float = FINE_DT) -> float:
+    """遅れたジャイロで 90° 旋回し、**実機の**行き過ぎ [deg] を返す (正 = 回りすぎ)。
+
+    推定は遅れた値を積分するが、真の方位は指令角速度の積分で追う。やり直しは
+    切ってある (やり直しは行き過ぎを**直す**仕組みなので、入れると量が見えない)。
+    """
+    kin = KiwiKinematics(config=ROBOT)
+    driver = VelocityDriver(FakeChain(), kinematics=kin)
+    m = CellMotion(driver, DeadReckoning(kin), maze=MAZE,
+                   config=CellMotionConfig(gyro_delay_s=gyro_delay_s, max_retries=0))
+    gyro = LaggedGyro(driver, delay_s, dt)
+    truth = 0.0
+    m.start_turn_left(1)
+    for _ in range(MAX_TICKS * 4):
+        done = m.update(dt, gyro_rate=gyro.rate())
+        truth += driver.current_velocity[2] * dt
+        if done:
+            return math.degrees(truth - math.pi / 2)
+    pytest.fail("旋回が終わらなかった")
+
+
+def test_a_lagged_gyro_overshoots_the_turn():
+    """**#73 の症状の再現**: ジャイロが遅れると終端で回りすぎる。
+
+    遅れた読みで「あと 0.3°」と判断した時点で、機体は既に余分に回っている。
+    実機では 2.0rad/s = 114°/s で 2.3-3.2° 行き過ぎていた。
+    """
+    assert turn_with_lagged_gyro(delay_s=0.0, gyro_delay_s=0.0) < 0.3
+    assert turn_with_lagged_gyro(delay_s=0.030, gyro_delay_s=0.0) > 2.0
+
+
+def test_the_overshoot_grows_with_the_delay():
+    """行き過ぎは遅れとともに単調に増える (実機で omega を振るのと同じ関係)。"""
+    overshoot = [turn_with_lagged_gyro(d, 0.0) for d in (0.0, 0.01, 0.02, 0.03, 0.04)]
+    assert overshoot == sorted(overshoot)
+    assert overshoot[-1] > 3.0
+
+
+def test_the_lead_compensation_removes_the_overshoot():
+    """遅れ時間を与えると行き過ぎが消えること (#73 の対処)。"""
+    for delay in (0.01, 0.02, 0.03, 0.04):
+        assert abs(turn_with_lagged_gyro(delay, delay)) < 0.3, delay
+
+
+def test_too_much_lead_stops_the_turn_short():
+    """**当て推量の値を入れると今度は手前で止まる。** 実測してから入れること。"""
+    assert turn_with_lagged_gyro(delay_s=0.0, gyro_delay_s=0.060) < -1.0
+
+
+def test_the_control_period_overshoots_on_its_own():
+    """**遅れが 0 でも、20ms の制御周期そのものが行き過ぎを作る** (#73)。
+
+    減速エンベロープの終盤でも機体はまだ速く回っており (残り 5.7° で 68°/s)、
+    1 tick = 20ms がそのまま 1.4° に相当する。しかもドライバのランプで実速度は
+    指令に遅れるので、指令が「落とせ」と言った時にはもう回りすぎている。
+    ジャイロを直しても、この分は制御周期を詰めないと残る。
+    """
+    coarse = turn_with_lagged_gyro(delay_s=0.0, gyro_delay_s=0.0, dt=0.020)
+    fine = turn_with_lagged_gyro(delay_s=0.0, gyro_delay_s=0.0, dt=0.005)
+    assert coarse > 1.0
+    assert fine < 0.3
+
+
+def test_the_lead_compensation_is_off_by_default(motion):
+    """既定では挙動が変わらないこと (残量はそのまま)。"""
+    assert motion.cfg.gyro_delay_s == 0.0
+    motion.start_turn_left(1)
+    motion.update(DT, gyro_rate=1.0)
+    assert motion.remaining == pytest.approx(motion._angle_remaining)
+
+
+def test_the_lead_only_touches_turns(motion):
+    """前進の残量はジャイロの遅れと無関係 (位置はジャイロで測っていない)。"""
+    m = CellMotion(motion.driver, motion.est, maze=MAZE,
+                   config=CellMotionConfig(gyro_delay_s=0.030))
+    m.start_move_cells(1, 0)
+    m.update(DT, gyro_rate=2.0)
+    assert m.remaining == pytest.approx(m._axis_remaining())
