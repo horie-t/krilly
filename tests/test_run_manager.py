@@ -136,10 +136,11 @@ def test_estimate_adds_turns_only_in_the_turning_mode(explorer):
     """旋回する走り方では旋回の時間が乗る (#76 の退避路)。"""
     legs = [Leg(Direction.N, 3), Leg(Direction.E, 2)]      # 北 -> 東 = 90° 1 回
     # 旋回する走り方は常に前後軸で進むので、比較のため東西も前後と同じ時間に揃える
-    # (既定は東西 0.75s / 南北 0.73s と少し違う)。
-    turning = RunManager(explorer, holonomic=False, lateral_cell_time_s=0.73)
+    # (既定は東西 0.76s / 南北 0.74s と少し違う)。
+    same = RunManager(explorer).cell_time_s
+    turning = RunManager(explorer, holonomic=False, lateral_cell_time_s=same)
     assert turning.estimate_s(legs, Direction.N) - turning.turn_time_s == pytest.approx(
-        RunManager(explorer, lateral_cell_time_s=0.73).estimate_s(legs)
+        RunManager(explorer, lateral_cell_time_s=same).estimate_s(legs)
     )
 
 
@@ -263,7 +264,8 @@ def test_restart_dwell_is_charged_before_a_speed_run(explorer):
 
 
 # --- 止まらずに繋ぐぶんの見積もり (#80) --------------------------------------
-#: 5x5 の最速経路 (実測: 12 区間で 24.6s、2 本ずつ繋いで 19.9/20.0/19.9s)。
+#: 5x5 の最速経路 (#80 の対照セッション実測: 区間ごとに止まると 25.0s、
+#: 2 本ずつ繋いで 20.0s。同じ日・同じ電池で連続して測った 4 本ずつの平均)。
 MEASURED_5X5 = [
     Leg(Direction.N, 3), Leg(Direction.E, 1), Leg(Direction.N, 1), Leg(Direction.E, 3),
     Leg(Direction.S, 2), Leg(Direction.W, 1), Leg(Direction.S, 1), Leg(Direction.E, 1),
@@ -284,12 +286,12 @@ def test_motions_counts_chunks_not_legs(manager):
 def test_the_estimate_matches_the_measured_chained_speed_run(manager):
     """実測との突き合わせ: 5x5 の最速経路 (20 セル / 12 区間)。
 
-    区間ごとに停止 24.6s / 2 本ずつ繋いで 19.9-20.0s (いずれも実機)。
+    区間ごとに停止 25.0s / 2 本ずつ繋いで 20.0s (いずれも実機、同じ日・同じ電池)。
     ここが合っていないと、7 分の予算判断が「走れる走行を断る」方へ狂う。
     """
-    assert manager.estimate_s(MEASURED_5X5) == pytest.approx(24.6, abs=0.3)
+    assert manager.estimate_s(MEASURED_5X5) == pytest.approx(25.0, abs=0.3)
     manager.chain_legs = 2
-    assert manager.estimate_s(MEASURED_5X5) == pytest.approx(19.9, abs=0.3)
+    assert manager.estimate_s(MEASURED_5X5) == pytest.approx(20.0, abs=0.3)
 
 
 def test_chaining_never_makes_the_estimate_longer(manager):
@@ -297,3 +299,14 @@ def test_chaining_never_makes_the_estimate_longer(manager):
     for size in range(2, 13):
         manager.chain_legs = size
         assert manager.estimate_s(MEASURED_5X5) <= base
+
+
+def test_the_default_chain_legs_errs_on_the_safe_side(manager):
+    """**渡し忘れたときに見積もりが短くならない**こと (#80)。
+
+    実機は 2 本ずつ繋いで走るが、ここの既定を 2 にすると、繋がない呼び出し側が
+    渡し忘れたときに見積もりが短い方へ外れ、7 分の予算判断が「終われない走行を
+    始める」side へ倒れる。1 なら外れ方は「走れる走行を断る」側で済む。
+    """
+    assert manager.chain_legs == 1
+    assert manager.motions(MEASURED_5X5) == len(MEASURED_5X5)

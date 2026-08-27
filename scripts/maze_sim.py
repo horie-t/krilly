@@ -87,8 +87,8 @@ def build_args() -> argparse.ArgumentParser:
                      help="実際は見積もりの何倍かかるか (予算判断の余裕を試す)")
     cfg.add_argument("--search-overhead", type=float, default=0.0,
                      help="探索の停止 1 回あたりの追加時間 [s] (壁判定・位置補正の分)")
-    cfg.add_argument("--chain-legs", type=int, default=1,
-                     help="最速・復帰で止まらずに繋ぐ区間の本数 (#80。既定 1 = 区間ごとに停止)")
+    cfg.add_argument("--chain-legs", type=int, default=2,
+                     help="最速・復帰で止まらずに繋ぐ区間の本数 (#80。既定 2、1 で区間ごとに停止)")
     cfg.add_argument("--no-neighbors", action="store_true",
                      help="探索で左右の隣セルを読まない (#89 を切る)")
     cfg.add_argument("--pass-cells", type=int, default=None,

@@ -88,8 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-heading-residual", type=float, default=2.5,
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true", help="前進前の前方確認を無効化")
-    p.add_argument("--chain-legs", type=int, default=1,
-                   help="最速・復帰で止まらずに繋ぐ区間の本数の上限 (#80)。"
+    p.add_argument("--chain-legs", type=int, default=2,
+                   help="最速・復帰で止まらずに繋ぐ区間の本数の上限 (#80、既定 2)。"
                         "1 = 区間ごとに停止 (従来)。繋ぐと位置補正の間隔も伸びる")
     p.add_argument("--no-neighbors", action="store_true",
                    help="左右の隣セルを読まない (#89 を切る。1 セルずつ止まって進む)")
