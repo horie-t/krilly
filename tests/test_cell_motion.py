@@ -742,12 +742,28 @@ def test_the_control_period_overshoots_on_its_own():
     assert fine < 0.3
 
 
-def test_the_lead_compensation_is_off_by_default(motion):
-    """既定では挙動が変わらないこと (残量はそのまま)。"""
-    assert motion.cfg.gyro_delay_s == 0.0
+def test_the_default_lead_is_the_measured_delay(motion):
+    """既定値は実測から出した遅れであること (#73)。
+
+    行き過ぎ = 1.5° (固定) + 26ms x ω の当てはめによる。実機で 0.026 を入れると
+    1 旋回 1.83 -> 1.42s、やり直し 4/4 -> 2/4 回、行き過ぎ 4.5° -> 1.9°。
+    **当て推量で動かさないこと** — 入れすぎると手前で止まる側へ倒れる。
+    """
+    assert motion.cfg.gyro_delay_s == pytest.approx(0.026)
     motion.start_turn_left(1)
     motion.update(DT, gyro_rate=1.0)
-    assert motion.remaining == pytest.approx(motion._angle_remaining)
+    # 残量は `遅れ x 測定角速度` だけ先読みされる
+    assert motion.remaining == pytest.approx(motion._angle_remaining - 0.026 * 1.0)
+
+
+def test_no_lead_leaves_the_remaining_untouched():
+    """0 を渡せば従来どおり (退避路が残っていること)。"""
+    kin = KiwiKinematics(config=ROBOT)
+    m = CellMotion(VelocityDriver(FakeChain(), kinematics=kin), DeadReckoning(kin),
+                   maze=MAZE, config=CellMotionConfig(gyro_delay_s=0.0))
+    m.start_turn_left(1)
+    m.update(DT, gyro_rate=1.0)
+    assert m.remaining == pytest.approx(m._angle_remaining)
 
 
 def test_the_lead_only_touches_turns(motion):
