@@ -50,6 +50,7 @@ python -m scripts.cell_move_demo --seq F,Q,F,E          # ... Q/E = in-place 90�
 python -m scripts.cell_move_demo --seq Q,Q,Q,Q --camera-yaw   # + camera ground-truth heading check
 python -m scripts.cell_move_demo --seq F4 --camera-pose --camera-yaw  # speed tuning: 4 cells in one motion
 python -m scripts.cell_move_demo --seq F,A,F,D --chain --camera-pose --camera-yaw  # corner without stopping (#80)
+python -m scripts.cell_move_demo --seq F,A,F,D --chain --gyro-sample 0.005 --camera-yaw  # gyro A/B in one run (#81)
 
 # STOP the machine (run on the Pi)
 #   Ctrl-C stops any driving script and releases the coils. ESC does nothing (no key input).
@@ -94,7 +95,7 @@ python -m scripts.survey_shot --maze maze5.txt --out-dir survey   # on the Pi: H
 
 Layered under `src/krilly/` (low → high level; each layer is independently testable):
 
-- `hal/` — hardware abstraction: `l6470` (single driver) / `l6470_chain` (3× daisy-chain) over SPI; `imu` (BNO055/I2C); `camera` (picamera2 → BGR frames).
+- `hal/` — hardware abstraction: `l6470` (single driver) / `l6470_chain` (3× daisy-chain) over SPI; `imu` (BNO055/I2C); `gyro_sampler` (`GyroSampler`: samples gyro z on its own thread and integrates every sample, so the 50 Hz control loop stops throwing half the chip's output away, #81); `camera` (picamera2 → BGR frames).
 - `kinematics/kiwi.py` — `KiwiKinematics`: forward/inverse kinematics + wheel-speed ⇄ stepper conversion.
 - `motion/velocity_driver.py` — `VelocityDriver`: rate-limits body velocity (trapezoidal ramp), then commands all 3 wheels in one `run_all`. Ramping in *body* space keeps the wheel-speed ratio constant, so the path holds during accel (L6470's per-device ACC alone would skew it). `update(dt)` is pure computation — no sleeps; the caller drives the loop.
 - `motion/corner.py` — the geometry of turning **without stopping** (#80): the blend distance `v²/2a`, the shape of the rounded corner, and how much room it leaves against the posts. Pure functions, no state; `tuning.check_limits` uses them to refuse a blend that would not fit.
