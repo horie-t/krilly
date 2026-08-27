@@ -9,7 +9,13 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.velocity_driver import VelocityDriver
-from scripts.cell_move_demo import Move, parse_seq, world_components, wrapped_deg
+from scripts.cell_move_demo import (
+    Move,
+    chain_groups,
+    parse_seq,
+    world_components,
+    wrapped_deg,
+)
 
 ROBOT = RobotConfig(
     wheel_diameter_m=0.048,
@@ -45,25 +51,25 @@ def motion():
 
 # --- シーケンス解析 --------------------------------------------------------
 def test_parse_seq_accepts_both_notations():
-    assert parse_seq("F,L,F") == [Move("F"), Move("L"), Move("F")]
-    assert parse_seq("FLF") == [Move("F"), Move("L"), Move("F")]
-    assert parse_seq("f, l ,r") == [Move("F"), Move("L"), Move("R")]
+    assert parse_seq("F,Q,F") == [Move("F"), Move("Q"), Move("F")]
+    assert parse_seq("FQF") == [Move("F"), Move("Q"), Move("F")]
+    assert parse_seq("f, q ,e") == [Move("F"), Move("Q"), Move("E")]
 
 
 def test_parse_seq_counts():
     """数字は「1 動作で何セル/何回転」。U は L2 の別名 (#21)。"""
     assert parse_seq("F4") == [Move("F", 4)]
-    assert parse_seq("F4,L,B2") == [Move("F", 4), Move("L"), Move("B", 2)]
-    assert parse_seq("U") == [Move("L", 2)]
-    assert parse_seq("U2") == [Move("L", 4)]
+    assert parse_seq("F4,Q,B2") == [Move("F", 4), Move("Q"), Move("B", 2)]
+    assert parse_seq("U") == [Move("Q", 2)]
+    assert parse_seq("U2") == [Move("Q", 4)]
 
 
 def test_move_labels():
     assert Move("F", 4).label == "4セル前進"
-    assert Move("R").label == "右90°"
-    assert Move("L", 2).label == "左180°"
-    assert Move("H", 15).label == "左へ15セル"
-    assert Move("G").label == "右へ1セル"
+    assert Move("E").label == "右90°"
+    assert Move("Q", 2).label == "左180°"
+    assert Move("A", 15).label == "左へ15セル"
+    assert Move("D").label == "右へ1セル"
 
 
 @pytest.mark.parametrize("text", ["F0", "4F", "F,X", ""])
@@ -85,14 +91,14 @@ def test_wrapped_deg_normalises_accumulated_heading():
     [
         ("F", (0.180, 0.0, 0.0)),
         ("B", (-0.180, 0.0, 0.0)),
-        ("L", (0.0, 0.0, math.pi / 2)),
-        ("R", (0.0, 0.0, -math.pi / 2)),
+        ("Q", (0.0, 0.0, math.pi / 2)),
+        ("E", (0.0, 0.0, -math.pi / 2)),
         ("U", (0.0, 0.0, math.pi)),
         ("F4", (0.720, 0.0, 0.0)),
         ("R2", (0.0, 0.0, math.pi)),
         # 平行移動: 機体は回らないので基準方位は 0 のまま (#76)
-        ("H", (0.0, 0.180, 0.0)),
-        ("G", (0.0, -0.180, 0.0)),
+        ("A", (0.0, 0.180, 0.0)),
+        ("D", (0.0, -0.180, 0.0)),
         ("H15", (0.0, 2.700, 0.0)),
     ],
 )
@@ -128,3 +134,33 @@ def test_world_components_drops_unmeasured_axes():
     assert world_components(0.01, None, 0.0) == {"前後": 0.01}
     assert world_components(None, 0.01, 0.0) == {"左右": 0.01}
     assert world_components(None, None, 0.0) == {}
+
+
+# --- 止まらずに繋ぐグループ分け (#80) ---------------------------------------
+def test_chain_groups_joins_consecutive_translations():
+    groups = chain_groups(parse_seq("F,A,F,D"))
+    assert len(groups) == 1 and len(groups[0]) == 4
+
+
+def test_chain_groups_breaks_at_a_turn():
+    """旋回は繋げない (機体が回っている間は進めない)。"""
+    groups = chain_groups(parse_seq("F,F,Q,A,D"))
+    assert [[m.token for m in g] for g in groups] == [["F", "F"], ["Q"], ["A", "D"]]
+
+
+def test_only_translations_have_an_axis():
+    assert Move("F").axis == 0 and Move("B").axis == 2
+    assert Move("A").axis == +1 and Move("D").axis == -1
+    assert Move("Q").axis is None and Move("E").axis is None
+
+
+def test_the_old_token_names_still_parse():
+    """旧表記 (H/G/L/R/U) を新トークンへ読み替えること。
+
+    CLAUDE.md の手順や過去のログにあるシーケンスがそのまま動かないと、
+    「あのときのコマンド」を打ち直せなくなる。**別名は消さない。**
+    """
+    assert parse_seq("F,H,B,G") == [Move("F"), Move("A"), Move("B"), Move("D")]
+    assert parse_seq("L,L,L,L") == [Move("Q")] * 4      # gyro_scale_z の校正手順
+    assert parse_seq("H15") == [Move("A", 15)]          # 横移動のスケール測定
+    assert parse_seq("R2") == [Move("E", 2)]

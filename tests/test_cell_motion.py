@@ -20,6 +20,7 @@ from krilly.motion.cell_motion import (
     _clamp,
     _envelope,
 )
+from krilly.motion.corner import corner_bulge_m, corridor_clearance_m
 from krilly.motion.velocity_driver import VelocityDriver
 
 ROBOT = RobotConfig(
@@ -532,3 +533,121 @@ def test_axis_from_quarter_turns_matches_the_maze_directions():
         want = tuple(v * MAZE.cell_pitch_m for v in d.delta)
         assert (x, y) == pytest.approx(want, abs=1e-9), d
         assert phi == pytest.approx(heading_rad(Direction.N))   # 機体は回らない
+
+
+# --- 止まらない方向転換 (#80) ----------------------------------------------
+def drive(m: CellMotion, max_ticks: int = MAX_TICKS):
+    """完了まで回して (所要秒, 軌跡, 速度の大きさ) を返す。"""
+    path, speeds = [], []
+    for _ in range(max_ticks):
+        done = m.update(DT)
+        path.append((m.est.x, m.est.y))
+        speeds.append(math.hypot(*m.driver.current_velocity[:2]))
+        if done:
+            return (len(path) * DT, path, speeds)
+    pytest.fail(f"完了しなかった (phase={m.phase}, 予約 {m.queued})")
+
+
+def test_queue_keeps_the_motion_busy_until_it_drains(motion):
+    """予約が残っている間は done にならない (呼び出し側からは 1 動作)。"""
+    motion.start_move_cells(1, 0)
+    motion.queue_move_cells(1, 1)
+    assert motion.queued == 1 and not motion.done
+    drive(motion)
+    assert motion.queued == 0 and motion.done
+
+
+def test_queue_move_starts_immediately_when_idle(motion):
+    motion.queue_move_cells(1, 0)
+    assert not motion.done
+    drive(motion)
+    assert motion.est.x == pytest.approx(0.180, abs=0.002)
+
+
+def test_a_chained_path_lands_where_the_separate_moves_would(motion):
+    """丸めても**終点は変わらない** (基準点の進め方は同じ)。"""
+    motion.start_path_cells([(1, 0), (1, 1), (1, 0)])
+    drive(motion)
+    assert motion.reference == pytest.approx((0.360, 0.180, 0.0))
+    along, cross, dphi = motion.residual()
+    assert abs(along) <= motion.cfg.pos_tol_m
+    assert abs(cross) <= motion.cfg.pos_tol_m
+    assert abs(dphi) <= motion.cfg.angle_tol_rad
+
+
+def test_the_machine_never_stops_at_a_corner(motion):
+    """コーナーで速度が 0 に落ちないこと (これが #80 の目的そのもの)。"""
+    motion.start_path_cells([(1, 0), (1, 1), (1, 0)])
+    _t, _path, speeds = drive(motion)
+    cruise = speeds[15:-15]                     # 出だしのランプと最後の整定を除く
+    # 両軸が入れ替わる途中で 1/√2 まで落ちるが、そこが下限
+    assert min(cruise) > 0.65 * motion.cfg.v_max
+    assert motion.corners == 2
+
+
+def test_chaining_is_faster_than_stopping_at_every_leg(motion):
+    """同じ 3 区間を、止まる場合と丸める場合で比べる。"""
+    motion.start_path_cells([(1, 0), (1, 1), (1, 0)])
+    chained, _p, _s = drive(motion)
+
+    kin = KiwiKinematics(config=ROBOT)
+    m2 = CellMotion(VelocityDriver(FakeChain(), kinematics=kin), DeadReckoning(kin),
+                    maze=MAZE)
+    stopping = 0.0
+    for cells, axis in ((1, 0), (1, 1), (1, 0)):
+        m2.start_move_cells(cells, axis)
+        stopping += drive(m2)[0]
+    assert chained < stopping
+    # 実機では停止のたびにカメラも見るので、ここで出る差は**動きの分だけ**
+    assert (stopping - chained) / motion.corners > 0.2
+
+
+def test_the_corner_stays_inside_the_cell_by_the_predicted_amount(motion):
+    """膨らみが理論値 (ブレンド距離の 1/4) を超えないこと。
+
+    超えると通れるかの根拠 (tests/test_corner.py) が効かなくなる。ドライバの
+    ランプが新しい軸の立ち上がりを鈍らせるので、実際はやや内側に収まる。
+    """
+    motion.start_path_cells([(1, 0), (1, 1)])
+    _t, path, _s = drive(motion)
+    corner = (0.180, 0.0)                       # 1 本目の終点 = 曲がる点
+    bulge = max(min(abs(y - corner[1]), abs(x - corner[0]))
+                for x, y in path if x <= corner[0] + 1e-9 and y >= corner[1] - 1e-9)
+    assert bulge <= corner_bulge_m(motion.blend_distance) + 1e-4
+    assert bulge < corridor_clearance_m()       # 廊下の余裕の内側
+
+
+def test_the_same_axis_queue_just_extends_the_leg(motion):
+    """同じ向きの予約は区間が延びるだけ (コーナーとして数えない)。"""
+    motion.start_path_cells([(1, 0), (1, 0)])
+    drive(motion)
+    assert motion.corners == 0
+    assert motion.est.x == pytest.approx(0.360, abs=0.002)
+    assert motion.est.y == pytest.approx(0.0, abs=0.002)
+
+
+def test_a_reversal_is_not_rounded(motion):
+    """180° の折り返しは丸めない (速度を逆向きにするには 0 を通るしかない)。"""
+    motion.start_path_cells([(1, 0), (1, 2)])
+    _t, _path, speeds = drive(motion)
+    assert motion.corners == 0
+    assert min(speeds) < motion.cfg.settled_v    # 途中で必ず止まる
+    assert motion.est.x == pytest.approx(0.0, abs=0.002)
+
+
+def test_a_long_chain_does_not_accumulate_error(motion):
+    """区間をいくつ繋いでも、基準点は理想格子の上に留まる。"""
+    motion.start_path_cells([(1, 0), (1, 1), (1, 0), (1, -1), (2, 0)])
+    drive(motion)
+    # x へ 1+1+2 = 4 セル、y は +1 と -1 で相殺
+    assert motion.reference[0] == pytest.approx(0.180 * 4)
+    assert motion.reference[1] == pytest.approx(0.0, abs=1e-12)
+    assert motion.est.x == pytest.approx(0.720, abs=0.003)
+    assert motion.est.y == pytest.approx(0.0, abs=0.003)
+
+
+def test_abort_drops_the_queue(motion):
+    motion.start_path_cells([(1, 0), (1, 1)])
+    motion.update(DT)
+    motion.abort()
+    assert motion.queued == 0 and motion.done
