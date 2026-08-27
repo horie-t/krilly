@@ -23,6 +23,7 @@ import time
 
 from krilly.app.run_manager import RunManager, RunPhase
 from krilly.config import load_maze_config
+from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
@@ -82,6 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-imu", action="store_true", help="ジャイロ融合なし")
     p.add_argument("--gyro-sign", type=float, default=1.0)
     p.add_argument("--gyro-scale", type=float, default=None)
+    p.add_argument("--gyro-sample", type=float, default=0.005, metavar="秒",
+                   help="ジャイロを別スレッドでこの間隔 [s] で連続サンプルし、1 tick 分を"
+                        "積分して使う (#81)。0 で従来どおり tick ごとに 1 回だけ読む "
+                        "(実測: 点サンプルは 1.32° 化け、連続積分はカメラと 0.009°)")
     p.add_argument("--no-correct", action="store_true", help="カメラの位置補正を無効化")
     p.add_argument("--turn-in-place", action="store_true",
                    help="機体を旋回させて走る従来モード (既定は旋回レス走行 #76)")
@@ -169,15 +174,47 @@ def main() -> None:
         motion.driver.energize()
         time.sleep(0.3)
 
+        # #81: BNO055 は NDOF モードで 100Hz 出力しているのに、制御ループは 20ms に
+        # 1 回しか読んでいなかった = **チップが出すサンプルの半分を捨てていた**。
+        # 1 tick の中で角速度は中央値 5.4°/s・最大 35°/s も振れているので、点サンプルは
+        # どこを引くかの賭けになる。実測では同じ走行で 1.32° 化け、連続積分はカメラと
+        # 0.009° まで一致した。**方位保持はジャイロで閉じている**ので、この誤差は
+        # 補正されないまま横流れになっていた (#81 の「見えない回転」の正体)。
+        sampler = None
+        if imu is not None and args.gyro_sample > 0.0:
+            sampler = stack.enter_context(GyroSampler(
+                imu, bias_dps=bias_z, scale=gyro_scale, sign=args.gyro_sign,
+                interval_s=args.gyro_sample))
+            log.info("ジャイロを %.0fms 間隔で連続サンプルする (#81)",
+                     args.gyro_sample * 1000)
+
         def gyro_rate() -> float | None:
             if imu is None:
                 return None
-            return math.radians(imu.gyro[2] - bias_z) * args.gyro_sign * gyro_scale
+            if sampler is None:
+                return math.radians(imu.gyro[2] - bias_z) * args.gyro_sign * gyro_scale
+            if sampler.error is not None:
+                # 落ちたまま 0 を返し続けると「回っていない」と誤解して走り続ける
+                log.error("ジャイロのサンプリングが停止した (%s)。走行を続けると"
+                          "方位が黙ってずれる。", sampler.error)
+                raise SystemExit(1)
+            return sampler.take().rate_rad_s
 
         timings: dict[str, list[float]] = {}
 
+        def drain_gyro() -> None:
+            """溜まっている積分を捨てる (#81)。
+
+            カメラを見ている間も積分は進む。次の 1 回が数秒ぶんの平均になると、
+            それを 20ms の tick に掛けたときに回転量が薄まるので、動作を始める
+            前に区切り直す。
+            """
+            if sampler is not None:
+                sampler.take()
+
         def run_primitive(label: str, timeout: float, kind: str = "") -> None:
             """1 動作を回し、所要時間を記録する (RunManager の見積もり定数の実測用)。"""
+            drain_gyro()
             t0 = last = time.monotonic()
             while True:
                 time.sleep(args.dt)
