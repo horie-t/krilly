@@ -102,6 +102,36 @@ class CellMotionConfig:
     k_position: float = 3.0                # 旋回中の位置ずれ[m] -> vx,vy [1/s]
     v_hold_max: float = 0.04               # 位置保持の速度上限 [m/s]
 
+    # ジャイロの遅れ [s] (#73)。**旋回の終端判定だけ**に効く。
+    #
+    # 推定方位はジャイロの積分なので、報告が遅れているぶんだけ実機より遅れる。
+    # 終端は「残量 <= angle_tol_rad」で切るので、遅れた読みで「あと 0.3°」と判断した
+    # 時点で機体は既に `遅れ x 角速度` だけ余分に回っている。2.0 rad/s = 114°/s なら
+    # 30ms の遅れが 3.4° になる。実測の行き過ぎ 2.3-3.2° と桁が合う。
+    #
+    # 終端判定と減速エンベロープが `残量 - 遅れ x 測定角速度` を見るようになる
+    # (一次遅れを一次進みで打ち消す形)。
+    #
+    # **0.026 は実測値。** 角速度と制御周期を振って当てはめた:
+    #   行き過ぎ = 1.5° (固定) + 26ms x ω
+    #   実測 4.5° (ω=2.0/dt=20ms) / 3.75° (ω=2.0/dt=10ms) / 3.03° (ω=1.0/dt=20ms)
+    # 0.026 を入れた実機は 1 旋回 1.83 -> 1.42s、やり直し 4/4 -> 2/4 回、
+    # 行き過ぎ 4.5° -> 1.9° (= 残った固定分。予測の 1.5° と一致)。
+    # 完了時の残差も +1.5° に偏っていたのが ±0.9° 程度にばらけた (偏りが消えた)。
+    #
+    # **当て推量の値を入れないこと。** 入れすぎると今度は手前で止まる側へ倒れる。
+    # 遅れ時間は `行き過ぎ[rad] / 角速度[rad/s]` を角速度 2 点から当てはめて出す
+    # (固定分があるので 1 点では出ない)。
+    #
+    # 固定分 1.5° の正体は終端後のランプダウン。終端の瞬間、機体はまだ 20-39°/s で
+    # 回っており、そこから 0 まで落とす間に回る分。先読みでは消せない。
+    #
+    # なお遅れの中身は「BNO055 の内部フィルタ」だけではない。#81 以前は制御ループが
+    # 20ms に 1 回の点サンプルで済ませていたが、**連続サンプル (#81) にしても旋回の
+    # 行き過ぎは変わらなかった** — 旋回は角速度が大きくなめらかで、エイリアスする
+    # 速い成分がないため。#73 と #81 は同じ根本原因ではない。
+    gyro_delay_s: float = 0.026
+
     # 主軸の下限速度 (エンベロープの終端で静止摩擦に負けて止まらないように)
     # 許容値を詰めるとエンベロープの終端指令が小さくなり、実機では動かないまま
     # creep し続けることがある。残量が許容外の間は下限を保証する。
@@ -178,6 +208,7 @@ class CellMotion:
         self._queue: list[tuple[float, int]] = []   # 予約した区間 (距離, 軸) (#80)
         self._blending = False        # 直前の区間の残りをエンベロープで詰めている最中
         self._corners = 0             # 止まらずに曲がった回数 (ログ・検証用)
+        self._gyro_rate = 0.0         # 直近に渡された角速度 [rad/s] (旋回の先読み用)
 
     @property
     def retries(self) -> int:
@@ -392,8 +423,16 @@ class CellMotion:
         if self._kind is Kind.FORWARD:
             return self._axis_remaining()
         if self._kind is Kind.TURN:
-            return self._angle_remaining
+            return self._turn_remaining()
         return 0.0
+
+    def _turn_remaining(self) -> float:
+        """旋回の残角 [rad]。``gyro_delay_s`` があればジャイロの遅れを先読みする (#73)。
+
+        推定方位はジャイロの積分なので、報告が遅れているぶん実機より遅れる。
+        その間に回った ``遅れ x 角速度`` を引いて「いま実際に残っている角度」にする。
+        """
+        return self._angle_remaining - self.cfg.gyro_delay_s * self._gyro_rate
 
     def residual(self) -> tuple[float, float, float]:
         """基準姿勢に対する推定姿勢の残差 (前後[m], 左右[m], 方位[rad])。
@@ -453,6 +492,7 @@ class CellMotion:
         車輪から積分する (#13 の融合方針)。省略時は車輪のみ。
         完了 (``done``) を返す。
         """
+        self._gyro_rate = 0.0 if gyro_rate is None else gyro_rate
         self._command(dt)
         cur = self.driver.update(dt)
         wheel_mps = self.kin.body_to_wheels(*cur)
@@ -492,8 +532,9 @@ class CellMotion:
             omega = _clamp(cfg.k_heading * self._heading_error(), cfg.omega_hold_max)
         else:  # Kind.TURN
             omega_max = cfg.retry_omega_max if retry else cfg.omega_max
-            omega = _envelope(self._angle_remaining, omega_max, self._angular_decel, dt)
-            omega = self._with_floor(omega, cfg.min_omega, self._angle_remaining)
+            remaining = self._turn_remaining()
+            omega = _envelope(remaining, omega_max, self._angular_decel, dt)
+            omega = self._with_floor(omega, cfg.min_omega, remaining)
             e_fwd, e_left = self._position_error_body()
             vx = _clamp(cfg.k_position * e_fwd, cfg.v_hold_max)
             vy = _clamp(cfg.k_position * e_left, cfg.v_hold_max)
