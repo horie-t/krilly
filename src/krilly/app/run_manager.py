@@ -102,6 +102,10 @@ class RunManager:
     lateral_cell_time_s: float = 0.75
     #: True なら機体を旋回させない (#76)。旋回の時間は見積もりに入らない。
     holonomic: bool = True
+    #: 止まらずに繋ぐ区間の本数の上限 (#80)。**固定費は区間ではなく「動作」に付く**
+    #: ので、繋げばそのぶん見積もりが縮む。1 なら従来 (区間ごとに停止)。
+    #: 5x5 実測: 20 セル / 12 区間を 2 本ずつ繋いで 6 動作、19.9s (見積 19.9s)。
+    chain_legs: int = 1
     cost: MoveCost = DEFAULT_COST
 
     phase: RunPhase = field(default=RunPhase.WAIT, init=False)
@@ -119,8 +123,9 @@ class RunManager:
     def estimate_s(self, legs: list[Leg], facing: Direction = Direction.N) -> float:
         """Leg 列の所要時間の見積もり (安全率は掛けない素の値)。
 
-        セル数だけでなく**区間の本数**も数える。連続直進はランプの固定費を償却するので、
-        同じセル数でも区間が細切れなほど時間がかかる。
+        セル数だけでなく**動作の回数**も数える (:meth:`motions`)。連続直進はランプの
+        固定費を償却するので、同じセル数でも動作が細切れなほど時間がかかる。
+        ``chain_legs`` > 1 ならコーナーを丸めて繋ぐぶん動作が減る (#80)。
 
         セルは進行軸で分ける。旋回レス走行 (#76) では機体の向きが固定なので、南北は
         機体の前後軸・東西は左右軸の移動になり、所要時間が違いうる。旋回する走り方
@@ -132,10 +137,21 @@ class RunManager:
         # 旋回レスでは東西が機体の左右軸 (横移動) になる。旋回するなら常に前を向いて
         # 進むので、東西も南北も同じ時間。
         ew_time = self.lateral_cell_time_s if self.holonomic else self.cell_time_s
-        total = ns * self.cell_time_s + ew * ew_time + len(legs) * self.straight_time_s
+        total = ns * self.cell_time_s + ew * ew_time + self.motions(legs) * self.straight_time_s
         if not self.holonomic:
             total += turns_in(legs, facing) * self.turn_time_s
         return total
+
+    def motions(self, legs: list[Leg]) -> int:
+        """``legs`` を実行するのに必要な**動作の回数** (#80)。
+
+        固定費 (ランプ + 整定 + 撮影 + 停止) は区間ではなく動作に付く。コーナーを
+        丸めて繋げば、区間の本数はそのままでも動作は減る。実測でも繋いだ動作の
+        所要は「セル数 × 1 セルの時間 + 固定費 1 回分」で、コーナーの有無で変わらない
+        (コーナーのブレンドは、どのみち必要な減速を次の区間の加速と重ねただけだから)。
+        """
+        size = max(1, self.chain_legs)
+        return -(-len(legs) // size)          # 切り上げ
 
     # -- 経路 -----------------------------------------------------------------
     def _route(

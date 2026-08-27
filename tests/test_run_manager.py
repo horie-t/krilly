@@ -260,3 +260,40 @@ def test_restart_dwell_is_charged_before_a_speed_run(explorer):
     # 停止の分だけ足りないときは走行を始めない
     late = mgr.time_limit_s - need - mgr.restart_dwell_s / 2
     assert mgr.home_reached(late, Direction.N) is None
+
+
+# --- 止まらずに繋ぐぶんの見積もり (#80) --------------------------------------
+#: 5x5 の最速経路 (実測: 12 区間で 24.6s、2 本ずつ繋いで 19.9/20.0/19.9s)。
+MEASURED_5X5 = [
+    Leg(Direction.N, 3), Leg(Direction.E, 1), Leg(Direction.N, 1), Leg(Direction.E, 3),
+    Leg(Direction.S, 2), Leg(Direction.W, 1), Leg(Direction.S, 1), Leg(Direction.E, 1),
+    Leg(Direction.S, 1), Leg(Direction.W, 3), Leg(Direction.N, 2), Leg(Direction.E, 1),
+]
+
+
+def test_motions_counts_chunks_not_legs(manager):
+    """固定費は区間ではなく**動作**に付く (#80)。"""
+    assert manager.motions(MEASURED_5X5) == 12          # 既定は区間ごとに停止
+    for size, expected in ((2, 6), (3, 4), (4, 3), (5, 3), (12, 1), (99, 1)):
+        manager.chain_legs = size
+        assert manager.motions(MEASURED_5X5) == expected, size
+    manager.chain_legs = 0                              # 不正値は 1 として扱う
+    assert manager.motions(MEASURED_5X5) == 12
+
+
+def test_the_estimate_matches_the_measured_chained_speed_run(manager):
+    """実測との突き合わせ: 5x5 の最速経路 (20 セル / 12 区間)。
+
+    区間ごとに停止 24.6s / 2 本ずつ繋いで 19.9-20.0s (いずれも実機)。
+    ここが合っていないと、7 分の予算判断が「走れる走行を断る」方へ狂う。
+    """
+    assert manager.estimate_s(MEASURED_5X5) == pytest.approx(24.6, abs=0.3)
+    manager.chain_legs = 2
+    assert manager.estimate_s(MEASURED_5X5) == pytest.approx(19.9, abs=0.3)
+
+
+def test_chaining_never_makes_the_estimate_longer(manager):
+    base = manager.estimate_s(MEASURED_5X5)
+    for size in range(2, 13):
+        manager.chain_legs = size
+        assert manager.estimate_s(MEASURED_5X5) <= base

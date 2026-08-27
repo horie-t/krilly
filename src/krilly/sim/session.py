@@ -114,6 +114,7 @@ def simulate_session(
     max_steps: int = 5000,
     neighbor_sensing: bool = True,
     max_leg_cells: int = 2,
+    chain_legs: int = 1,
 ) -> SessionResult:
     """真の迷路 ``truth`` を相手に 7 分 5 走 (クラシック競技規定) のセッションを丸ごと回す。
 
@@ -121,6 +122,9 @@ def simulate_session(
     出た区間の固定費には**壁判定と位置補正の時間が入っていない**ので、探索はそのぶん
     遅い。カメラを見るのは止まったときだけなので、セル数ではなく停止回数に比例する。
     実測があれば :func:`fit_search_overhead` で求められる。
+
+    ``chain_legs`` は最速・復帰で止まらずに繋ぐ区間の本数 (#80)。固定費は動作に
+    付くので、繋ぐと見積もりが縮む。
 
     ``neighbor_sensing`` は左右の隣セルまで読むか (#89)。``max_leg_cells`` は
     止まらずに続けて通過してよいセル数の上限。両方そろって初めて停止回数が減る
@@ -138,7 +142,8 @@ def simulate_session(
     ex = Explorer(learned, cell=truth.start, facing=start_facing,
                   travel=start_facing, holonomic=holonomic)
     mgr = RunManager(ex, holonomic=holonomic, cost=cost, time_limit_s=time_limit_s,
-                     max_runs=max_runs, time_margin=time_margin)
+                     max_runs=max_runs, time_margin=time_margin,
+                     chain_legs=1 if not holonomic else chain_legs)
     result = SessionResult(truth=truth, explorer=ex)
     result.limit_s = time_limit_s
 

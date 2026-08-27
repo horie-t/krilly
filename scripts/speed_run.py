@@ -111,6 +111,7 @@ def main() -> None:
     explorer = Explorer(maze, holonomic=not args.turn_in_place)
     manager = RunManager(explorer, time_limit_s=args.time_limit, max_runs=args.max_runs,
                          holonomic=not args.turn_in_place,
+                         chain_legs=1 if args.turn_in_place else max(1, args.chain_legs),
                          cost=LEGACY_COST if args.turn_in_place else DEFAULT_COST)
     neighbors = not args.no_neighbors
     detector = WallDetector(calibrated_config(neighbors=neighbors))
