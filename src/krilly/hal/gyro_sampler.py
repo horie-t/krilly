@@ -87,6 +87,10 @@ class GyroSampler:
         #: サンプルの総数と、``take`` で切り出した区間の数 (診断用)。
         self.total_samples = 0
         self.intervals = 0
+        #: スレッドが落ちた原因 (I2C エラーなど)。**None でなければ方位が更新されて
+        #: いない**ので、走行スクリプトは気づいて警告すること — 角速度 0 を返し続けると
+        #: 「回っていない」と誤解したまま走り続け、方位の誤差が黙って溜まる。
+        self.error: BaseException | None = None
         #: 直近 1 サンプルの角速度 [rad/s] (バイアス等を適用済み)。
         #: **従来の点サンプルを再現するため**にある: 制御 tick の瞬間にこれを読んで
         #: ``rate * dt`` を積めば、20ms に 1 回だけ読んでいた頃と同じ積分になる。
@@ -149,9 +153,18 @@ class GyroSampler:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.poll()
+            try:
+                self.poll()
+            except BaseException as exc:      # I2C の一時的な失敗でも黙って止まらない
+                self.error = exc
+                return
             if self.interval_s > 0.0:
                 self._stop.wait(self.interval_s)
+
+    @property
+    def alive(self) -> bool:
+        """スレッドが生きているか (落ちていたら方位は更新されていない)。"""
+        return self._thread is not None and self._thread.is_alive()
 
     def stop(self) -> None:
         self._stop.set()

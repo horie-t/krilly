@@ -136,3 +136,32 @@ def test_the_thread_samples_and_stops():
     assert s.count > 10
     assert math.degrees(s.delta_rad) == pytest.approx(90.0 * s.dt_s, abs=0.5)
     assert sampler._thread is None
+
+
+def test_a_failing_read_stops_the_thread_and_is_reported():
+    """**黙って 0 を返し続けないこと。**
+
+    I2C が落ちたのに角速度 0 を返し続けると、走行側は「回っていない」と誤解した
+    まま走り、方位の誤差が溜まる。落ちたことが分かるようにしておく。
+    """
+    import time as _time
+
+    class BrokenImu:
+        @property
+        def gyro(self):
+            raise OSError("I2C read failed")
+
+    sampler = GyroSampler(BrokenImu(), interval_s=0.001)
+    with sampler:
+        _time.sleep(0.05)
+        assert not sampler.alive
+    assert isinstance(sampler.error, OSError)
+
+
+def test_last_rate_reproduces_the_old_point_sample():
+    """``last_rate_rad_s`` は「その瞬間の 1 サンプル」であること (A/B の基準)。"""
+    clock = Clock()
+    sampler = GyroSampler(FakeImu(lambda t: 100.0 * t, clock), clock=clock)
+    clock.advance(0.5)
+    sampler.poll()
+    assert math.degrees(sampler.last_rate_rad_s) == pytest.approx(50.0)

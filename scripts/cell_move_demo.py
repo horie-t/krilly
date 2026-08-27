@@ -232,10 +232,10 @@ def main() -> None:
     p.add_argument("--gyro-sign", type=float, default=1.0, help="ジャイロz符号 (+1/-1)")
     p.add_argument("--gyro-scale", type=float, default=None,
                    help="ジャイロzスケール補正 (既定 robot.yaml の gyro_scale_z)")
-    p.add_argument("--gyro-sample", type=float, default=0.0, metavar="秒",
-                   help="ジャイロを別スレッドでこの間隔で連続サンプルし、1 tick 分を"
-                        "積分して使う (#81)。0 = 従来どおり tick ごとに 1 回だけ読む。"
-                        "BNO055 は NDOF で 100Hz 出力なので 0.005 が目安")
+    p.add_argument("--gyro-sample", type=float, default=0.005, metavar="秒",
+                   help="ジャイロを別スレッドでこの間隔 [s] で連続サンプルし、1 tick 分を"
+                        "積分して使う (#81)。0 で従来どおり tick ごとに 1 回だけ読む "
+                        "(実測: 点サンプルは 1.32° 化け、連続積分はカメラと 0.009°)")
     p.add_argument("--timeout", type=float, default=10.0, help="1プリミティブの上限秒数")
     p.add_argument("--camera-yaw", action="store_true",
                    help="動作前後の方位をカメラで実測してジャイロ推定と突き合わせる")
@@ -306,7 +306,7 @@ def main() -> None:
             sampler = stack.enter_context(GyroSampler(
                 imu, bias_dps=bias_z, scale=gyro_scale, sign=args.gyro_sign,
                 interval_s=args.gyro_sample))
-            log.info("ジャイロを %.0fms 間隔で連続サンプルする (#81 の切り分け)",
+            log.info("ジャイロを %.0fms 間隔で連続サンプルする (#81)",
                      args.gyro_sample * 1000)
         spread = []          # tick ごとの角速度の振れ [deg/s] (速い成分があるかの証拠)
         point_rad = [0.0]    # 従来の点サンプルで積んだ回転 [rad] (比較用)
