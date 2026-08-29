@@ -13,6 +13,10 @@ Pi 5 では ``cv2.VideoCapture`` が libcamera スタックで動作しないた
 
 from __future__ import annotations
 
+from krilly.logging_config import get_logger
+
+log = get_logger("krilly.camera")
+
 
 class Camera:
     """OpenCV 向けに BGR フレームを返す Pi カメラのラッパー。
@@ -44,6 +48,14 @@ class Camera:
         full_fov: bool = True,
         picam2=None,
     ) -> None:
+        #: ロックした露出時間 [us] とアナログゲイン (ロックしなければ None)。
+        #: **照明が変わったときに実際に動くのはここ** (#78)。自動露出は明るさを
+        #: 打ち消してしまうので、フレームを見ても照明が変わったことは分からない —
+        #: 実測では照度 20 倍の差 (調光 100% と 5%) で画面の明るさ V は 157 と 156、
+        #: 壁の赤割合は 0.401 と 0.401 でまったく動かず、露出時間だけが伸びていた。
+        #: **AE の余力がどれだけ残っているかは、この 2 つを見ないと分からない。**
+        self.exposure_time_us: int | None = None
+        self.analogue_gain: float | None = None
         if picam2 is None:
             import time
 
@@ -64,14 +76,46 @@ class Camera:
             picam2.start()
             if lock_awb_exposure:
                 time.sleep(0.5)  # 自動露出 / ホワイトバランスが落ち着くのを待つ
-                meta = picam2.capture_metadata()
-                picam2.set_controls({
-                    "AeEnable": False,
-                    "AwbEnable": False,
-                    "ExposureTime": int(meta.get("ExposureTime", 8000)),
-                    "AnalogueGain": float(meta.get("AnalogueGain", 1.0)),
-                })
+                self.lock_exposure(picam2)
         self._picam2 = picam2
+
+    def lock_exposure(self, picam2) -> None:
+        """いまの露出 / AWB を固定し、その値を記録して表示する。
+
+        **1 回の走行は「起動した瞬間の光」に焼き付けられる。** 照明が変わったら
+        撮り直しではなくスクリプトの再起動が要る (#78)。会場では、スタートセルに
+        置いて会場の照明の下で起動すること — 廊下で起動して運び込むのは別の光での
+        ロックになる。
+        """
+        meta = picam2.capture_metadata()
+        self.exposure_time_us = int(meta.get("ExposureTime", 8000))
+        self.analogue_gain = float(meta.get("AnalogueGain", 1.0))
+        picam2.set_controls({
+            "AeEnable": False,
+            "AwbEnable": False,
+            "ExposureTime": self.exposure_time_us,
+            "AnalogueGain": self.analogue_gain,
+        })
+        log.info("露出をロック: %.1fms / ゲイン %.2f%s",
+                 self.exposure_time_us / 1000.0, self.analogue_gain,
+                 self.exposure_warning() or "")
+
+    #: 露出時間がこれを超えたら警告する [us]。根拠は**時間予算**であって像の乱れでは
+    #: ない — 壁の撮影は必ず停止中に行われる (``search_run`` は移動→惰行→撮影の順)
+    #: ので、走行中のブレは判定に入らない。効くのは 1 停止あたりの所要時間で、
+    #: 探索ランは 20 回止まるから、露出 100ms は 7 分の持ち時間から 2 秒を削る。
+    #: それ以上に効くのは**この値が AE の余力の目安になる**こと: カメラの上限に
+    #: 張り付けば、そこから先は暗くなるだけで、赤の彩度も色相も一気に崩れる。
+    SLOW_EXPOSURE_US = 50_000
+
+    def exposure_warning(self) -> str | None:
+        """露出が長すぎるときの注意書き (問題なければ None)。"""
+        if self.exposure_time_us is None or self.exposure_time_us < self.SLOW_EXPOSURE_US:
+            return None
+        return (" ** 露出が長い。会場が暗いか AE が上限に近い。1 停止ごとに %.0fms を"
+                "払う (探索 20 停止で %.1fs) **"
+                % (self.exposure_time_us / 1000.0,
+                   20 * self.exposure_time_us / 1e6))
 
     def capture(self):
         """最新のフレームを BGR の NumPy 配列として返す (チャンネルに関する注意を参照)。"""

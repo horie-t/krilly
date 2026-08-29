@@ -1,0 +1,13 @@
+file,x,y,facing,edge,wall,fraction,off_fwd_mm,off_left_mm
+shot01_c54_N.png,5,4,N,front,1,0.4017,2.4,-4.7
+shot01_c54_N.png,5,4,N,back,0,0.0000,2.4,-4.7
+shot01_c54_N.png,5,4,N,left,1,0.4459,2.4,-4.7
+shot01_c54_N.png,5,4,N,right,0,0.0000,2.4,-4.7
+shot02_c54_N.png,5,4,N,front,1,0.4020,2.4,-4.7
+shot02_c54_N.png,5,4,N,back,0,0.0000,2.4,-4.7
+shot02_c54_N.png,5,4,N,left,1,0.4471,2.4,-4.7
+shot02_c54_N.png,5,4,N,right,0,0.0000,2.4,-4.7
+shot03_c54_N.png,5,4,N,front,1,0.4022,2.4,-4.7
+shot03_c54_N.png,5,4,N,back,0,0.0000,2.4,-4.7
+shot03_c54_N.png,5,4,N,left,1,0.4447,2.4,-4.7
+shot03_c54_N.png,5,4,N,right,0,0.0000,2.4,-4.7
