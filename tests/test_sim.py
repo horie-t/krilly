@@ -31,7 +31,13 @@ from krilly.sim import (
     simulate_session,
     wall_counts,
 )
-from krilly.sim.check import posts_without_wall, reachable_cells
+from krilly.sim.check import (
+    goal_center_post,
+    goal_entrances,
+    goal_interior_walls,
+    posts_without_wall,
+    reachable_cells,
+)
 from krilly.sim.generate import walled_maze
 from krilly.sim.session import fit_search_overhead
 from krilly.solver.maze import Direction, Maze
@@ -95,20 +101,32 @@ def test_set_goal_validates_the_rectangle():
 # --- 壁の枚数 ---------------------------------------------------------------
 @pytest.mark.parametrize("n", [3, 5, 8, 10, 16])
 def test_wall_bounds_follow_the_grid_arithmetic(n):
-    """外周 + 内壁の上限 = 柱の本数 (4N + (N-1)^2 = (N+1)^2)。"""
+    """外周 + 内壁の上限 = **格子点の数** (4N + (N-1)^2 = (N+1)^2)。
+
+    実際に立てる柱はそこから 1 本少ない。**2x2 のゴールの中央には柱を置かない**
+    (NTF クラシック競技規定 9:「迷路の終点となる4区画内には壁や柱は存在しない。」)。
+    奇数サイズはゴールが 1 セルなので中央の柱が在り、格子点の数と一致する。
+    """
     c = wall_counts(open_maze(n))
+    corners = (n + 1) ** 2
     assert c.outer == 4 * n
     assert c.inner == 0
-    assert c.posts == (n + 1) ** 2
+    assert c.posts == corners - (1 if n % 2 == 0 else 0)
     assert c.inner_slots == 2 * n * (n + 1) - 4 * n
-    assert 4 * n + c.inner_max == c.posts
+    assert 4 * n + c.inner_max == corners
 
 
-def test_a_perfect_maze_sits_exactly_at_the_interior_upper_bound():
-    """全セル到達可能なら内壁は (N-1)^2 枚以下。完全迷路はちょうどその値になる。"""
+def test_a_perfect_maze_sits_just_under_the_interior_upper_bound():
+    """全セル到達可能なら内壁は (N-1)^2 枚以下。完全迷路はそこから 1 枚だけ少ない。
+
+    **1 枚少ないのはゴールのため。** 2x2 のゴールは 1 つの開いた区画なので内部の
+    4 辺が全部開いていなければならないが、全域木は 4 セルを 3 辺で繋ぐので、
+    残る 1 辺を開ける分だけ上限を下回る (#23)。
+    """
     m = random_maze(10, seed=0, loop_ratio=0.0)
     c = wall_counts(m)
-    assert c.inner == c.inner_max == 81
+    assert c.inner_max == 81
+    assert c.inner == 80
     assert len(reachable_cells(m)) == 100
 
 
@@ -119,12 +137,23 @@ def test_a_maze_with_loops_stays_under_the_bound():
         assert c.inner_min <= c.inner <= c.inner_max
 
 
-def test_practice8_fits_the_70_wall_budget():
-    """#23 の実機検証は手持ち 70 枚で組めなければ意味がない。"""
-    m = Maze.from_ascii((MAZE_DIR / "practice8.txt").read_text(encoding="utf-8"))
-    assert m.size == 8
-    assert wall_counts(m).total <= 70
-    assert check_maze(m, wall_budget=70).ok
+#: 手持ちの壁と柱 (#23 で買い足し・追加製作した後)。
+WALL_STOCK, POST_STOCK = 80, 85
+
+
+def test_the_practice_mazes_are_buildable_and_legal():
+    """実機で組む迷路は**手持ちで組めて、競技の形をしている**こと (#23)。
+
+    ゴールの形の検証を入れるまで practice8 / practice16 はどちらもゴールの内側に
+    壁を抱えていた (2x2 が 1 つの区画になっていなかった)。直したぶん practice8 は
+    70 -> 71 枚になったが、手持ちは 80 枚あるので問題ない。
+    """
+    for name, size in (("practice5", 5), ("practice8", 8), ("excerpt8", 8)):
+        m = Maze.from_ascii((MAZE_DIR / f"{name}.txt").read_text(encoding="utf-8"))
+        assert m.size == size, name
+        assert wall_counts(m).total <= WALL_STOCK, name
+        assert (size + 1) ** 2 <= POST_STOCK, name
+        assert check_maze(m, wall_budget=WALL_STOCK).ok, name
 
 
 # --- 柱 ---------------------------------------------------------------------
@@ -135,7 +164,13 @@ def test_generated_mazes_keep_every_post_walled():
 
 
 def test_an_open_maze_leaves_every_interior_post_bare():
-    assert len(posts_without_wall(open_maze(8))) == 49          # (8-1)^2
+    """壁がまったく無ければ内側の柱は全部裸。**ゴール中央の 1 本は数えない。**
+
+    ゴール 2x2 は開いた区画なので、その中心の柱に壁が付かないのが正しい
+    (:func:`goal_center_post`)。実測でも大会迷路 31 面のうち 28 面が
+    「裸の柱はここ 1 本だけ」だった。
+    """
+    assert len(posts_without_wall(open_maze(8))) == 49 - 1      # (8-1)^2 - ゴール中央
 
 
 def test_keep_posts_off_lets_posts_go_bare():
@@ -346,12 +381,21 @@ def test_the_contest_corpus_is_present():
     assert len(contest_mazes()) >= 30, "書き起こした大会迷路が見つからない"
 
 
+#: 書き起こしが壊れていると分かっている迷路 (#84 / #23)。**元図で直すまで除外する。**
+#: ゴール 2x2 が縦横とも壁で仕切られており、実在しない形になっている。
+#: 消せば「通る」が、元図を確認せずに書き起こしデータを書き換えるのは筋が悪い。
+KNOWN_BAD_TRANSCRIPTIONS = {"2016_japan_freash_q"}
+
+
 @pytest.mark.parametrize("path", contest_mazes(), ids=lambda p: p.stem)
 def test_every_contest_maze_is_solvable(path):
     """大会迷路は必ず解ける。解けないなら書き起こしの誤り (#84)。"""
     maze = Maze.from_ascii(path.read_text(encoding="utf-8"))
     assert maze.size == 16
     report = check_maze(maze)
+    if path.stem in KNOWN_BAD_TRANSCRIPTIONS:
+        assert not report.ok, f"{path.stem} が直ったなら除外リストから外すこと"
+        return
     assert report.ok, f"{path.stem}: {report.errors}"
 
 
@@ -386,7 +430,11 @@ def test_the_official_answer_is_reproduced():
 def test_contest_mazes_are_harder_than_generated_ones():
     """**生成した迷路は本物の代わりにならない** (#84 の根拠)。
 
-    壁の枚数を合わせても解の長さが 4 倍違う。難しさは密度ではなく配置で決まる。
+    壁の枚数を合わせても解の長さが 3 倍違う。難しさは密度ではなく配置で決まる。
+
+    比は #23 のゴール修正で 3.7 倍から 2.95 倍に縮んだ。生成迷路のゴールが
+    「内側に壁があり入口も複数」だったのを競技の形 (開いた 2x2・入口 1 つ) に
+    直した結果、生成側の解が 16 -> 20 セルに伸びたため。**結論は変わらない。**
     """
     import statistics
     real = [Maze.from_ascii(p.read_text(encoding="utf-8")) for p in contest_mazes()]
@@ -396,7 +444,7 @@ def test_contest_mazes_are_harder_than_generated_ones():
     real_walls = statistics.median(wall_counts(m).inner for m in real)
     fake_walls = statistics.median(wall_counts(m).inner for m in fake)
     assert abs(real_walls - fake_walls) < 40      # 壁の枚数は近いのに
-    assert real_sol > 3 * fake_sol               # 解の長さは 3 倍以上違う
+    assert real_sol > 2.5 * fake_sol             # 解の長さは 3 倍近く違う
 
 
 # --- 左右の隣セルを読む (#89) -----------------------------------------------
@@ -448,3 +496,59 @@ def test_pass_through_never_enters_a_cell_with_unobserved_walls():
     ex = result.explorer
     assert ex.visited <= ex.known
     assert not map_agrees(truth, ex.maze, ex.known)      # 確定した壁は真の迷路と一致
+
+
+# --- ゴールの形 (#23) -------------------------------------------------------
+def test_a_competition_goal_is_one_open_square_with_one_door():
+    """切り出した迷路のゴールが競技の形になっていること。"""
+    maze = Maze.from_ascii((MAZE_DIR / "excerpt8.txt").read_text(encoding="utf-8"))
+    assert goal_interior_walls(maze) == 0
+    assert len(goal_entrances(maze)) == 1
+
+
+def test_the_goal_centre_post_is_bare_and_that_is_correct():
+    """ゴール中央の柱に壁が付かないのは正しい。**数えてはいけない。**
+
+    大会迷路 31 面のうち 28 面が「裸の柱はここ 1 本だけ」。例外を入れるまで、
+    正しい迷路が軒並み「公式規則違反」と判定されていた。
+    """
+    maze = Maze.from_ascii((MAZE_DIR / "excerpt8.txt").read_text(encoding="utf-8"))
+    centre = goal_center_post(maze)
+    assert centre == (4, 4)
+    assert centre not in posts_without_wall(maze)
+    assert centre in posts_without_wall(maze, ignore_goal_center=False)
+    assert goal_center_post(Maze(5)) is None        # 1x1 のゴールには中央の柱が無い
+
+
+def test_check_catches_a_walled_goal():
+    """ゴールの内側に壁があれば**誤り** (迷路として成立しない)。"""
+    maze = open_maze(8)
+    maze.set_wall(3, 3, Direction.E)               # ゴール 2x2 を割る
+    report = check_maze(maze)
+    assert not report.ok
+    assert "ゴール区画の内側" in report.errors[0]
+
+
+def test_open_goal_region_makes_a_generated_maze_legal():
+    """生成器のゴールを競技の形に直す。**全セル到達可能なまま**であること。"""
+    from krilly.sim import open_goal_region
+    from krilly.sim.check import reachable_cells
+
+    maze = walled_maze(6)
+    for x in range(6):                              # 全部つながった素の迷路を作る
+        for y in range(6):
+            for d in (Direction.N, Direction.E):
+                if maze.in_bounds(*maze.neighbor(x, y, d)):
+                    maze.set_wall(x, y, d, False)
+    open_goal_region(maze)
+    assert goal_interior_walls(maze) == 0
+    assert len(goal_entrances(maze)) == 1
+    assert len(reachable_cells(maze)) == 36         # 孤立させていない
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+def test_generated_mazes_now_have_a_competition_goal(seed):
+    """生成器が出す迷路のゴールが競技の形であること (#23 で入れた)。"""
+    maze = random_maze(12, seed=seed)
+    assert goal_interior_walls(maze) == 0
+    assert len(goal_entrances(maze)) >= 1

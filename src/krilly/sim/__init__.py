@@ -13,10 +13,19 @@
 - :mod:`~krilly.sim.session` — 探索 → 復帰 → 最速 xN を一本で回す統合シミュレータ
 """
 
-from krilly.sim.check import MazeReport, check_maze, map_agrees, wall_counts
+from krilly.sim.check import (
+    MazeReport,
+    check_maze,
+    goal_center_post,
+    goal_entrances,
+    goal_interior_walls,
+    map_agrees,
+    wall_counts,
+)
 from krilly.sim.generate import (
     comb_maze,
     diagonal_goal,
+    open_goal_region,
     open_maze,
     random_maze,
     seal_goal,
@@ -27,8 +36,9 @@ from krilly.sim.sense import sense, sense_neighbors
 from krilly.sim.session import RunRecord, SessionResult, fit_search_overhead, simulate_session
 
 __all__ = [
-    "MazeReport", "check_maze", "map_agrees", "wall_counts",
-    "comb_maze", "diagonal_goal", "open_maze", "random_maze", "seal_goal",
+    "MazeReport", "check_maze", "goal_center_post", "goal_entrances",
+    "goal_interior_walls", "map_agrees", "wall_counts",
+    "comb_maze", "diagonal_goal", "open_maze", "open_goal_region", "random_maze", "seal_goal",
     "serpentine_maze", "walled_maze",
     "sense", "sense_neighbors",
     "RunRecord", "SessionResult", "fit_search_overhead", "simulate_session",

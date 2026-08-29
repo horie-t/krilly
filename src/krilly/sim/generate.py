@@ -134,7 +134,45 @@ def random_maze(
         _set_edge(maze, e, False)
         if keep_posts and not all(_post_still_covered(maze, size, p) for p in _posts_of(e)):
             _set_edge(maze, e, True)
-    return maze
+    # ゴールは普通のセルとして掘られるので、最後に競技の形へ直す (#23)。
+    # これを入れるまで、生成した迷路はすべてゴールの内側に壁を抱えていた。
+    return open_goal_region(maze, rng)
+
+
+def open_goal_region(maze: Maze, rng: random.Random | None = None) -> Maze:
+    """ゴール区画を**競技の形**にする (内側を開け、入口を 1 つに絞る)。破壊的。
+
+    競技のゴールは 2x2 が 1 つの開いた区画で、入口は 1 つ (大会迷路 31 面のうち
+    23 面が 1 つ、残りも 2-3 つ)。生成器も切り出しもゴールを普通のセルとして扱うので、
+    そのままでは**内側に壁が残り入口も 4 つになる**。
+
+    入口を閉じると、そこを通ってしか行けないセルが孤立しうる。**孤立させない
+    範囲でだけ閉じる** (閉じられなければ 2 つ以上残す — 実在の迷路にもある形)。
+
+    ゴール中央の柱には壁が付かなくなるが、**それが正しい**
+    (:func:`~krilly.sim.check.goal_center_post`)。
+    """
+    from krilly.sim.check import goal_entrances, reachable_cells
+
+    goals = set(maze.goal_cells())
+    for cell in goals:
+        for d in Direction:
+            if maze.neighbor(*cell, d) in goals:
+                maze.set_wall(*cell, d, False)
+    total = maze.size * maze.size
+    while True:
+        doors = goal_entrances(maze)
+        if len(doors) <= 1:
+            return maze
+        if rng is not None:
+            rng.shuffle(doors)
+        for cell, d in doors:
+            maze.set_wall(cell[0], cell[1], d)
+            if len(reachable_cells(maze)) == total and len(goal_entrances(maze)) >= 1:
+                break                       # 孤立させずに 1 つ閉じられた
+            maze.set_wall(cell[0], cell[1], d, False)
+        else:
+            return maze                     # これ以上は閉じられない
 
 
 def serpentine_maze(size: int) -> Maze:
