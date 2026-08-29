@@ -154,6 +154,8 @@ def main() -> None:
         log.error("--truth-maze は %dx%d だが走るのは %dx%d。中止。",
                   truth.size, truth.size, maze.size, maze.size)
         return
+    if args.save_frames:
+        Path(args.save_frames).parent.mkdir(parents=True, exist_ok=True)
 
     log.info("迷路 %dx%d / ゴール %s / スタート %s 北向き / %s",
              maze.size, maze.size, maze.goal_cells(), maze.start,

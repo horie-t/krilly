@@ -139,6 +139,8 @@ def main() -> None:
         log.error("--truth-maze は %dx%d だが走るのは %dx%d。中止。",
                   truth.size, truth.size, maze.size, maze.size)
         return
+    if args.save_frames:
+        Path(args.save_frames).parent.mkdir(parents=True, exist_ok=True)
     log.info("迷路 %dx%d / ゴール %s / 持ち時間 %.0fs / 最大 %d 走",
              maze.size, maze.size, maze.goal_cells(), args.time_limit, args.max_runs)
     log.info("探索の観測: 自セルの 4 壁%s / 1 動作で最大 %d セル",
