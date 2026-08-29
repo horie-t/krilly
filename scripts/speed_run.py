@@ -80,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--time-limit", type=float, default=420.0,
                    help="持ち時間 [s] (既定 420 = クラシック規定の 7 分。大会により 5 分)")
     p.add_argument("--max-runs", type=int, default=5, help="最大走行回数")
+    p.add_argument("--time-margin", type=float, default=None, metavar="倍率",
+                   help="走行を始めるかの判断に掛ける安全率 (既定 1.2、#87)。"
+                        "上げると際どい走行を断るようになる — 規定 3-1 では記録は"
+                        "最速の 1 走行なので、断る方が高くつくことに注意")
     p.add_argument("--max-steps", type=int, default=400, help="探索の打ち切りステップ数")
     p.add_argument("--timeout", type=float, default=10.0, help="1動作の上限秒数 (直進はセル数で延長)")
     p.add_argument("--no-imu", action="store_true", help="ジャイロ融合なし")
@@ -125,6 +129,8 @@ def main() -> None:
     explorer = Explorer(maze, holonomic=not args.turn_in_place)
     manager = RunManager(explorer, time_limit_s=args.time_limit, max_runs=args.max_runs,
                          holonomic=not args.turn_in_place,
+                         **({} if args.time_margin is None
+                            else {"time_margin": args.time_margin}),
                          chain_legs=1 if args.turn_in_place else max(1, args.chain_legs),
                          cost=LEGACY_COST if args.turn_in_place else DEFAULT_COST)
     neighbors = not args.no_neighbors
@@ -144,8 +150,9 @@ def main() -> None:
         return
     if args.save_frames:
         Path(args.save_frames).parent.mkdir(parents=True, exist_ok=True)
-    log.info("迷路 %dx%d / ゴール %s / 持ち時間 %.0fs / 最大 %d 走",
-             maze.size, maze.size, maze.goal_cells(), args.time_limit, args.max_runs)
+    log.info("迷路 %dx%d / ゴール %s / 持ち時間 %.0fs / 最大 %d 走 / 安全率 %.2f",
+             maze.size, maze.size, maze.goal_cells(), args.time_limit, args.max_runs,
+             manager.time_margin)
     log.info("探索の観測: 自セルの 4 壁%s / 1 動作で最大 %d セル",
              " + 左右の隣セル (#89)" if neighbors else "", pass_cells)
     log.info("最速・復帰: 1 動作で最大 %d 区間%s",

@@ -107,7 +107,7 @@ def simulate_session(
     cost: MoveCost = DEFAULT_COST,
     time_limit_s: float = 420.0,
     max_runs: int = 5,
-    time_margin: float = 1.5,
+    time_margin: float = 1.2,
     start_facing: Direction = Direction.N,
     search_step_overhead_s: float = 0.0,
     actual_scale: float = 1.0,

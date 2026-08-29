@@ -47,6 +47,7 @@ from krilly.sim import (
     serpentine_maze,
     simulate_session,
 )
+from krilly.sim.session import SessionResult
 from krilly.solver.maze import Maze
 from krilly.strategy.shortest_path import DEFAULT_COST, LEGACY_COST
 
@@ -83,6 +84,8 @@ def build_args() -> argparse.ArgumentParser:
     cfg.add_argument("--time-limit", type=float, default=420.0,
                      help="持ち時間 [s] (既定 420 = クラシック規定の 7 分)")
     cfg.add_argument("--max-runs", type=int, default=5, help="最大走行回数")
+    cfg.add_argument("--time-margin", type=float, default=None, metavar="倍率",
+                     help="走行を始めるかの判断に掛ける安全率 (既定 1.2、#87)")
     cfg.add_argument("--actual-scale", type=float, default=1.0,
                      help="実際は見積もりの何倍かかるか (予算判断の余裕を試す)")
     cfg.add_argument("--search-overhead", type=float, default=0.0,
@@ -100,6 +103,12 @@ def build_args() -> argparse.ArgumentParser:
                      help="手持ちの壁の枚数 (足りなければ注意を出す)")
     out.add_argument("--ascii", action="store_true", help="迷路を ASCII で表示する")
     out.add_argument("--verbose", action="store_true", help="各走行の内訳も出す")
+    out.add_argument("--budget-sweep", action="store_true",
+                     help="安全率 x 実測倍率の表を出す (#87 の判断に使った表)")
+    out.add_argument("--sweep-margins", default="1.5,1.4,1.3,1.2,1.1,1.0",
+                     help="--budget-sweep で振る安全率")
+    out.add_argument("--sweep-scales", default="1.0,1.1,1.2,1.4",
+                     help="--budget-sweep で振る「実機が見積もりの何倍かかるか」")
     return p
 
 
@@ -127,15 +136,60 @@ def collect(args) -> list[tuple[str, Maze, bool]]:
     return mazes
 
 
+def budget_sweep(args, mazes: list[tuple[str, Maze, bool]], cost) -> int:
+    """安全率 x 実測倍率で「何面が最速ランを走れるか」の表を出す (#87)。
+
+    **安全率が守っているのは「始めた走行を終えられるか」だけ。** 守りすぎると走れた
+    はずの最速ランを断る方に外れ、規定 3-1 では記録は最速の 1 走行なので、時間切れの
+    最速ランは時間を失うだけ — 断る方が高くつく。だから片側だけを見てはいけない:
+    **走れない面が減ることと、7 分を超える面が増えないことを同時に見る。**
+    """
+    margins = [float(v) for v in args.sweep_margins.split(",")]
+    scales = [float(v) for v in args.sweep_scales.split(",")]
+    runnable = [(n, m) for n, m, _ok in mazes if check_maze(m).ok]
+    log.info("大会迷路 %d 面 (健全なもののみ) / 各セルは 最速0本 総走行 超過",
+             len(runnable))
+    log.info("安全率 |" + "".join("  実測 %.1f 倍  |" % s for s in scales))
+    best: tuple[float, int, int] | None = None
+    for margin in margins:
+        cells = []
+        for scale in scales:
+            rs = [simulate_session(
+                      m, holonomic=not args.turn_in_place, cost=cost,
+                      time_limit_s=args.time_limit, max_runs=args.max_runs,
+                      time_margin=margin, actual_scale=scale,
+                      search_step_overhead_s=args.search_overhead,
+                      chain_legs=args.chain_legs,
+                      neighbor_sensing=not args.no_neighbors,
+                      max_leg_cells=args.pass_cells or (1 if args.no_neighbors else 2))
+                  for _, m in runnable]
+            zero = sum(1 for r in rs if not r.speed_runs)
+            total = sum(len(r.speed_runs) for r in rs)
+            over = sum(1 for r in rs if r.elapsed_s > r.limit_s)
+            cells.append(" %2d/%2d %3d %2d |" % (zero, len(runnable), total, over))
+            if scale == scales[0] and (best is None or (zero, -total) < best[1:]):
+                best = (margin, zero, -total)
+        log.info(" %4.2f  |" % margin + "".join(cells))
+    log.info("最速0本 = 最速ランを 1 本も走れない面 / 総走行 = 最速ランの合計 / "
+             "超過 = 7 分を超えた面")
+    log.info("**超過が出ない範囲で最速0本が最小の安全率を選ぶこと。** "
+             "断る方が高くつくが、始めた走行を終えられないのは別の損。")
+    return 0
+
+
 def main() -> int:
     args = build_args().parse_args()
     setup_logging()
     mazes = collect(args)
     if not mazes:
         raise SystemExit("迷路が指定されていない (--maze / --generate / --pattern)")
+    if args.budget_sweep:
+        return budget_sweep(args, mazes,
+                            LEGACY_COST if args.turn_in_place else DEFAULT_COST)
 
     cost = LEGACY_COST if args.turn_in_place else DEFAULT_COST
     problems = 0
+    sessions: list[SessionResult] = []
     for name, maze, expect_ok in mazes:
         if args.ascii:
             log.info("%s:\n%s", name, maze.to_ascii())
@@ -155,9 +209,11 @@ def main() -> int:
             time_limit_s=args.time_limit, max_runs=args.max_runs,
             search_step_overhead_s=args.search_overhead, actual_scale=args.actual_scale,
             chain_legs=args.chain_legs,
+            **({} if args.time_margin is None else {"time_margin": args.time_margin}),
             neighbor_sensing=not args.no_neighbors,
             max_leg_cells=args.pass_cells or (1 if args.no_neighbors else 2),
         )
+        sessions.append(result)
         good = result.ok is expect_ok
         speed = f"{result.best_speed_s:.1f}s" if result.best_speed_s else "-"
         log.info("%-24s %s 探索 %.1fs (%d 停止 / %d セル) / 最速 %s / 経過 %.1fs / "
@@ -174,6 +230,15 @@ def main() -> int:
             problems += 1
 
     log.info("---")
+    if sessions:
+        # #87 が問うているのはここ。**ゴールに着くことと、走れることは別**である。
+        zero = sum(1 for r in sessions if not r.speed_runs)
+        runs = sorted(r.runs_used for r in sessions)
+        log.info("最速ランを 1 本も走れない面 %d/%d / 最速ラン合計 %d 本 / "
+                 "走行回数の中央値 %d / 7 分を超えた面 %d",
+                 zero, len(sessions), sum(len(r.speed_runs) for r in sessions),
+                 runs[len(runs) // 2],
+                 sum(1 for r in sessions if r.elapsed_s > r.limit_s))
     log.info("%d 面中 %d 面に問題", len(mazes), problems)
     return 1 if problems else 0
 
