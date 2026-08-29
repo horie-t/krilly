@@ -44,6 +44,7 @@ pytest
 ```
 
 Raspberry Pi 5 の実機セットアップは [`docs/setup-pi5.md`](docs/setup-pi5.md) を参照してください。
+競技会場で走らせる当日の手順は [`docs/venue-checklist.md`](docs/venue-checklist.md) にあります。
 
 進捗は [GitHub Project ボード](https://github.com/users/horie-t/projects/4) で
 Milestone（M0〜M6）と Issue により管理し、コードはレビュー済みの PR を通じてマージします。

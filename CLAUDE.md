@@ -17,6 +17,7 @@ Code comments and docstrings are written in **Japanese** (technical terms, ident
 - Hardware-only deps (`spidev`, `lgpio`, `picamera2`) are `aarch64`-gated in `pyproject.toml` and lazy-imported; `smbus2`/`numpy`/`opencv-python`/`pyyaml` are always installed so pure-logic code and tests run on any machine.
 
 Raspberry Pi 5 enablement (SPI/I2C/camera): see `docs/setup-pi5.md`.
+Competition-day procedure (what to check before a run, how to read the exposure line, what to do when the venue is dark): see `docs/venue-checklist.md`.
 
 ## Commands
 
