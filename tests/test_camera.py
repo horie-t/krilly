@@ -80,3 +80,47 @@ def test_nothing_is_recorded_until_a_lock_happens():
     cam = Camera(picam2=FakePicam2())
     assert cam.exposure_time_us is None and cam.analogue_gain is None
     assert cam.exposure_warning() is None and cam.headroom_stops() == 0.0
+
+
+# --- 手動で露出を固定する (#87、黒い床の白飛び対策) ------------------------
+
+def test_a_forced_exposure_overrides_what_ae_chose():
+    """**黒い床では AE を信じない選択肢が要る。**
+
+    視野の大半が黒い床だと AE が開き、明るい壁上面が白飛びして彩度が落ちる
+    (#56 は S=46-54 まで落ちて壁を見落とし、機体が衝突した)。露出を下げる手段が
+    無いと打つ手が無くなる。
+    """
+    fake = FakePicam2(50_000, 12.0)             # AE は開ききっている
+    cam = Camera(picam2=fake, exposure_us=8_000, gain=2.0)
+    cam.lock_exposure(fake)
+    assert cam.exposure_time_us == 8_000 and cam.analogue_gain == 2.0
+    assert fake.controls["ExposureTime"] == 8_000
+    assert fake.controls["AnalogueGain"] == 2.0
+
+
+def test_forcing_only_one_of_them_leaves_the_other_to_ae():
+    cam = Camera(picam2=FakePicam2(50_000, 12.0), exposure_us=8_000)
+    cam.lock_exposure(cam._picam2)
+    assert cam.exposure_time_us == 8_000        # 指定した方
+    assert cam.analogue_gain == 12.0            # AE の判断のまま
+
+
+def test_camera_args_round_trip():
+    """引数ヘルパーが :class:`Camera` の引数へそのまま渡せること。"""
+    import argparse
+
+    from krilly.hal.camera import add_camera_args, camera_kwargs
+
+    p = argparse.ArgumentParser()
+    add_camera_args(p)
+    assert camera_kwargs(p.parse_args([])) == {
+        "max_frame_duration_us": 33_300, "ae_constraint": None,
+        "exposure_us": None, "gain": None,
+    }
+    got = camera_kwargs(p.parse_args(
+        ["--max-frame-duration", "100", "--ae-constraint", "Highlight",
+         "--exposure", "8", "--gain", "2.5"]))
+    assert got == {"max_frame_duration_us": 100_000, "ae_constraint": "Highlight",
+                   "exposure_us": 8_000, "gain": 2.5}
+    Camera(picam2=FakePicam2(), **got)          # 受け取れること
