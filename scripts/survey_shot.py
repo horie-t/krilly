@@ -70,6 +70,9 @@ def main() -> None:
     p.add_argument("--maze", required=True, help="既知形状の ASCII テキストファイル")
     p.add_argument("--out-dir", default="survey", help="出力ディレクトリ (追記)")
     p.add_argument("--prefix", default="shot", help="ファイル名のプレフィクス")
+    p.add_argument("--max-frame-duration", type=float, default=33.3,
+                   metavar="ミリ秒",
+                   help="フレーム間隔の上限 [ms]。暗い会場で露出を稼ぐ (既定 33.3 = 30fps 固定)。**100 にすると 0.6 段ぶん暗さに強くなる。それ以上は AE が露出を 50ms で打ち切るので無意味** (#78 実測)。代償は 1 停止あたりの待ち時間だけ (撮影は必ず停止中)")
     args = p.parse_args()
 
     setup_logging()
@@ -85,7 +88,7 @@ def main() -> None:
 
     from krilly.hal.camera import Camera
 
-    with Camera() as camera, open(csv_path, "a", newline="", encoding="utf-8") as f:
+    with Camera(max_frame_duration_us=int(args.max_frame_duration * 1000)) as camera, open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         if write_header:
             writer.writeheader()

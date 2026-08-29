@@ -103,7 +103,8 @@ log = get_logger("krilly.wall_detect")
 
 
 def measure_repeatability(count: int, interval: float, save_prefix: str | None,
-                          neighbors: bool = False) -> None:
+                          neighbors: bool = False,
+                          max_frame_duration_us: int = 33_333) -> None:
     """静止したまま N フレーム撮り、位置測定のばらつきを表にする (#21)。
 
     帯探索は ROI を ±40px スライドして赤割合が最大の位置を採るので、本物の帯の
@@ -122,7 +123,7 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None,
     edges = (FRONT, BACK, LEFT, RIGHT)
     rows: list[tuple[dict[str, tuple[float, float, bool]], CellOffset]] = []
     yaws: list[float] = []
-    with Camera() as cam:
+    with Camera(max_frame_duration_us=max_frame_duration_us) as cam:
         for i in range(count):
             if i:
                 time.sleep(interval)
@@ -342,6 +343,9 @@ def main() -> None:
     p.add_argument("--measure", type=int, default=0, metavar="N",
                    help="静止したまま N フレーム撮り、位置測定の再現性を表示する")
     p.add_argument("--interval", type=float, default=0.3, help="--measure のフレーム間隔 [s]")
+    p.add_argument("--max-frame-duration", type=float, default=33.3,
+                   metavar="ミリ秒",
+                   help="フレーム間隔の上限 [ms]。暗い会場で露出を稼ぐ (既定 33.3 = 30fps 固定)。**100 にすると 0.6 段ぶん暗さに強くなる。それ以上は AE が露出を 50ms で打ち切るので無意味** (#78 実測)。代償は 1 停止あたりの待ち時間だけ (撮影は必ず停止中)")
     p.add_argument("--save-prefix", default=None, help="--measure のフレーム保存先プレフィクス")
     p.add_argument("--image", default=None, help="入力画像 (未指定ならカメラ取得)")
     p.add_argument("--batch", default=None, metavar="DIR",
@@ -378,7 +382,8 @@ def main() -> None:
         return
     if args.measure:
         measure_repeatability(args.measure, args.interval, args.save_prefix,
-                              args.neighbors)
+                              args.neighbors,
+                              int(args.max_frame_duration * 1000))
         return
     if args.image:
         frame = cv2.imread(args.image)

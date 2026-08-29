@@ -107,6 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "<プレフィクス>_labels.csv に赤割合と正解ラベルとして残る (#78)")
     p.add_argument("--truth-maze", default=None, metavar="FILE",
                    help="正解ラベルに使う既知形状の迷路 (既定: 走行後に確定した地図)")
+    p.add_argument("--max-frame-duration", type=float, default=33.3,
+                   metavar="ミリ秒",
+                   help="フレーム間隔の上限 [ms]。暗い会場で露出を稼ぐ (既定 33.3 = 30fps 固定)。**100 にすると 0.6 段ぶん暗さに強くなる。それ以上は AE が露出を 50ms で打ち切るので無意味** (#78 実測)。代償は 1 停止あたりの待ち時間だけ (撮影は必ず停止中)")
     return p
 
 
@@ -157,7 +160,8 @@ def main() -> None:
 
         from krilly.hal.camera import Camera
 
-        camera = stack.enter_context(Camera())
+        camera = stack.enter_context(
+            Camera(max_frame_duration_us=int(args.max_frame_duration * 1000)))
         chain = stack.enter_context(
             L6470Chain(num_devices=args.devices, bus=args.bus, device=args.device)
         )

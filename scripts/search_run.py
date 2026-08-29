@@ -124,6 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "残す (#78。ラベルは走行後に確定した地図から貼る)")
     p.add_argument("--truth-maze", default=None, metavar="FILE",
                    help="正解ラベルに使う既知形状の迷路 (既定: 走行後に確定した地図)")
+    p.add_argument("--max-frame-duration", type=float, default=33.3,
+                   metavar="ミリ秒",
+                   help="フレーム間隔の上限 [ms]。暗い会場で露出を稼ぐ (既定 33.3 = 30fps 固定)。**100 にすると 0.6 段ぶん暗さに強くなる。それ以上は AE が露出を 50ms で打ち切るので無意味** (#78 実測)。代償は 1 停止あたりの待ち時間だけ (撮影は必ず停止中)")
     return p
 
 
@@ -170,7 +173,8 @@ def main() -> None:
     with contextlib.ExitStack() as stack:
         from krilly.hal.camera import Camera   # 遅延 import (実機専用の依存)
 
-        camera = stack.enter_context(Camera())
+        camera = stack.enter_context(
+            Camera(max_frame_duration_us=int(args.max_frame_duration * 1000)))
         chain = imu = None
         bias_z = 0.0
         if not args.dry_run:
