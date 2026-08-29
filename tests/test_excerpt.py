@@ -14,13 +14,18 @@ from krilly.sim.excerpt import (
 from krilly.solver.maze import Direction, Maze
 
 
-def test_pieces_needed_is_the_post_count():
-    """壁も柱も ``(N+1)^2``。外周 4N + 内壁の上限 (N-1)^2 が柱の本数と一致する。"""
+def test_pieces_needed_counts_the_goal_centre_out():
+    """壁は ``(N+1)^2``、柱は**そこから 1 本少ない**。
+
+    格子点は ``(N+1)^2`` あるが、2x2 のゴールの中央には柱を立てない
+    (NTF クラシック競技規定 9:「迷路の終点となる4区画内には壁や柱は存在しない。」)。
+    """
     for n in (5, 6, 7, 8, 16):
         walls, posts = pieces_needed(n)
-        assert walls == posts == (n + 1) ** 2
-        assert walls == 4 * n + (n - 1) ** 2
-    assert pieces_needed(8) == (81, 81)      # 手持ち 80 枚 / 85 本との比較用
+        assert walls == 4 * n + (n - 1) ** 2 == (n + 1) ** 2
+        assert posts == walls - 1
+        assert pieces_needed(n, goal_2x2=False)[1] == walls
+    assert pieces_needed(8) == (81, 80)      # 手持ち 80 枚 / 85 本で組める
 
 
 def test_excerpt_copies_the_window_and_closes_the_outside():

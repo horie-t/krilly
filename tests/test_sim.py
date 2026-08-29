@@ -101,13 +101,19 @@ def test_set_goal_validates_the_rectangle():
 # --- 壁の枚数 ---------------------------------------------------------------
 @pytest.mark.parametrize("n", [3, 5, 8, 10, 16])
 def test_wall_bounds_follow_the_grid_arithmetic(n):
-    """外周 + 内壁の上限 = 柱の本数 (4N + (N-1)^2 = (N+1)^2)。"""
+    """外周 + 内壁の上限 = **格子点の数** (4N + (N-1)^2 = (N+1)^2)。
+
+    実際に立てる柱はそこから 1 本少ない。**2x2 のゴールの中央には柱を置かない**
+    (NTF クラシック競技規定 9:「迷路の終点となる4区画内には壁や柱は存在しない。」)。
+    奇数サイズはゴールが 1 セルなので中央の柱が在り、格子点の数と一致する。
+    """
     c = wall_counts(open_maze(n))
+    corners = (n + 1) ** 2
     assert c.outer == 4 * n
     assert c.inner == 0
-    assert c.posts == (n + 1) ** 2
+    assert c.posts == corners - (1 if n % 2 == 0 else 0)
     assert c.inner_slots == 2 * n * (n + 1) - 4 * n
-    assert 4 * n + c.inner_max == c.posts
+    assert 4 * n + c.inner_max == corners
 
 
 def test_a_perfect_maze_sits_just_under_the_interior_upper_bound():

@@ -219,17 +219,38 @@ class Maze:
                 and self._goal_min[1] <= y <= self._goal_max[1])
 
     # -- デバッグ表示 -------------------------------------------------------
+    def goal_center_post(self) -> tuple[int, int] | None:
+        """ゴール区画の中心にある柱の位置。**2x2 のゴールでは「無い」のが正しい。**
+
+        NTF クラシック競技規定 9:「迷路の終点となる4区画内には壁や柱は存在しない。」
+        つまりゴール 2x2 の真ん中は「壁が接していない柱」ではなく、**柱そのものが
+        立っていない**。区別が要る場面が 2 つある:
+
+        - **必要な柱の本数** — ``(N+1)^2`` ではなく ``(N+1)^2 - 1``
+        - **ASCII の描画** — そこに ``+`` を描くと、組む人が柱を立ててしまう
+
+        ゴールが 1 セル (奇数サイズ) なら中心の柱は存在するので None を返す。
+        """
+        (x0, y0), (x1, y1) = self._goal_min, self._goal_max
+        return None if x1 == x0 or y1 == y0 else (x1, y1)
+
     def to_ascii(self, markers: bool = True) -> str:
         """迷路を ASCII で表示 (北が上)。壁 '---'/'|'、格子点 '+'。
 
         ``markers`` でスタート ``S`` / ゴール ``G`` をセルの内側に書く。
         :meth:`from_ascii` が読み戻すので往復できる。
+
+        **ゴール中央には ``+`` を描かない** (競技規定 9 でそこに柱は存在しない)。
+        描くと、この図を見て組む人が立ててしまう。
         """
+        center = self.goal_center_post()
         lines = []
         for y in range(self.size - 1, -1, -1):
-            top = "+"
-            for x in range(self.size):
-                top += ("---" if self.has_wall(x, y, Direction.N) else "   ") + "+"
+            top = ""
+            for x in range(self.size + 1):
+                top += " " if (x, y + 1) == center else "+"
+                if x < self.size:
+                    top += "---" if self.has_wall(x, y, Direction.N) else "   "
             lines.append(top)
             mid = "|" if self.has_wall(0, y, Direction.W) else " "
             for x in range(self.size):
@@ -241,8 +262,10 @@ class Maze:
                         mark = "G"
                 mid += f" {mark} " + ("|" if self.has_wall(x, y, Direction.E) else " ")
             lines.append(mid)
-        bottom = "+"
-        for x in range(self.size):
-            bottom += ("---" if self.has_wall(x, 0, Direction.S) else "   ") + "+"
+        bottom = ""
+        for x in range(self.size + 1):
+            bottom += " " if (x, 0) == center else "+"
+            if x < self.size:
+                bottom += "---" if self.has_wall(x, 0, Direction.S) else "   "
         lines.append(bottom)
         return "\n".join(lines)

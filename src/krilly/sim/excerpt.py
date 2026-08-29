@@ -27,11 +27,15 @@ from dataclasses import dataclass
 from krilly.sim.check import goal_entrances, goal_interior_walls
 from krilly.solver.maze import Direction, Maze
 
-#: 壁も柱も ``(N+1)^2`` 枚 (本) あればどんな N×N でも組める。
-#: 外周 ``4N`` + 内壁の上限 ``(N-1)^2`` = ``(N+1)^2`` が柱の本数と一致する。
-def pieces_needed(size: int) -> tuple[int, int]:
-    """``size``×``size`` を**どんなレイアウトでも**組むのに要る (壁, 柱) の数。"""
-    return ((size + 1) ** 2, (size + 1) ** 2)
+def pieces_needed(size: int, goal_2x2: bool = True) -> tuple[int, int]:
+    """``size``×``size`` を**どんなレイアウトでも**組むのに要る (壁, 柱) の数。
+
+    壁は 外周 ``4N`` + 内壁の上限 ``(N-1)^2`` = ``(N+1)^2``。柱は格子点の数が
+    同じ ``(N+1)^2`` だが、**2x2 のゴールの中央には柱を立てない**ので 1 本少ない
+    (NTF クラシック競技規定 9:「迷路の終点となる4区画内には壁や柱は存在しない。」)。
+    """
+    corners = (size + 1) ** 2
+    return (corners, corners - (1 if goal_2x2 else 0))
 
 
 def excerpt(source: Maze, x0: int, y0: int, size: int) -> Maze:

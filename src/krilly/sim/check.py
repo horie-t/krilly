@@ -30,13 +30,14 @@ class WallCounts:
     - **内壁の下限 ``ceil((N-1)^2/2)``** — 「柱には必ず 1 枚以上の壁が接する」を
       満たす最小の辺被覆 (内側の柱 ``(N-1)^2`` 本を 1 枚 2 本ずつ覆う)。
 
-    ``outer + inner_max == (N+1)^2`` = 柱の本数、というきれいな関係がある。
+    ``outer + inner_max == (N+1)^2`` = **格子点の数**、というきれいな関係がある。
+    実際に立てる柱はそこから 1 本少ない (ゴール 2x2 の中央には柱を置かない、規定 9)。
     """
 
     size: int
     outer: int          # 外周にある壁の枚数 (完全なら 4N)
     inner: int          # 内壁の枚数
-    posts: int          # 柱の本数 (N+1)^2
+    posts: int          # 実際に立てる柱の本数 ((N+1)^2 - ゴール中央の 1 本)
 
     @property
     def total(self) -> int:
@@ -77,21 +78,19 @@ def wall_counts(maze: Maze) -> WallCounts:
                 for x in range(1, n) for y in range(n))          # 縦の内壁
     inner += sum(maze.has_wall(x, y - 1, Direction.N)
                  for x in range(n) for y in range(1, n))         # 横の内壁
-    return WallCounts(size=n, outer=outer, inner=inner, posts=(n + 1) ** 2)
+    # 柱は格子点の数 (N+1)^2 から、ゴール中央の 1 本を引いたもの (競技規定 9)。
+    posts = (n + 1) ** 2 - (1 if maze.goal_center_post() is not None else 0)
+    return WallCounts(size=n, outer=outer, inner=inner, posts=posts)
 
 
 # --- 柱 ---------------------------------------------------------------------
 def goal_center_post(maze: Maze) -> tuple[int, int] | None:
-    """ゴール区画の中心にある柱 (2x2 のゴールにだけ在る)。1x1 のゴールなら None。
+    """ゴール中央の柱の位置。**2x2 のゴールではそこに柱は立てない。**
 
-    **この柱には壁が付かないのが正しい。** ゴール 2x2 は 1 つの開いた区画なので、
-    その真ん中の柱は 4 辺とも壁が無い。実測でも大会迷路 31 面のうち 28 面が
-    「裸の柱はここ 1 本だけ」だった (残り 3 面は書き起こしの誤り)。
+    NTF クラシック競技規定 9:「迷路の終点となる4区画内には壁や柱は存在しない。」
+    :meth:`krilly.solver.maze.Maze.goal_center_post` の別名。
     """
-    (x0, y0), (x1, y1) = maze.goal_min, maze.goal_max
-    if x1 == x0 or y1 == y0:
-        return None
-    return (x1, y1)
+    return maze.goal_center_post()
 
 
 def posts_without_wall(maze: Maze,
@@ -102,10 +101,11 @@ def posts_without_wall(maze: Maze,
     機体にとっては「柱が壁の手がかりを与えない」= カメラが赤い柱だけを見て
     セルの向きを誤る余地になる。
 
-    **ゴール中央の柱だけは例外**で、既定では数えない (:func:`goal_center_post`)。
-    ゴール 2x2 が開いている以上そこに壁は付かないので、これを違反として数えると
-    **正しい迷路がすべて弾かれる**。実際、この例外を入れるまで大会迷路 31 面のうち
-    30 面が「規則違反」と判定されていた。
+    **ゴール中央だけは例外**で、既定では数えない (:func:`goal_center_post`)。
+    競技規定 9 でそこに柱は**存在しない**ので、「壁が付いていない柱」ですらない。
+    数えると正しい迷路がすべて弾かれる — この例外を入れるまで、大会迷路 31 面のうち
+    30 面が「規則違反」と判定されていた。ほぼ全ての実データで落ちる規則は、
+    規則の読み違いの方を疑うこと。
     """
     n = maze.size
     skip = goal_center_post(maze) if ignore_goal_center else None
