@@ -16,6 +16,12 @@ N フレーム撮り、辺ごとの赤割合と帯のずれ、そこから出る
 実際に進む方向を決めるのは**車輪**なので、この差はどんな方位測定にも乗ってくる
 (1 回の測定では消せないので、校正は必ず複数回の平均で決めること)。
 
+``--batch DIR`` は**保存済みフレームの一括再判定**モード (#78)。走行が残した
+labels.csv (正解ラベル付き) を読み、同じフレームを**別の HSV・別のしきい値**で
+測り直して、混同行列と「記録時からどれだけ動いたか」を出す。走らせずに設定変更の
+影響を評価できるので、しきい値をいじる前に必ずこれを通すこと。しきい値だけを
+変えるなら再測定すら要らない (``scripts/survey_report.py`` が CSV だけで答える)。
+
 ``--hue-split`` は赤マスクを**色相の 2 帯に塗り分ける**モード (#87)。赤は H の下端
 (オレンジ寄り) と上端 (マゼンタ寄り) に割れるので、どちらで拾ったかが異物の切り分けの
 決め手になる。**単色で重ねても分からない。**
@@ -27,6 +33,11 @@ N フレーム撮り、辺ごとの赤割合と帯のずれ、そこから出る
     python -m scripts.wall_detect --image shot.png --hue-split --out /tmp/split.png
     # 一部を拡大して元画像と並べる
     python -m scripts.wall_detect --image shot.png --hue-split --zoom 610,790,580,720 --out /tmp/split.png
+    # 保存済みフレームを一括で再判定 (別 HSV) して混同行列を出す
+    python -m scripts.wall_detect --batch survey/ --h2-lo 150
+    python -m scripts.wall_detect --batch survey/ --out-csv /tmp/redo_labels.csv
+    # 弱く写った壁 5 枚について、マスクが色相/彩度のどちらで画素を落としたか
+    python -m scripts.wall_detect --batch survey/ --weak 5
     # ライブ (カメラ)
     python -m scripts.wall_detect --out walls.png --thickness 70 --span 0.5
     # 位置測定の再現性 (実機・静止のまま 10 フレーム)
@@ -57,7 +68,21 @@ from krilly.perception.cell_pose import (
     CellOffset,
     cell_offset,
 )
-from krilly.perception.red_wall import RedDetectorConfig, red_mask, red_mask_parts
+from krilly.perception.red_wall import (
+    RedDetectorConfig,
+    red_breakdown,
+    red_mask,
+    red_mask_parts,
+)
+from krilly.perception.survey import (
+    SurveyRow,
+    compare,
+    format_confusion,
+    format_report,
+    read_rows,
+    summarize,
+    write_rows,
+)
 from krilly.perception.wall_detect import (
     BACK,
     BODY_DIRS,
@@ -157,6 +182,122 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None,
                  "軸角", sum(yaws) / len(yaws), max(yaws) - min(yaws), min(yaws), max(yaws))
 
 
+def explain_weak_walls(folder, red: RedDetectorConfig, det: WallDetector,
+                       rows: list[SurveyRow], offsets: dict[tuple[str, str], int],
+                       count: int) -> list[str]:
+    """一番弱く写った壁について、赤マスクが**どの条件で画素を落としたか**を出す (#78)。
+
+    赤割合が低いという事実だけでは何も直せない。色相が帯の外へ流れたのか (#65)、
+    彩度が足りないのか (#56)、そもそも赤いものが写っていないのか (遮蔽・壁なし) で
+    打つ手が違う。**次に run を終わらせるのは一番弱い壁**なので、そこを見る。
+
+    壁のロットが混ざっているとき (#23 で新品の壁が 0.11 と読めた) は、強い壁と弱い壁で
+    採用画素の H が食い違う。それが見えたら直すのはしきい値ではなくマスクの方。
+    """
+    weak = sorted((r for r in rows if r.wall), key=lambda r: r.fraction)[:count]
+    if not weak:
+        return []
+    lines = ["--- 弱く写った壁 %d 枚の内訳 (赤マスクがどこで画素を落としたか) ---" % len(weak)]
+    for row in weak:
+        frame = cv2.imread(str(folder / row.file))
+        if frame is None:
+            continue
+        roi = det.cfg.rois[row.edge]
+        # 判定は ROI をずらして最良の位置で行われる。内訳も**その位置**で見る。
+        offset = offsets.get((row.file, row.edge), 0)
+        roi = (dataclasses.replace(roi, x=roi.x + offset)
+               if det.cfg.target(row.edge).vertical
+               else dataclasses.replace(roi, y=roi.y + offset))
+        lines.append("%s %s セル(%d,%d) 赤割合 %.3f" %
+                     (row.file, row.edge, row.x, row.y, row.fraction))
+        lines.append("  " + red_breakdown(roi.view(frame), red).describe())
+    return lines
+
+
+def batch_reevaluate(directory: str, labels: str | None, red: RedDetectorConfig,
+                     threshold: float | None, out_csv: str | None,
+                     weak: int = 3) -> None:
+    """保存済みフレームを別の設定で測り直し、混同行列を出す (#78).
+
+    正解ラベルは CSV に入っているものをそのまま使う (再判定で正解が変わることは
+    ない)。**変えてよいのは判定側だけ** — マスクの HSV としきい値である。
+
+    ``--out-csv`` を付ければ再判定後の赤割合を新しい labels.csv として書ける。
+    照明を変えた 2 回の比較 (``survey_report`` に 2 つ渡す) と同じ形で、
+    「設定を変えた前後」も比べられる。
+    """
+    from pathlib import Path
+
+    folder = Path(directory)
+    if labels is None:
+        found = sorted(folder.glob("*labels.csv"))
+        if not found:
+            log.error("%s に labels.csv が無い。--labels で指定すること。", folder)
+            return
+        labels = str(found[0])
+        if len(found) > 1:
+            log.warning("labels.csv が複数ある。%s を使う (--labels で選べる)", labels)
+    rows = read_rows(labels)
+    log.info("再判定: %s のフレームを %s のラベルで (%d 行)", folder, labels, len(rows))
+
+    cfg = calibrated_config(threshold=0.08 if threshold is None else threshold,
+                            neighbors=True)
+    cfg.red = red
+    if threshold is not None:
+        cfg.thresholds = {}
+    det = WallDetector(cfg)
+    log.info("赤マスク: H %d-%d / %d-%d  S>=%d V>=%d  しきい値 %s",
+             red.h1_lo, red.h1_hi, red.h2_lo, red.h2_hi, red.s_min, red.v_min,
+             "%.3f (共通)" % cfg.threshold if threshold is not None else "実機と同じ")
+
+    by_file: dict[str, list[SurveyRow]] = {}
+    for row in rows:
+        by_file.setdefault(row.file, []).append(row)
+
+    old_rows: list[SurveyRow] = []
+    new_rows: list[SurveyRow] = []
+    offsets: dict[tuple[str, str], int] = {}
+    missing = 0
+    for name, group in by_file.items():
+        frame = cv2.imread(str(folder / name))
+        if frame is None:
+            log.warning("読めない: %s (行を飛ばす)", folder / name)
+            missing += len(group)
+            continue
+        measured = det.measure(frame)
+        off = cell_offset(frame, det)
+        for row in group:
+            if row.edge not in measured:
+                missing += 1
+                continue
+            old_rows.append(row)
+            offsets[(row.file, row.edge)] = measured[row.edge][1]
+            new_rows.append(dataclasses.replace(
+                row, fraction=measured[row.edge][0],
+                off_fwd_mm=None if off.forward_m is None else off.forward_m * 1e3,
+                off_left_mm=None if off.left_m is None else off.left_m * 1e3))
+    if not new_rows:
+        log.error("再判定できた行が無い。フレームの場所と CSV の file 列を確認すること。")
+        return
+    if missing:
+        log.warning("フレームまたは ROI が無く飛ばした行: %d", missing)
+
+    before = summarize(old_rows, det.cfg.threshold_for)
+    after = summarize(new_rows, det.cfg.threshold_for)
+    for line in format_report(after, sources=[labels]):
+        log.info("%s", line)
+    for line in format_confusion(after):
+        log.info("%s", line)
+    log.info("--- 記録時の赤割合と比べる (正解ラベルは同じ) ---")
+    for line in compare(before, after, labels=("記録", "再判定")):
+        log.info("%s", line)
+    for line in explain_weak_walls(folder, red, det, new_rows, offsets, weak):
+        log.info("%s", line)
+    if out_csv:
+        write_rows(out_csv, new_rows)
+        log.info("再判定した赤割合を保存: %s", out_csv)
+
+
 def hue_split(frame, red: RedDetectorConfig, out_path: str, zoom: str | None) -> None:
     """赤マスクを色相の 2 帯に塗り分け、帯ごとの HSV を出す (#87)。
 
@@ -203,8 +344,18 @@ def main() -> None:
     p.add_argument("--interval", type=float, default=0.3, help="--measure のフレーム間隔 [s]")
     p.add_argument("--save-prefix", default=None, help="--measure のフレーム保存先プレフィクス")
     p.add_argument("--image", default=None, help="入力画像 (未指定ならカメラ取得)")
+    p.add_argument("--batch", default=None, metavar="DIR",
+                   help="保存済みフレームを一括で再判定する (#78)。DIR 内の "
+                        "labels.csv の正解ラベルで混同行列まで出す")
+    p.add_argument("--labels", default=None,
+                   help="--batch が使う正解ラベル CSV (既定: DIR 内の *labels.csv)")
+    p.add_argument("--out-csv", default=None,
+                   help="--batch の再判定結果を新しい labels.csv として書く")
+    p.add_argument("--weak", type=int, default=3, metavar="N",
+                   help="--batch で内訳を出す「弱く写った壁」の枚数 (0 で出さない)")
     p.add_argument("--out", default="walls.png", help="注釈画像の保存先")
-    p.add_argument("--threshold", type=float, default=0.15, help="壁ありとみなす赤割合")
+    p.add_argument("--threshold", type=float, default=None,
+                   help="壁ありとみなす赤割合 (可視化の既定 0.15 / --batch は実機と同じ設定)")
     p.add_argument("--s-min", type=int, default=CALIBRATED_RED.s_min, help="赤HSVのS下限")
     p.add_argument("--v-min", type=int, default=CALIBRATED_RED.v_min, help="赤HSVのV下限")
     p.add_argument("--h2-lo", type=int, default=CALIBRATED_RED.h2_lo,
@@ -218,6 +369,12 @@ def main() -> None:
     args = p.parse_args()
 
     setup_logging()
+    red = dataclasses.replace(CALIBRATED_RED, s_min=args.s_min, v_min=args.v_min,
+                              h2_lo=args.h2_lo)
+    if args.batch:
+        batch_reevaluate(args.batch, args.labels, red, args.threshold, args.out_csv,
+                         args.weak)
+        return
     if args.measure:
         measure_repeatability(args.measure, args.interval, args.save_prefix,
                               args.neighbors)
@@ -233,12 +390,11 @@ def main() -> None:
         with Camera() as cam:
             frame = cam.capture()
 
-    # **校正済みの設定から派生させる。** ここで RedDetectorConfig() を素で作ると
-    # h2_lo が既定の 160 に戻り、#65 で 140 まで広げた意味が消える (右壁の上面が
-    # 場所によって H=141-155 のマゼンタ側へ流れるため、160 では帯の上 2/3 を落とす)。
-    # 調整スクリプトが実機と違うマスクを使っていては意味がない。
-    red = dataclasses.replace(CALIBRATED_RED, s_min=args.s_min, v_min=args.v_min,
-                              h2_lo=args.h2_lo)
+    # ※ red は main の先頭で**校正済みの設定から**派生させてある。素の
+    # RedDetectorConfig() を作ると h2_lo が既定の 160 に戻り、#65 で 140 まで広げた
+    # 意味が消える (右壁の上面が場所によって H=141-155 のマゼンタ側へ流れるため、
+    # 160 では帯の上 2/3 を落とす)。調整スクリプトが実機と違うマスクを使っては
+    # 意味がない。
     if args.hue_split:
         hue_split(frame, red, args.out, args.zoom)
         return
@@ -251,7 +407,8 @@ def main() -> None:
     # 違うサイズの画像では帯から外れるが、調整用に眺めること自体は許したい。ここで
     # 実サイズを入れておくと、遠い側の帯が枠内かの判定 (#89) だけは効く。
     det = WallDetector(WallDetectorConfig(rois=rois, slots=slots, red=red,
-                                          threshold=args.threshold,
+                                          threshold=0.15 if args.threshold is None
+                                          else args.threshold,
                                           frame_size=(frame.shape[1], frame.shape[0])))
 
     measured = det.measure(frame)

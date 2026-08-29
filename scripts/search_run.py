@@ -26,6 +26,7 @@ import argparse
 import contextlib
 import math
 import time
+from pathlib import Path
 
 from krilly.config import load_maze_config
 from krilly.hal.gyro_sampler import GyroSampler
@@ -41,6 +42,7 @@ from krilly.motion.tuning import add_tuning_args, build_tuning, check_limits, de
 from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
+from krilly.perception.survey import FrameRecord, label_run, write_rows
 from krilly.perception.wall_detect import (
     BODY_DIRS,
     WallDetector,
@@ -116,7 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="左右の隣セルを読まない (#89 を切る。1 セルずつ止まって進む)")
     p.add_argument("--pass-cells", type=int, default=None,
                    help="止まらずに続けて通過してよいセル数の上限 (既定 2、隣を読まないなら 1)")
-    p.add_argument("--save-frames", default=None, help="判定フレームの保存先プレフィクス")
+    p.add_argument("--save-frames", default=None,
+                   help="判定フレームの保存先プレフィクス。同時に "
+                        "<プレフィクス>_labels.csv へ辺ごとの赤割合と正解ラベルを"
+                        "残す (#78。ラベルは走行後に確定した地図から貼る)")
+    p.add_argument("--truth-maze", default=None, metavar="FILE",
+                   help="正解ラベルに使う既知形状の迷路 (既定: 走行後に確定した地図)")
     return p
 
 
@@ -136,6 +143,17 @@ def main() -> None:
     pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
+    # 撮ったフレームの記録 (#78)。ラベルは走行後にまとめて貼るので、ここでは
+    # 「どのセルで何が測れたか」だけ溜める。
+    survey: list[FrameRecord] = []
+    truth = (Maze.from_ascii(Path(args.truth_maze).read_text(encoding="utf-8"))
+             if args.truth_maze else None)
+    if truth is not None and truth.size != maze.size:
+        # サイズが違えばセル座標の意味が変わる。ラベルが 1 セルずつずれた校正データは
+        # 無いより悪い (誤判定を数え間違える)。走る前に止める。
+        log.error("--truth-maze は %dx%d だが走るのは %dx%d。中止。",
+                  truth.size, truth.size, maze.size, maze.size)
+        return
 
     log.info("迷路 %dx%d / ゴール %s / スタート %s 北向き / %s",
              maze.size, maze.size, maze.goal_cells(), maze.start,
@@ -270,9 +288,11 @@ def main() -> None:
             walls_body = {d: measured[d][0] >= detector.cfg.threshold_for(d) for d in BODY_DIRS}
             walls_nb = detector.neighbor_walls(measured) if neighbors else None
             walls_maze = explorer.observe(walls_body, walls_nb)
+            saved = None
             if args.save_frames:
                 import cv2
 
+                saved = f"{Path(args.save_frames).name}_{explorer.steps:03d}.png"
                 cv2.imwrite(f"{args.save_frames}_{explorer.steps:03d}.png", frame)
             log.info("  壁 赤割合 %s -> 迷路 %s",
                      {d: f"{measured[d][0]:.2f}" for d in BODY_DIRS},
@@ -302,6 +322,11 @@ def main() -> None:
                                     yaw.angle_deg, yaw.segments, yaw.total_length_px)
             # 帯のずれからセル内の位置ずれを測り、推定位置を絶対補正する
             off = cell_offset(frame, detector, measured=measured)
+            if saved:
+                survey.append(FrameRecord(
+                    saved, explorer.cell, explorer.facing, measured,
+                    None if off.forward_m is None else off.forward_m * 1e3,
+                    None if off.left_m is None else off.left_m * 1e3))
             if off.saturated:
                 # フレーム端で頭打ちになった辺は「中央寄り」の嘘を返す (#21)
                 log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
@@ -435,7 +460,29 @@ def main() -> None:
             log.warning("%d 手で終わらなかった (現在 %s)", args.max_steps, explorer.cell)
 
         log.info("判明した迷路:\n%s", maze.to_ascii())
+        if survey:
+            write_survey_labels(args.save_frames, survey, truth or maze,
+                                labelled_from="既知形状" if truth else "走行後の地図")
         report_shortest_path(explorer, LEGACY_COST if args.turn_in_place else DEFAULT_COST)
+
+
+def write_survey_labels(prefix: str, survey: list[FrameRecord], maze: Maze,
+                        labelled_from: str) -> None:
+    """撮ったフレームに正解ラベルを貼って ``<prefix>_labels.csv`` に落とす (#78).
+
+    **ラベルを貼れるのは走り終わってからである。** 探索中の地図は途中までしか
+    確定していないので、その場で貼ると「まだ見ていない壁」を壁なしと記録してしまう。
+    走行を 1 回増やす必要は無く、判定はいつもどおり行われているので、``wall_survey``
+    の鶏と卵 (校正のための走行が、校正していないカメラの位置補正に依存する) も起きない。
+    """
+    rows, skipped = label_run(survey, maze)
+    path = f"{prefix}_labels.csv"
+    write_rows(path, rows)
+    log.info("校正データ: %s に %d フレーム / %d ラベル (正解は%s)%s",
+             path, len(survey), len(rows), labelled_from,
+             "" if not skipped else
+             f" / 迷路の外を見た {skipped} スロットは正解が無いので除外")
+    log.info("  解析: python -m scripts.survey_report %s", path)
 
 
 def report_shortest_path(explorer: Explorer, cost: MoveCost) -> None:
