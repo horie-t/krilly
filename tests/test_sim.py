@@ -592,3 +592,27 @@ def test_lowering_the_margin_turns_a_shut_out_maze_into_a_racing_one():
     assert safe.reached_goal and not safe.speed_runs      # 着いたが走れない
     assert len(bold.speed_runs) == 1                       # 走れる
     assert bold.elapsed_s <= 420.0                         # しかも時間内
+
+
+def test_a_faster_machine_closes_the_mazes_the_margin_could_not():
+    """**残る 3 面は速度でしか届かない** (#87 の梃子 3)。
+
+    安全率は「始めた走行を終えられるか」しか動かせないので、探索そのものが長い面
+    (2014/2015/2017 の exp 決勝) には効かない。0.24 -> 0.30 m/s にすると
+    30 面すべてが最速ランを走れるようになる。
+
+    速くしても**固定費は縮まない**ので、そこを一緒に割ってはいけない: 停止 0.44s は
+    そのままで、ランプの超過 v/a はむしろ増える。ここではその形で見積もる。
+    """
+    mazes = [Maze.from_ascii(p.read_text(encoding="utf-8"))
+             for p in contest_mazes() if p.stem not in KNOWN_BAD_TRANSCRIPTIONS]
+
+    def shut_out(v: float) -> int:
+        ratio = 0.24 / v
+        times = {"cell_time_s": 0.74 * ratio, "lateral_cell_time_s": 0.76 * ratio,
+                 "straight_time_s": 0.44 + (0.39 - 0.24 / 0.9) + v / 0.9}
+        return sum(1 for m in mazes
+                   if not simulate_session(m, times=times).speed_runs)
+
+    assert shut_out(0.24) == 3
+    assert shut_out(0.30) == 0
