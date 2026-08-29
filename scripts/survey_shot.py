@@ -30,18 +30,14 @@ from pathlib import Path
 
 from krilly.logging_config import get_logger, setup_logging
 from krilly.perception.cell_pose import cell_offset
+from krilly.perception.survey import CSV_FIELDS, label_rows
 from krilly.perception.wall_detect import (
-    BODY_DIRS,
     WallDetector,
     calibrated_config,
-    maze_walls_to_body,
 )
 from krilly.solver.maze import Direction, Maze
 
 log = get_logger("krilly.survey_shot")
-
-CSV_FIELDS = ["file", "x", "y", "facing", "edge", "wall", "fraction",
-              "off_fwd_mm", "off_left_mm"]
 
 
 def parse_pose(text: str, size: int) -> tuple[int, int, Direction] | None:
@@ -74,6 +70,9 @@ def main() -> None:
     p.add_argument("--maze", required=True, help="既知形状の ASCII テキストファイル")
     p.add_argument("--out-dir", default="survey", help="出力ディレクトリ (追記)")
     p.add_argument("--prefix", default="shot", help="ファイル名のプレフィクス")
+    p.add_argument("--max-frame-duration", type=float, default=33.3,
+                   metavar="ミリ秒",
+                   help="フレーム間隔の上限 [ms]。暗い会場で露出を稼ぐ (既定 33.3 = 30fps 固定)。**100 にすると 0.6 段ぶん暗さに強くなる。それ以上は AE が露出を 50ms で打ち切るので無意味** (#78 実測)。代償は 1 停止あたりの待ち時間だけ (撮影は必ず停止中)")
     args = p.parse_args()
 
     setup_logging()
@@ -89,7 +88,7 @@ def main() -> None:
 
     from krilly.hal.camera import Camera
 
-    with Camera() as camera, open(csv_path, "a", newline="", encoding="utf-8") as f:
+    with Camera(max_frame_duration_us=int(args.max_frame_duration * 1000)) as camera, open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         if write_header:
             writer.writeheader()
@@ -121,29 +120,25 @@ def main() -> None:
             cv2.imwrite(str(out / name), frame)
             shot += 1
 
-            truth = maze_walls_to_body(
-                {d: maze.has_wall(x, y, d) for d in Direction}, facing
-            )
             measured = detector.measure(frame)
             off = cell_offset(frame, detector)
+            # 正解ラベルは既知形状の迷路から貼る (#78 の探索ラン版と同じ関数)。
+            rows = label_rows(
+                name, (x, y), facing, measured, maze,
+                None if off.forward_m is None else off.forward_m * 1e3,
+                None if off.left_m is None else off.left_m * 1e3)
             mismatches = []
-            for edge in BODY_DIRS:
-                fraction, band_off = measured[edge]
-                verdict = fraction >= detector.cfg.threshold_for(edge)
-                ok = verdict == truth[edge]
+            for row in rows:
+                fraction, band_off = measured[row.edge][:2]
+                verdict = fraction >= detector.cfg.threshold_for(row.edge)
+                ok = verdict == row.wall
                 if not ok:
-                    mismatches.append(edge)
+                    mismatches.append(row.edge)
                 log.info("  %-6s 赤割合 %.3f (帯ずれ %+3dpx) 判定 %-4s 正解 %-4s %s",
-                         edge, fraction, band_off,
-                         "壁" if verdict else "なし", "壁" if truth[edge] else "なし",
+                         row.edge, fraction, band_off,
+                         "壁" if verdict else "なし", "壁" if row.wall else "なし",
                          "OK" if ok else "<-- 不一致!")
-                writer.writerow({
-                    "file": name, "x": x, "y": y, "facing": facing.name,
-                    "edge": edge, "wall": int(truth[edge]),
-                    "fraction": f"{measured[edge][0]:.4f}",
-                    "off_fwd_mm": "" if off.forward_m is None else f"{off.forward_m*1000:.1f}",
-                    "off_left_mm": "" if off.left_m is None else f"{off.left_m*1000:.1f}",
-                })
+                writer.writerow(row.to_csv())
             f.flush()
             def _mm(value):
                 return "-" if value is None else f"{value * 1000:+.1f}mm"
