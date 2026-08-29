@@ -99,7 +99,7 @@ def test_breakdown_blames_saturation_for_a_washed_out_wall():
 
 
 def test_breakdown_blames_hue_for_a_wall_that_drifted_magenta():
-    """#65 の H=141-155 へ流れた壁上面。h2_lo=140 なら拾え、160 なら色相で落ちる。"""
+    """#65 の H=141-155 へ流れた壁上面。現行なら拾え、h2_lo=160 なら色相で落ちる。"""
     from krilly.perception.red_wall import red_breakdown
     from krilly.perception.wall_detect import CALIBRATED_RED
 
@@ -132,3 +132,39 @@ def test_breakdown_fraction_matches_the_red_area():
     img[:10] = (0, 0, 255)
     got = red_breakdown(img, CALIBRATED_RED)
     assert got.fraction == 0.5 and got.total == 400
+
+
+# --- 赤マスクの色相下限 h2_lo (#65 -> #78) ---------------------------------
+
+def test_the_hue_band_reaches_the_palest_wall_tops():
+    """**淡く写る壁ほど色相がマゼンタ側へ寄る** (#78、実測 90 本の帯)。
+
+    彩度は 70-213 の連続分布で、色相はそれに連動する (S 70 の帯は H 131、
+    S 198 の帯は H 169)。h2_lo=140 では一番淡い帯の画素の 81% が外れ、赤割合は
+    0.092 = しきい値の 1.1 倍しか残っていなかった。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_RED
+
+    palest = _patch(131, 70, 190)                 # 実測で一番淡かった帯
+    strongest = _patch(169, 198, 134)
+    assert red_mask(palest, CALIBRATED_RED).all()
+    assert red_mask(strongest, CALIBRATED_RED).all()
+    # 以前の 140 では一番淡い帯が丸ごと落ちていた
+    old = RedDetectorConfig(h2_lo=140, s_min=50, v_min=40)
+    assert not red_mask(palest, old).any()
+    assert red_mask(strongest, old).all()
+
+
+def test_the_hue_band_still_excludes_the_blue_wiring():
+    """**下限を下げすぎない根拠は機体の青配線** (#78)。
+
+    FRONT / LEFT の ROI は機体が写る領域と重なるので、配線の色は他人事ではない。
+    実測では配線の有彩色画素の 63% が H 100-115 に集中し、120-140 には 1% しか
+    無い。h2_lo を 115 まで下げると壁なしの辺が 0.000 -> 0.010 と反応し始めるので、
+    125 は飽和点であると同時に漏れ点まで 10 の余裕がある位置。
+    """
+    from krilly.perception.wall_detect import CALIBRATED_RED
+
+    assert 120 < CALIBRATED_RED.h2_lo <= 130
+    for hue in (100, 110, 115, 120):                  # 配線が集中する色相
+        assert not red_mask(_patch(hue, 150, 200), CALIBRATED_RED).any()

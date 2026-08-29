@@ -359,7 +359,8 @@ def main() -> None:
     p.add_argument("--s-min", type=int, default=CALIBRATED_RED.s_min, help="赤HSVのS下限")
     p.add_argument("--v-min", type=int, default=CALIBRATED_RED.v_min, help="赤HSVのV下限")
     p.add_argument("--h2-lo", type=int, default=CALIBRATED_RED.h2_lo,
-                   help="赤とみなす色相の上側の帯の下限 (#65 で 160->140 に広げた)")
+                   help="赤とみなす色相の上側の帯の下限 "
+                        "(#65 で 160->140、#78 で 140->125 に広げた)")
     p.add_argument("--neighbors", action="store_true",
                    help="左右の隣セルを読む ROI も重ねる (#89)")
     p.add_argument("--hue-split", action="store_true",
@@ -391,10 +392,10 @@ def main() -> None:
             frame = cam.capture()
 
     # ※ red は main の先頭で**校正済みの設定から**派生させてある。素の
-    # RedDetectorConfig() を作ると h2_lo が既定の 160 に戻り、#65 で 140 まで広げた
-    # 意味が消える (右壁の上面が場所によって H=141-155 のマゼンタ側へ流れるため、
-    # 160 では帯の上 2/3 を落とす)。調整スクリプトが実機と違うマスクを使っては
-    # 意味がない。
+    # RedDetectorConfig() を作ると h2_lo が既定の 160 に戻り、#65/#78 で 125 まで
+    # 広げた意味が消える (壁上面が H=141-155 のマゼンタ側へ流れるうえ、新ロットの
+    # 壁は H≈147 なので、160 はもちろん 140 でも帯の大半を落とす)。調整スクリプトが
+    # 実機と違うマスクを使っては意味がない。
     if args.hue_split:
         hue_split(frame, red, args.out, args.zoom)
         return
