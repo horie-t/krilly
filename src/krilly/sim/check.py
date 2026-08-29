@@ -81,14 +81,34 @@ def wall_counts(maze: Maze) -> WallCounts:
 
 
 # --- 柱 ---------------------------------------------------------------------
-def posts_without_wall(maze: Maze) -> list[tuple[int, int]]:
+def goal_center_post(maze: Maze) -> tuple[int, int] | None:
+    """ゴール区画の中心にある柱 (2x2 のゴールにだけ在る)。1x1 のゴールなら None。
+
+    **この柱には壁が付かないのが正しい。** ゴール 2x2 は 1 つの開いた区画なので、
+    その真ん中の柱は 4 辺とも壁が無い。実測でも大会迷路 31 面のうち 28 面が
+    「裸の柱はここ 1 本だけ」だった (残り 3 面は書き起こしの誤り)。
+    """
+    (x0, y0), (x1, y1) = maze.goal_min, maze.goal_max
+    if x1 == x0 or y1 == y0:
+        return None
+    return (x1, y1)
+
+
+def posts_without_wall(maze: Maze,
+                       ignore_goal_center: bool = True) -> list[tuple[int, int]]:
     """壁が 1 枚も接していない**内側の柱**の一覧 (公式規則では存在してはいけない)。
 
     柱 (i, j) は 1 <= i, j <= N-1。外周の柱は外壁が接するので常に条件を満たす。
     機体にとっては「柱が壁の手がかりを与えない」= カメラが赤い柱だけを見て
     セルの向きを誤る余地になる。
+
+    **ゴール中央の柱だけは例外**で、既定では数えない (:func:`goal_center_post`)。
+    ゴール 2x2 が開いている以上そこに壁は付かないので、これを違反として数えると
+    **正しい迷路がすべて弾かれる**。実際、この例外を入れるまで大会迷路 31 面のうち
+    30 面が「規則違反」と判定されていた。
     """
     n = maze.size
+    skip = goal_center_post(maze) if ignore_goal_center else None
     out = []
     for i in range(1, n):
         for j in range(1, n):
@@ -98,7 +118,7 @@ def posts_without_wall(maze: Maze) -> list[tuple[int, int]]:
                 or maze.has_wall(i - 1, j - 1, Direction.N)  # 柱の西の横壁
                 or maze.has_wall(i, j - 1, Direction.N)    # 柱の東の横壁
             )
-            if not touching:
+            if not touching and (i, j) != skip:
                 out.append((i, j))
     return out
 
@@ -116,6 +136,37 @@ def reachable_cells(maze: Maze, start: tuple[int, int] | None = None) -> set[tup
                 seen.add(nxt)
                 queue.append(nxt)
     return seen
+
+
+def goal_interior_walls(maze: Maze) -> int:
+    """ゴール区画の**内側**に立っている壁の枚数。
+
+    競技のゴールは 2x2 が 1 つの開いた区画で、内側に壁は無い。1 枚でもあれば
+    ゴールの一部が別の区画になってしまい、**迷路として成立しない**。
+    書き起こしなら読み違い、切り出しなら「元の迷路では普通のセルだった場所を
+    ゴールと宣言してしまった」ことを疑う。
+    """
+    goals = set(maze.goal_cells())
+    return sum(1 for c in goals for d in Direction
+               if maze.neighbor(*c, d) in goals and maze.has_wall(*c, d)) // 2
+
+
+def goal_entrances(maze: Maze) -> list[tuple[tuple[int, int], Direction]]:
+    """ゴール区画の外周のうち、壁が無い辺 (= 入口)。
+
+    大会迷路 31 面のうち 23 面が**入口 1 つ**で、残りも 2-3 つ。4 つ以上は
+    書き起こしか作りの誤りを疑う値。
+    """
+    goals = set(maze.goal_cells())
+    return [(c, d) for c in sorted(goals) for d in Direction
+            if maze.neighbor(*c, d) not in goals
+            and maze.in_bounds(*maze.neighbor(*c, d))
+            and not maze.has_wall(*c, d)]
+
+
+#: 入口がこれより多ければ注意する。実測 (大会迷路 31 面) では 1 が 23 面、2 が 7 面、
+#: 3 が 1 面で、4 つ以上は書き起こしが壊れていた 1 面だけだった。
+GOAL_ENTRANCE_WARN = 3
 
 
 # --- 総合レポート -----------------------------------------------------------
@@ -147,11 +198,13 @@ def check_maze(maze: Maze, wall_budget: int | None = None) -> MazeReport:
 
     - 外周が閉じていない
     - スタートからゴールへ到達できない
+    - **ゴール区画の内側に壁がある** (2x2 が 1 つの開いた区画になっていない)
 
     **注意** (成立はするが意図しない可能性がある):
 
     - スタートから到達できないセルがある (大会迷路にも稀にあるので誤りにはしない)
-    - 壁が 1 枚も接していない内側の柱がある (公式規則違反)
+    - ゴールの入口が多すぎる (実在の迷路は 1-3 個)
+    - 壁が 1 枚も接していない内側の柱がある (公式規則違反。ゴール中央は除く)
     - 四方を壁で囲まれたセルがある
     - ``wall_budget`` を渡すと、手持ちの壁で組めるかを判定する (#23)
     """
@@ -168,6 +221,20 @@ def check_maze(maze: Maze, wall_budget: int | None = None) -> MazeReport:
     if not any(g in reachable for g in goals):
         report.errors.append(
             f"スタート {maze.start} からゴール {goals[0]}..{goals[-1]} へ到達できない"
+        )
+
+    inside = goal_interior_walls(maze)
+    if inside:
+        report.errors.append(
+            f"ゴール区画の内側に壁が {inside} 枚ある "
+            f"(2x2 は 1 つの開いた区画でなければならない)"
+        )
+
+    doors = goal_entrances(maze)
+    if len(doors) > GOAL_ENTRANCE_WARN:
+        report.warnings.append(
+            f"ゴールの入口が {len(doors)} 個ある "
+            f"(実在の迷路は 1-3 個): {[(c, d.name) for c, d in doors[:4]]}"
         )
 
     stranded = n * n - len(reachable)

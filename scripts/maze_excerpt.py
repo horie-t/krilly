@@ -28,9 +28,11 @@ from pathlib import Path
 
 from krilly.logging_config import get_logger, setup_logging
 from krilly.sim import check_maze, open_maze, sense, sense_neighbors
+from krilly.sim.check import posts_without_wall, reachable_cells
 from krilly.sim.excerpt import (
     Difficulty,
     excerpts,
+    goal_variants,
     longest_blind_cross_run,
     longest_blind_run,
     pieces_needed,
@@ -92,6 +94,8 @@ def main() -> int:
                         "直交の補正なしだけで並べるとゴールのすぐ隣を数手動く迷路が"
                         "上位に来て、探索の検証にならない")
     p.add_argument("--min-cells", type=int, default=0, help="最速経路のセル数の下限")
+    p.add_argument("--max-stranded", type=int, default=4,
+                   help="到達できないセルの上限 (窓を切ると必ず数個は出る)")
     p.add_argument("--top", type=int, default=10, help="表示する件数")
     p.add_argument("--out", default=None, help="1 位を書き出すファイル")
     args = p.parse_args()
@@ -107,23 +111,33 @@ def main() -> int:
     rejected = {"組めない": 0, "予算超過": 0, "走れない": 0}
     for path in args.maze:
         source = Maze.from_ascii(Path(path).read_text(encoding="utf-8"))
-        for x0, y0, maze in excerpts(source, args.size):
-            report = check_maze(maze)
-            if not report.ok:
-                rejected["組めない"] += 1
-                continue
-            if args.wall_budget is not None and wall_counts(maze).total > args.wall_budget:
-                rejected["予算超過"] += 1
-                continue
-            metrics = measure(maze)
-            if metrics is None:
-                rejected["走れない"] += 1
-                continue
-            if (metrics.search_steps < args.min_search
-                    or metrics.path_cells < args.min_cells):
-                rejected["易しすぎ"] = rejected.get("易しすぎ", 0) + 1
-                continue
-            found.append((metrics, f"{Path(path).stem} ({x0},{y0})", maze))
+        for x0, y0, window in excerpts(source, args.size):
+            # 切り出したままではゴールが競技の形にならない (元の迷路では普通のセル
+            # だった場所をゴールと宣言するため)。入口の選び方ごとに候補を作る。
+            for maze in goal_variants(window):
+                # 組む迷路なので、健全性は「誤りが無い」だけでは足りない:
+                #   壁の付かない柱 -> 公式規則違反。物理的にも自立しない
+                #   到達できないセル -> 窓を切ると必ず出るが、多いと盤面が無駄になる
+                if not check_maze(maze).ok or posts_without_wall(maze):
+                    rejected["組めない"] += 1
+                    continue
+                stranded = maze.size ** 2 - len(reachable_cells(maze))
+                if stranded > args.max_stranded:
+                    rejected["孤立が多い"] = rejected.get("孤立が多い", 0) + 1
+                    continue
+                if (args.wall_budget is not None
+                        and wall_counts(maze).total > args.wall_budget):
+                    rejected["予算超過"] += 1
+                    continue
+                metrics = measure(maze)
+                if metrics is None:
+                    rejected["走れない"] += 1
+                    continue
+                if (metrics.search_steps < args.min_search
+                        or metrics.path_cells < args.min_cells):
+                    rejected["易しすぎ"] = rejected.get("易しすぎ", 0) + 1
+                    continue
+                found.append((metrics, f"{Path(path).stem} ({x0},{y0})", maze))
 
     log.info("候補 %d 件 (除外: %s)", len(found),
              " / ".join(f"{k} {v}" for k, v in rejected.items()))

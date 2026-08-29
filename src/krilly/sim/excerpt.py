@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from krilly.sim.check import goal_entrances, goal_interior_walls
 from krilly.solver.maze import Direction, Maze
 
 #: 壁も柱も ``(N+1)^2`` 枚 (本) あればどんな N×N でも組める。
@@ -47,6 +48,45 @@ def excerpt(source: Maze, x0: int, y0: int, size: int) -> Maze:
                     out.set_wall(i, j, d)
     out.set_outer_walls()
     return out
+
+
+def goal_variants(maze: Maze):
+    """ゴール区画を**競技の形**にした迷路を、入口の選び方ごとに返す。
+
+    切り出しは「元の迷路では普通のセルだった場所」をゴールと宣言するので、そのままでは
+    内側に壁が残り入口も複数になる。競技のゴールは **2x2 が 1 つの開いた区画で、入口は
+    1 つ** (大会迷路 31 面のうち 23 面が 1 つ、残りも 2-3 つ)。
+
+    内側の壁を外し、開いている外周の辺を 1 つだけ残して他を閉じる。どれを残すかで
+    迷路の難しさが変わるので、**選ぶのは呼び出し側の仕事**にしてある。
+    """
+    goals = set(maze.goal_cells())
+    base = Maze(maze.size)
+    base.start = maze.start
+    base.set_goal(maze.goal_min, maze.goal_max)
+    for x in range(maze.size):
+        for y in range(maze.size):
+            for d in Direction:
+                if maze.has_wall(x, y, d):
+                    base.set_wall(x, y, d)
+    for cell in goals:                      # ゴールの内側を開ける
+        for d in Direction:
+            if base.neighbor(*cell, d) in goals:
+                base.set_wall(*cell, d, False)
+    doors = goal_entrances(base)
+    for keep in doors:
+        out = Maze(maze.size)
+        out.start = base.start
+        out.set_goal(base.goal_min, base.goal_max)
+        for x in range(maze.size):
+            for y in range(maze.size):
+                for d in Direction:
+                    if base.has_wall(x, y, d):
+                        out.set_wall(x, y, d)
+        for cell, d in doors:               # 残す 1 つ以外を閉じる
+            if (cell, d) != keep:
+                out.set_wall(cell[0], cell[1], d)
+        yield out
 
 
 def excerpts(source: Maze, size: int, step: int = 1):

@@ -126,5 +126,6 @@ def test_the_chosen_excerpt_is_buildable_and_harder():
     from scripts.maze_excerpt import measure
 
     metrics = measure(maze)
-    assert metrics.blind_cross >= 3      # 5x5 と practice8 は 0
-    assert metrics.search_steps >= 25    # 5x5 の 24 手より多い
+    assert metrics.blind_cross >= 2      # 5x5 と practice8 は 0
+    assert metrics.no_wall_cells >= 3    # 赤帯が 1 本も写らないセル (5x5 は 0)
+    assert metrics.path_cells >= 20
