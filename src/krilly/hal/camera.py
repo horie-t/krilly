@@ -48,14 +48,21 @@ class Camera:
         full_fov: bool = True,
         picam2=None,
     ) -> None:
-        #: ロックした露出時間 [us] とアナログゲイン (ロックしなければ None)。
-        #: **照明が変わったときに実際に動くのはここ** (#78)。自動露出は明るさを
-        #: 打ち消してしまうので、フレームを見ても照明が変わったことは分からない —
-        #: 実測では照度 20 倍の差 (調光 100% と 5%) で画面の明るさ V は 157 と 156、
-        #: 壁の赤割合は 0.401 と 0.401 でまったく動かず、露出時間だけが伸びていた。
-        #: **AE の余力がどれだけ残っているかは、この 2 つを見ないと分からない。**
+        #: ロックした露出時間 [us] とアナログゲイン、およびゲインの上限 (#78)。
+        #:
+        #: **照明が変わったときに実際に動くのはゲインだけである。** 自動露出は明るさを
+        #: 打ち消すので、フレームを見ても照明の違いは分からない — 実測 (調光 100/30/5%、
+        #: 照度にして 20 倍): 画面の明るさ V は 157/156/156、壁の赤割合は
+        #: 0.401/0.402/0.401 と動かず、**露出は 32.7ms で 3 条件とも同じ**、
+        #: ゲインだけが **2.16 → 6.21 → 10.67** と上がっていた。
+        #:
+        #: 露出が動かないのは ``create_video_configuration`` の既定が 30fps 固定
+        #: (``FrameDurationLimits`` = 33333us) だから。つまりこのカメラの暗さへの
+        #: 対抗手段は**ゲインの 1.12〜16.0 倍、14 倍ぶんしかない**。
+        #: :meth:`headroom_stops` がその残りを段数で返す。
         self.exposure_time_us: int | None = None
         self.analogue_gain: float | None = None
+        self.max_analogue_gain: float = 16.0
         if picam2 is None:
             import time
 
@@ -90,32 +97,50 @@ class Camera:
         meta = picam2.capture_metadata()
         self.exposure_time_us = int(meta.get("ExposureTime", 8000))
         self.analogue_gain = float(meta.get("AnalogueGain", 1.0))
+        controls = getattr(picam2, "camera_controls", None) or {}
+        if "AnalogueGain" in controls:
+            self.max_analogue_gain = float(controls["AnalogueGain"][1])
         picam2.set_controls({
             "AeEnable": False,
             "AwbEnable": False,
             "ExposureTime": self.exposure_time_us,
             "AnalogueGain": self.analogue_gain,
         })
-        log.info("露出をロック: %.1fms / ゲイン %.2f%s",
+        stops = self.headroom_stops()
+        log.info("露出をロック: %.1fms / ゲイン %.2f (上限 %.1f、残り %.1f 段)%s",
                  self.exposure_time_us / 1000.0, self.analogue_gain,
-                 self.exposure_warning() or "")
+                 self.max_analogue_gain, stops, self.exposure_warning() or "")
 
-    #: 露出時間がこれを超えたら警告する [us]。根拠は**時間予算**であって像の乱れでは
-    #: ない — 壁の撮影は必ず停止中に行われる (``search_run`` は移動→惰行→撮影の順)
-    #: ので、走行中のブレは判定に入らない。効くのは 1 停止あたりの所要時間で、
-    #: 探索ランは 20 回止まるから、露出 100ms は 7 分の持ち時間から 2 秒を削る。
-    #: それ以上に効くのは**この値が AE の余力の目安になる**こと: カメラの上限に
-    #: 張り付けば、そこから先は暗くなるだけで、赤の彩度も色相も一気に崩れる。
-    SLOW_EXPOSURE_US = 50_000
+    #: ゲインの残りがこれを下回ったら警告する [段] (1 段 = 明るさ半分)。
+    #:
+    #: **暗さに対する余力はゲインでしか測れない** — 露出は 30fps 固定で頭打ちなので
+    #: 動かない。残り 1 段とは「いまの半分の明るさで上限に達する」という意味で、
+    #: そこから先は画面が暗くなり、赤の彩度も色相もしきい値も一斉に崩れる。
+    #:
+    #: 実測の位置 (この部屋、6500K): 調光 100% でゲイン 2.16 = 残り 2.9 段、
+    #: 30% で 6.21 = 1.4 段、5% で 10.67 = **0.6 段**。5% でも赤割合は 0.401 と
+    #: 0.453 で健全だったので、**ゲイン 10.7 のノイズはマスクを壊さない**。
+    #: 壊れるのは余力を使い切った先である。
+    LOW_HEADROOM_STOPS = 1.0
+
+    def headroom_stops(self) -> float:
+        """あと何段暗くなってもフレームの明るさを保てるか (ロック前は 0.0)。"""
+        if not self.analogue_gain or self.analogue_gain <= 0:
+            return 0.0
+        import math
+
+        return max(0.0, math.log2(self.max_analogue_gain / self.analogue_gain))
 
     def exposure_warning(self) -> str | None:
-        """露出が長すぎるときの注意書き (問題なければ None)。"""
-        if self.exposure_time_us is None or self.exposure_time_us < self.SLOW_EXPOSURE_US:
+        """暗さへの余力が乏しいときの注意書き (問題なければ None)。"""
+        if self.analogue_gain is None:
             return None
-        return (" ** 露出が長い。会場が暗いか AE が上限に近い。1 停止ごとに %.0fms を"
-                "払う (探索 20 停止で %.1fs) **"
-                % (self.exposure_time_us / 1000.0,
-                   20 * self.exposure_time_us / 1e6))
+        stops = self.headroom_stops()
+        if stops >= self.LOW_HEADROOM_STOPS:
+            return None
+        return (" ** 暗すぎる。ゲインの余力があと %.1f 段しかない。これ以上暗いと"
+                "画面が暗くなり、赤の判定が一斉に崩れる。照明を足すか、"
+                "FrameDurationLimits を伸ばして露出を稼ぐこと **" % stops)
 
     def capture(self):
         """最新のフレームを BGR の NumPy 配列として返す (チャンネルに関する注意を参照)。"""
