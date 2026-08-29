@@ -310,3 +310,28 @@ def test_the_default_chain_legs_errs_on_the_safe_side(manager):
     """
     assert manager.chain_legs == 1
     assert manager.motions(MEASURED_5X5) == len(MEASURED_5X5)
+
+
+# --- 安全率 (#87) ----------------------------------------------------------
+
+def test_the_margin_is_the_one_the_contest_mazes_argued_for(manager):
+    """既定は 1.2。**1.5 は崖の上に乗っていた** (#87)。
+
+    大会迷路 31 面で、1.4 へ下げるだけで 4 面が最速ランを走れるようになり、
+    1.2 では実機が見積もりより 20% 遅くても 7 分を超える面はゼロだった
+    (実測の見積もり誤差は 8x8 で 0.5%)。1.0 は 10% 遅いだけで超過するので行き過ぎ。
+    """
+    assert manager.time_margin == 1.2
+
+
+def test_a_lower_margin_accepts_a_run_the_old_one_refused(explorer):
+    """安全率が守っているのは「始めた走行を終えられるか」だけ。
+
+    1.5 では断る残り時間でも 1.2 なら出る — 規定 3-1 では記録は**最速の 1 走行**で、
+    時間切れの最速ランは時間を失うだけなので、**断る方が高くつく。**
+    """
+    legs = [Leg(Direction.N, 8), Leg(Direction.E, 8)]
+    bold, safe = RunManager(explorer), RunManager(explorer, time_margin=1.5)
+    need = bold.estimate_s(legs)
+    # 1.2 倍ぶんは足りるが 1.5 倍には足りない残り時間
+    assert bold.time_margin * need < 1.35 * need < safe.time_margin * need

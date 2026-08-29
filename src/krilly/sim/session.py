@@ -107,7 +107,7 @@ def simulate_session(
     cost: MoveCost = DEFAULT_COST,
     time_limit_s: float = 420.0,
     max_runs: int = 5,
-    time_margin: float = 1.5,
+    time_margin: float = 1.2,
     start_facing: Direction = Direction.N,
     search_step_overhead_s: float = 0.0,
     actual_scale: float = 1.0,
@@ -115,6 +115,7 @@ def simulate_session(
     neighbor_sensing: bool = True,
     max_leg_cells: int = 2,
     chain_legs: int = 2,
+    times: dict[str, float] | None = None,
 ) -> SessionResult:
     """真の迷路 ``truth`` を相手に 7 分 5 走 (クラシック競技規定) のセッションを丸ごと回す。
 
@@ -136,6 +137,12 @@ def simulate_session(
 
     ``time_margin`` は :class:`RunManager` の安全率。走行を始めるかの判断だけに効く
     (小さくすると際どい走行にも出るようになる)。
+
+    ``times`` は :class:`RunManager` の時間定数の上書き
+    (``cell_time_s`` / ``lateral_cell_time_s`` / ``straight_time_s`` / ``turn_time_s``)。
+    **「機体が速くなったら何面走れるか」を測るためのもの** (#87)。速度を上げても
+    固定費 (停止 0.44s + カメラ) は縮まないので、**全部を同じ比率で割ってはいけない** —
+    セル時間だけを速度比で割り、ランプの分だけ固定費に足すのが実態に近い。
     """
     learned = open_maze(truth.size)
     learned.start = truth.start
@@ -144,7 +151,8 @@ def simulate_session(
                   travel=start_facing, holonomic=holonomic)
     mgr = RunManager(ex, holonomic=holonomic, cost=cost, time_limit_s=time_limit_s,
                      max_runs=max_runs, time_margin=time_margin,
-                     chain_legs=1 if not holonomic else chain_legs)
+                     chain_legs=1 if not holonomic else chain_legs,
+                     **(times or {}))
     result = SessionResult(truth=truth, explorer=ex)
     result.limit_s = time_limit_s
 
