@@ -50,6 +50,7 @@ import statistics
 import time
 from dataclasses import dataclass
 
+from krilly.hal.camera import add_camera_args, camera_kwargs
 from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
 from krilly.hal.l6470_chain import L6470Chain
@@ -247,6 +248,7 @@ def main() -> None:
                    help="開始前にカメラで迷路軸を測り、推定方位をそこへ引き戻す "
                         "(実走と同じ挙動。置き方の傾きが横流れになるのを防ぐ)")
     p.add_argument("--yaw-samples", type=int, default=5, help="カメラ実測のフレーム数 (中央値)")
+    add_camera_args(p)
     p.add_argument("--save-frames", default=None,
                    help="カメラ実測フレームの保存先プレフィクス 例: /tmp/yaw")
     args = p.parse_args()
@@ -289,7 +291,7 @@ def main() -> None:
         if args.camera_yaw or args.camera_pose:
             from krilly.hal.camera import Camera   # 遅延 import (実機専用の依存)
 
-            camera = stack.enter_context(Camera())
+            camera = stack.enter_context(Camera(**camera_kwargs(args)))
         yaw_cfg = calibrated_axis_yaw_config()
         detector = WallDetector(calibrated_config())
 
@@ -436,6 +438,17 @@ def main() -> None:
         driver.energize()
         time.sleep(args.settle)
         yaw_before = measure_yaw("before")
+        if yaw_before is not None and abs(yaw_before.angle_deg) > PLACEMENT_TILT_WARN_DEG:
+            # **--align の有無に関わらず警告する。** 以前は align したときだけ出して
+            # いたので、罠が牙を剥く側 (align 無し) では黙っていた。実際にそれで
+            # 8 走行ぶんの測定が無駄になった: 傾きが -0.96° から +1.65° まで散らばり、
+            # 720mm の横移動では 1° = 12.6mm の横流れになるので、比べたかった
+            # 速度差 (数 mm) が完全に埋もれた。
+            drift = 720.0 * math.sin(math.radians(abs(yaw_before.angle_deg)))
+            log.warning("置き方が迷路軸から %+.2f° 傾いている。**平行移動は体軸に沿って"
+                        "進むので、4 セルで %.0fmm の横流れになる**%s",
+                        yaw_before.angle_deg, drift,
+                        "" if args.align else " — 動作を比べる測定なら --align を付けること")
         if args.align and yaw_before is not None:
             # 置いた傾きを迷路軸へ引き戻す。実走 (search_run / speed_run) は毎セル
             # apply_axis_heading で同じことをしており、方位保持の P 制御が機体を真っ直ぐに
@@ -449,13 +462,6 @@ def main() -> None:
                 # 進行方向も傾いているので **横流れが位置の測定に乗る**。動作どうしを
                 # 比べたいときは、この値を揃えないと比較にならない (#80 の実測で
                 # 2.3° の置き方が 4 区間ぶんの誤差に化けた疑いがある)。
-                tilt = abs(yaw_before.angle_deg)
-                if tilt > PLACEMENT_TILT_WARN_DEG:
-                    log.warning(
-                        "置き方が迷路軸から %+.2f° 傾いている (目安 %.1f° 以内)。"
-                        "走りながら直すぶんの横流れが位置の実測に乗る。"
-                        "動作を比べる測定なら置き直すこと。",
-                        yaw_before.angle_deg, PLACEMENT_TILT_WARN_DEG)
             else:
                 log.warning("迷路軸への整列を見送った (補正量が大きすぎる)")
         pose_before = measure_pose("before")

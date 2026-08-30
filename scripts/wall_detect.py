@@ -22,6 +22,9 @@ labels.csv (正解ラベル付き) を読み、同じフレームを**別の HSV
 影響を評価できるので、しきい値をいじる前に必ずこれを通すこと。しきい値だけを
 変えるなら再測定すら要らない (``scripts/survey_report.py`` が CSV だけで答える)。
 
+``--hue-split`` に ``--zoom`` を付けると、**表示だけでなく統計もその範囲に絞られる**。
+「この赤い物体は何色か」を測るときはこれ (絞らないと画面の大半を占める壁に埋もれる)。
+
 ``--hue-split`` は赤マスクを**色相の 2 帯に塗り分ける**モード (#87)。赤は H の下端
 (オレンジ寄り) と上端 (マゼンタ寄り) に割れるので、どちらで拾ったかが異物の切り分けの
 決め手になる。**単色で重ねても分からない。**
@@ -59,6 +62,7 @@ import dataclasses
 import cv2
 import numpy as np
 
+from krilly.hal.camera import add_camera_args, camera_kwargs
 from krilly.logging_config import get_logger, setup_logging
 from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import (
@@ -103,8 +107,7 @@ log = get_logger("krilly.wall_detect")
 
 
 def measure_repeatability(count: int, interval: float, save_prefix: str | None,
-                          neighbors: bool = False,
-                          max_frame_duration_us: int = 33_333) -> None:
+                          neighbors: bool = False, camera_args: dict | None = None) -> None:
     """静止したまま N フレーム撮り、位置測定のばらつきを表にする (#21)。
 
     帯探索は ROI を ±40px スライドして赤割合が最大の位置を採るので、本物の帯の
@@ -123,7 +126,7 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None,
     edges = (FRONT, BACK, LEFT, RIGHT)
     rows: list[tuple[dict[str, tuple[float, float, bool]], CellOffset]] = []
     yaws: list[float] = []
-    with Camera(max_frame_duration_us=max_frame_duration_us) as cam:
+    with Camera(**(camera_args or {})) as cam:
         for i in range(count):
             if i:
                 time.sleep(interval)
@@ -315,6 +318,15 @@ def hue_split(frame, red: RedDetectorConfig, out_path: str, zoom: str | None) ->
     m1, m2 = h1 > 0, h2 > 0
     log.info("赤とみなす色相: H %d-%d (h1) と H %d-%d (h2)  s_min=%d v_min=%d",
              red.h1_lo, red.h1_hi, red.h2_lo, red.h2_hi, red.s_min, red.v_min)
+    if zoom:
+        # **数字も拡大範囲に合わせる。** 画像だけ切り出して統計はフレーム全体、では
+        # 「この赤い物体は何色か」が測れない (画面の大半を占める壁に埋もれる)。
+        zx0, zx1, zy0, zy1 = (int(v) for v in zoom.split(","))
+        inside = np.zeros(m1.shape, bool)
+        inside[zy0:zy1, zx0:zx1] = True
+        m1, m2 = m1 & inside, m2 & inside
+        log.info("  ※ 以下の統計は拡大範囲 x %d-%d / y %d-%d の中だけ",
+                 zx0, zx1, zy0, zy1)
     for name, m in (("h1 (オレンジ寄り)", m1), ("h2 (壁と同じ色相)", m2)):
         if not m.any():
             log.info("  %-18s 0 画素", name)
@@ -343,9 +355,7 @@ def main() -> None:
     p.add_argument("--measure", type=int, default=0, metavar="N",
                    help="静止したまま N フレーム撮り、位置測定の再現性を表示する")
     p.add_argument("--interval", type=float, default=0.3, help="--measure のフレーム間隔 [s]")
-    p.add_argument("--max-frame-duration", type=float, default=33.3,
-                   metavar="ミリ秒",
-                   help="フレーム間隔の上限 [ms]。暗い会場で露出を稼ぐ (既定 33.3 = 30fps 固定)。**100 にすると 0.6 段ぶん暗さに強くなる。それ以上は AE が露出を 50ms で打ち切るので無意味** (#78 実測)。代償は 1 停止あたりの待ち時間だけ (撮影は必ず停止中)")
+    add_camera_args(p)
     p.add_argument("--save-prefix", default=None, help="--measure のフレーム保存先プレフィクス")
     p.add_argument("--image", default=None, help="入力画像 (未指定ならカメラ取得)")
     p.add_argument("--batch", default=None, metavar="DIR",
@@ -382,8 +392,7 @@ def main() -> None:
         return
     if args.measure:
         measure_repeatability(args.measure, args.interval, args.save_prefix,
-                              args.neighbors,
-                              int(args.max_frame_duration * 1000))
+                              args.neighbors, camera_kwargs(args))
         return
     if args.image:
         frame = cv2.imread(args.image)
@@ -393,7 +402,7 @@ def main() -> None:
     else:
         from krilly.hal.camera import Camera
 
-        with Camera() as cam:
+        with Camera(**camera_kwargs(args)) as cam:
             frame = cam.capture()
 
     # ※ red は main の先頭で**校正済みの設定から**派生させてある。素の

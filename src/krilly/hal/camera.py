@@ -13,6 +13,8 @@ Pi 5 では ``cv2.VideoCapture`` が libcamera スタックで動作しないた
 
 from __future__ import annotations
 
+import argparse
+
 from krilly.logging_config import get_logger
 
 log = get_logger("krilly.camera")
@@ -69,6 +71,10 @@ class Camera:
         lock_awb_exposure: bool = True,
         full_fov: bool = True,
         max_frame_duration_us: int = DEFAULT_MAX_FRAME_DURATION_US,
+        ae_constraint: str | None = None,
+        exposure_value: float | None = None,
+        exposure_us: int | None = None,
+        gain: float | None = None,
         picam2=None,
     ) -> None:
         #: ロックした露出時間 [us] とアナログゲイン、およびゲインの上限 (#78)。
@@ -88,6 +94,17 @@ class Camera:
         self.max_analogue_gain: float = 16.0
         self.max_frame_duration_us: int = max(max_frame_duration_us,
                                               self.DEFAULT_MAX_FRAME_DURATION_US)
+        #: 露出とゲインを AE に任せず固定する値 (None なら AE の判断を採る)。
+        #: **黒い床では AE が開いて壁上面を白飛びさせる** (#56: 淡いピンク S=46-54 に
+        #: 飛んで壁を見落とし、機体が衝突した)。露出を下げる手段が要る。
+        self.forced_exposure_us = exposure_us
+        self.forced_gain = gain
+        self.ae_constraint = ae_constraint
+        #: AE の目標を何段ずらすか (負で暗く)。**黒い床ではこれが効く。**
+        #: 露出時間を決め打ちするのと違い「AE の判断より N 段暗く」なので、
+        #: 会場の明るさが変わっても追従する。実測 (EV 0 でゲイン 5.75):
+        #: EV -1 → ゲイン 2.83 (ちょうど半分)、EV -2 → 1.51。
+        self.exposure_value = exposure_value
         if picam2 is None:
             import time
 
@@ -113,6 +130,18 @@ class Camera:
             )
             picam2.configure(config)
             picam2.start()
+            if exposure_value is not None:
+                picam2.set_controls({"ExposureValue": float(exposure_value)})
+                time.sleep(0.3)
+            if ae_constraint:
+                # **白飛びを避ける露出の決め方**。``Highlight`` は「明るい部分を
+                # 飛ばさないように」露出を決めるので、視野の大半が黒い床で、
+                # 見たいものが明るい壁上面、という状況のための設定 (#87)。
+                from libcamera import controls as _controls
+
+                picam2.set_controls({"AeConstraintMode": getattr(
+                    _controls.AeConstraintModeEnum, ae_constraint)})
+                time.sleep(0.3)
             if lock_awb_exposure:
                 time.sleep(0.5)  # 自動露出 / ホワイトバランスが落ち着くのを待つ
                 self.lock_exposure(picam2)
@@ -127,8 +156,10 @@ class Camera:
         ロックになる。
         """
         meta = picam2.capture_metadata()
-        self.exposure_time_us = int(meta.get("ExposureTime", 8000))
-        self.analogue_gain = float(meta.get("AnalogueGain", 1.0))
+        self.exposure_time_us = (self.forced_exposure_us if self.forced_exposure_us
+                                 else int(meta.get("ExposureTime", 8000)))
+        self.analogue_gain = (self.forced_gain if self.forced_gain
+                              else float(meta.get("AnalogueGain", 1.0)))
         controls = getattr(picam2, "camera_controls", None) or {}
         if "AnalogueGain" in controls:
             self.max_analogue_gain = float(controls["AnalogueGain"][1])
@@ -138,12 +169,24 @@ class Camera:
             "ExposureTime": self.exposure_time_us,
             "AnalogueGain": self.analogue_gain,
         })
+        if self.forced_exposure_us or self.forced_gain:
+            # **指定した露出が効くのは次のフレームからではない。** センサーが新しい
+            # 露出で撮り始めるまで数フレームかかるので、ここで待たないと最初の
+            # 1 枚は古い露出のまま返る。実機で実際に踏んだ: --measure 1 では
+            # 「露出を 1/4 にしても赤割合が変わらない」と出て、--measure 5 にしたら
+            # #01 だけ 0.41、#02 以降が 0.17 だった (#100)。
+            import time as _time
+
+            _time.sleep(0.5)
+            picam2.capture_metadata()          # 反映後のフレームを 1 枚捨てる
         stops = self.headroom_stops()
-        log.info("露出をロック: %.1fms%s / ゲイン %.2f (上限 %.1f、残り %.1f 段)%s",
+        forced = ("" if not (self.forced_exposure_us or self.forced_gain)
+                  else " ** 手動指定 (AE の判断ではない) **")
+        log.info("露出をロック: %.1fms%s / ゲイン %.2f (上限 %.1f、残り %.1f 段)%s%s",
                  self.exposure_time_us / 1000.0,
                  " (フレーム間隔の上限)" if self.exposure_is_capped() else "",
                  self.analogue_gain, self.max_analogue_gain, stops,
-                 self.exposure_warning() or "")
+                 forced, self.exposure_warning() or "")
 
     def exposure_is_capped(self) -> bool:
         """露出がフレーム間隔の上限に張り付いているか。
@@ -203,3 +246,41 @@ class Camera:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def add_camera_args(p: argparse.ArgumentParser) -> None:
+    """カメラの露出まわりの共通引数 (#78 / #87)。
+
+    **既定はすべて「いまの挙動」**なので、付けなければ何も変わらない。
+    ``motion.tuning.add_tuning_args`` と同じ形にしてある — 4 本のスクリプトで
+    同じ引数を別々に書くと、片方だけ直して食い違う。
+    """
+    g = p.add_argument_group("カメラの露出 (暗い会場 / 黒い床)")
+    g.add_argument("--max-frame-duration", type=float, default=33.3, metavar="ミリ秒",
+                   help="フレーム間隔の上限 [ms]。暗い会場で露出を稼ぐ "
+                        "(既定 33.3 = 30fps 固定)。**100 にすると 0.6 段ぶん暗さに"
+                        "強くなる。それ以上は AE が露出を 50ms で打ち切るので無意味** "
+                        "(#78 実測)。代償は 1 停止あたりの待ち時間だけ (撮影は必ず停止中)")
+    g.add_argument("--ae-constraint", default=None,
+                   choices=("Normal", "Highlight", "Shadows"),
+                   help="露出の決め方。**黒い床では力不足だった** (#100 実測: ゲインを "
+                        "0.5 段しか戻さず、後方の壁は 0.11 のまま)。そちらは --ev を使うこと")
+    g.add_argument("--ev", type=float, default=None, metavar="段",
+                   help="AE の目標を何段ずらすか (負で暗く、#100)。**黒い床で壁の上面が"
+                        "白飛びするときはこれ。** 露出時間の決め打ちと違い「AE の判断より"
+                        "N 段暗く」なので、会場の明るさが変わっても追従する")
+    g.add_argument("--exposure", type=float, default=None, metavar="ミリ秒",
+                   help="露出時間を手動で固定する (AE の判断を使わない)")
+    g.add_argument("--gain", type=float, default=None, metavar="倍率",
+                   help="アナログゲインを手動で固定する (AE の判断を使わない)")
+
+
+def camera_kwargs(args) -> dict:
+    """:func:`add_camera_args` の結果を :class:`Camera` の引数に直す。"""
+    return {
+        "max_frame_duration_us": int(args.max_frame_duration * 1000),
+        "ae_constraint": args.ae_constraint,
+        "exposure_value": args.ev,
+        "exposure_us": None if args.exposure is None else int(args.exposure * 1000),
+        "gain": args.gain,
+    }
