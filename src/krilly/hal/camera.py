@@ -160,6 +160,16 @@ class Camera:
             "ExposureTime": self.exposure_time_us,
             "AnalogueGain": self.analogue_gain,
         })
+        if self.forced_exposure_us or self.forced_gain:
+            # **指定した露出が効くのは次のフレームからではない。** センサーが新しい
+            # 露出で撮り始めるまで数フレームかかるので、ここで待たないと最初の
+            # 1 枚は古い露出のまま返る。実機で実際に踏んだ: --measure 1 では
+            # 「露出を 1/4 にしても赤割合が変わらない」と出て、--measure 5 にしたら
+            # #01 だけ 0.41、#02 以降が 0.17 だった (#100)。
+            import time as _time
+
+            _time.sleep(0.5)
+            picam2.capture_metadata()          # 反映後のフレームを 1 枚捨てる
         stops = self.headroom_stops()
         forced = ("" if not (self.forced_exposure_us or self.forced_gain)
                   else " ** 手動指定 (AE の判断ではない) **")
