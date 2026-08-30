@@ -263,9 +263,8 @@ def add_camera_args(p: argparse.ArgumentParser) -> None:
                         "(#78 実測)。代償は 1 停止あたりの待ち時間だけ (撮影は必ず停止中)")
     g.add_argument("--ae-constraint", default=None,
                    choices=("Normal", "Highlight", "Shadows"),
-                   help="露出の決め方 (#87)。**黒い床では Highlight を試すこと** — "
-                        "視野の大半が黒い床だと AE が開き、明るい壁上面が白飛びして"
-                        "彩度が落ちる (#56 はそれで壁を見落として衝突した)")
+                   help="露出の決め方。**黒い床では力不足だった** (#100 実測: ゲインを "
+                        "0.5 段しか戻さず、後方の壁は 0.11 のまま)。そちらは --ev を使うこと")
     g.add_argument("--ev", type=float, default=None, metavar="段",
                    help="AE の目標を何段ずらすか (負で暗く、#100)。**黒い床で壁の上面が"
                         "白飛びするときはこれ。** 露出時間の決め打ちと違い「AE の判断より"

@@ -50,6 +50,7 @@ import statistics
 import time
 from dataclasses import dataclass
 
+from krilly.hal.camera import add_camera_args, camera_kwargs
 from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
 from krilly.hal.l6470_chain import L6470Chain
@@ -247,6 +248,7 @@ def main() -> None:
                    help="開始前にカメラで迷路軸を測り、推定方位をそこへ引き戻す "
                         "(実走と同じ挙動。置き方の傾きが横流れになるのを防ぐ)")
     p.add_argument("--yaw-samples", type=int, default=5, help="カメラ実測のフレーム数 (中央値)")
+    add_camera_args(p)
     p.add_argument("--save-frames", default=None,
                    help="カメラ実測フレームの保存先プレフィクス 例: /tmp/yaw")
     args = p.parse_args()
@@ -289,7 +291,7 @@ def main() -> None:
         if args.camera_yaw or args.camera_pose:
             from krilly.hal.camera import Camera   # 遅延 import (実機専用の依存)
 
-            camera = stack.enter_context(Camera())
+            camera = stack.enter_context(Camera(**camera_kwargs(args)))
         yaw_cfg = calibrated_axis_yaw_config()
         detector = WallDetector(calibrated_config())
 

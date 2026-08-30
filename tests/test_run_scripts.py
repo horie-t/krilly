@@ -10,6 +10,7 @@
 import argparse
 import ast
 import inspect
+import pathlib
 import textwrap
 
 import pytest
@@ -64,3 +65,30 @@ def test_the_legacy_switches_still_parse(module):
 def test_build_parser_does_not_touch_hardware(module):
     """パーサを作るだけで実機依存を import しないこと (テストが動く前提)。"""
     assert isinstance(module.build_parser(), argparse.ArgumentParser)
+
+
+# --- カメラの露出引数がスクリプト間で食い違わないこと (#78 / #100) -----------
+
+CAMERA_SCRIPTS = ("search_run", "speed_run", "survey_shot", "wall_detect",
+                  "cell_move_demo")
+
+
+def _source(name: str) -> str:
+    return (pathlib.Path(__file__).resolve().parents[1]
+            / "scripts" / f"{name}.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", CAMERA_SCRIPTS)
+def test_every_script_that_opens_the_camera_uses_the_shared_args(name):
+    """``Camera(`` を作るスクリプトは必ず ``camera_kwargs`` を渡すこと。
+
+    **露出の引数を各スクリプトが別々に持つと、片方だけ直して食い違う。**
+    実際に ``--max-frame-duration`` が 4 本に重複していた。黒い床では ``--ev -2``
+    が無いと後方の壁を 0.09 で読む (#100) ので、1 本でも漏れると走らせられない。
+    """
+    src = _source(name)
+    assert "add_camera_args(p)" in src, f"{name}: add_camera_args を呼んでいない"
+    for line in src.splitlines():
+        if "Camera(" in line and "camera_kwargs" not in line and "picam2" not in line:
+            # 引数なしの Camera() は露出オプションが効かない
+            assert "Camera()" not in line, f"{name}: {line.strip()} が引数を渡していない"
