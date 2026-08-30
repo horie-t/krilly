@@ -22,6 +22,9 @@ labels.csv (正解ラベル付き) を読み、同じフレームを**別の HSV
 影響を評価できるので、しきい値をいじる前に必ずこれを通すこと。しきい値だけを
 変えるなら再測定すら要らない (``scripts/survey_report.py`` が CSV だけで答える)。
 
+``--hue-split`` に ``--zoom`` を付けると、**表示だけでなく統計もその範囲に絞られる**。
+「この赤い物体は何色か」を測るときはこれ (絞らないと画面の大半を占める壁に埋もれる)。
+
 ``--hue-split`` は赤マスクを**色相の 2 帯に塗り分ける**モード (#87)。赤は H の下端
 (オレンジ寄り) と上端 (マゼンタ寄り) に割れるので、どちらで拾ったかが異物の切り分けの
 決め手になる。**単色で重ねても分からない。**
@@ -315,6 +318,15 @@ def hue_split(frame, red: RedDetectorConfig, out_path: str, zoom: str | None) ->
     m1, m2 = h1 > 0, h2 > 0
     log.info("赤とみなす色相: H %d-%d (h1) と H %d-%d (h2)  s_min=%d v_min=%d",
              red.h1_lo, red.h1_hi, red.h2_lo, red.h2_hi, red.s_min, red.v_min)
+    if zoom:
+        # **数字も拡大範囲に合わせる。** 画像だけ切り出して統計はフレーム全体、では
+        # 「この赤い物体は何色か」が測れない (画面の大半を占める壁に埋もれる)。
+        zx0, zx1, zy0, zy1 = (int(v) for v in zoom.split(","))
+        inside = np.zeros(m1.shape, bool)
+        inside[zy0:zy1, zx0:zx1] = True
+        m1, m2 = m1 & inside, m2 & inside
+        log.info("  ※ 以下の統計は拡大範囲 x %d-%d / y %d-%d の中だけ",
+                 zx0, zx1, zy0, zy1)
     for name, m in (("h1 (オレンジ寄り)", m1), ("h2 (壁と同じ色相)", m2)):
         if not m.any():
             log.info("  %-18s 0 画素", name)

@@ -72,6 +72,7 @@ class Camera:
         full_fov: bool = True,
         max_frame_duration_us: int = DEFAULT_MAX_FRAME_DURATION_US,
         ae_constraint: str | None = None,
+        exposure_value: float | None = None,
         exposure_us: int | None = None,
         gain: float | None = None,
         picam2=None,
@@ -99,6 +100,11 @@ class Camera:
         self.forced_exposure_us = exposure_us
         self.forced_gain = gain
         self.ae_constraint = ae_constraint
+        #: AE の目標を何段ずらすか (負で暗く)。**黒い床ではこれが効く。**
+        #: 露出時間を決め打ちするのと違い「AE の判断より N 段暗く」なので、
+        #: 会場の明るさが変わっても追従する。実測 (EV 0 でゲイン 5.75):
+        #: EV -1 → ゲイン 2.83 (ちょうど半分)、EV -2 → 1.51。
+        self.exposure_value = exposure_value
         if picam2 is None:
             import time
 
@@ -124,6 +130,9 @@ class Camera:
             )
             picam2.configure(config)
             picam2.start()
+            if exposure_value is not None:
+                picam2.set_controls({"ExposureValue": float(exposure_value)})
+                time.sleep(0.3)
             if ae_constraint:
                 # **白飛びを避ける露出の決め方**。``Highlight`` は「明るい部分を
                 # 飛ばさないように」露出を決めるので、視野の大半が黒い床で、
@@ -257,6 +266,10 @@ def add_camera_args(p: argparse.ArgumentParser) -> None:
                    help="露出の決め方 (#87)。**黒い床では Highlight を試すこと** — "
                         "視野の大半が黒い床だと AE が開き、明るい壁上面が白飛びして"
                         "彩度が落ちる (#56 はそれで壁を見落として衝突した)")
+    g.add_argument("--ev", type=float, default=None, metavar="段",
+                   help="AE の目標を何段ずらすか (負で暗く、#100)。**黒い床で壁の上面が"
+                        "白飛びするときはこれ。** 露出時間の決め打ちと違い「AE の判断より"
+                        "N 段暗く」なので、会場の明るさが変わっても追従する")
     g.add_argument("--exposure", type=float, default=None, metavar="ミリ秒",
                    help="露出時間を手動で固定する (AE の判断を使わない)")
     g.add_argument("--gain", type=float, default=None, metavar="倍率",
@@ -268,6 +281,7 @@ def camera_kwargs(args) -> dict:
     return {
         "max_frame_duration_us": int(args.max_frame_duration * 1000),
         "ae_constraint": args.ae_constraint,
+        "exposure_value": args.ev,
         "exposure_us": None if args.exposure is None else int(args.exposure * 1000),
         "gain": args.gain,
     }

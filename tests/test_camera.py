@@ -116,11 +116,11 @@ def test_camera_args_round_trip():
     add_camera_args(p)
     assert camera_kwargs(p.parse_args([])) == {
         "max_frame_duration_us": 33_300, "ae_constraint": None,
-        "exposure_us": None, "gain": None,
+        "exposure_value": None, "exposure_us": None, "gain": None,
     }
     got = camera_kwargs(p.parse_args(
         ["--max-frame-duration", "100", "--ae-constraint", "Highlight",
          "--exposure", "8", "--gain", "2.5"]))
     assert got == {"max_frame_duration_us": 100_000, "ae_constraint": "Highlight",
-                   "exposure_us": 8_000, "gain": 2.5}
+                   "exposure_value": None, "exposure_us": 8_000, "gain": 2.5}
     Camera(picam2=FakePicam2(), **got)          # 受け取れること
