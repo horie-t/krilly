@@ -721,3 +721,35 @@ def test_band_shift_threshold_matches_the_position_fix_threshold():
     from krilly.perception.wall_detect import BAND_SHIFT_MIN_FRACTION
 
     assert BAND_SHIFT_MIN_FRACTION == OFFSET_MIN_FRACTION
+
+
+def test_a_hair_of_noise_at_the_plateau_edge_does_not_move_the_offset():
+    """**平坦部の同点判定を厳密一致にしてはいけない** (#100)。
+
+    帯が ROI より細いと、帯を含むどの位置も同じ赤割合になる (平坦部)。オフセットは
+    その**中心**を返す約束だが、判定が厳密一致だと端に数画素の赤が乗っただけで
+    平坦が崩れ、勝者が端に確定する。
+
+    実機で踏んだ: FRONT の帯 23px に対し ROI が 50px で平坦部は 27px。5 フレーム中
+    1 枚だけ端の値が **0.0010** 高くなり、返るオフセットが中心の +1px から端の +14px
+    へ跳んだ。機体は静止しているのに位置の読みが **7mm** ずれる。
+    """
+    mask = np.zeros((200, 100), np.uint8)
+    mask[60:84, :] = 255                 # 帯 24 行 (ROI 50 行より細い)
+    mask[105:107, :3] = 255              # 平坦部の上端でだけ入る、ごく小さな赤
+    roi = Roi(0, 50, 100, 50)
+
+    value, offset, _ = best_roi_red_fraction(mask, roi, vertical=False, search_px=40)
+    # 帯が丸ごと入るのは -16..+10。その中心は -3 で、端の +10 ではない。
+    assert -8 <= offset <= 2, f"平坦部の端に張り付いた (offset={offset})"
+    assert value > 0.4
+
+
+def test_the_plateau_centre_is_still_the_centre_without_noise():
+    """ノイズが無ければ従来どおり平坦部の中心 (許容を広げても中心は動かない)。"""
+    mask = np.zeros((200, 100), np.uint8)
+    mask[60:84, :] = 255
+    roi = Roi(0, 50, 100, 50)
+
+    _value, offset, _sat = best_roi_red_fraction(mask, roi, vertical=False, search_px=40)
+    assert -8 <= offset <= 2

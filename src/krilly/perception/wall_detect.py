@@ -512,6 +512,20 @@ class WallDetectorConfig:
         return self.thresholds.get(self.target(name).edge, self.threshold)
 
 
+#: 帯探索の平坦部を「同じ」とみなす許容 (相対 / 絶対の大きい方)。
+#:
+#: **厳密な一致にすると、平坦部の端のノイズが勝者を決める** (#100)。実機で踏んだ:
+#: FRONT の帯は 23px、ROI は 50px なので平坦部が 27px あり、5 フレーム中 1 枚で
+#: 端の値が 0.0010 だけ高くなって平坦部が崩れ、返るオフセットが中心の +1px から
+#: 端の +14px へ跳んだ (= 位置の読みが 7mm ずれる)。静止しているのに、である。
+#:
+#: 値の根拠: 平坦部から 1 段 (2px) 外れると実測で 0.015 下がるので、それより十分
+#: 小さく、ノイズの 0.001 より十分大きい 0.005 を絶対値に採る。相対 1% は解像度や
+#: 帯の強さが変わったときのため。
+PLATEAU_ABS_TOLERANCE = 0.005
+PLATEAU_REL_TOLERANCE = 0.01
+
+
 def _band_profile(mask: np.ndarray, roi: Roi, vertical: bool) -> np.ndarray:
     """ROI の長手方向に平均した赤割合プロファイル (探索軸に沿った 1 次元)。
 
@@ -550,15 +564,21 @@ def best_roi_red_fraction(
                if 0 <= start + o <= limit]
     if not offsets:
         return (0.0, 0, False)
-    best_value = -1.0
-    best_offsets: list[int] = []
-    for offset in offsets:
-        s = start + offset
-        value = float(prof[s : s + length].mean())
-        if value > best_value + 1e-12:
-            best_value, best_offsets = value, [offset]
-        elif value > best_value - 1e-12:
-            best_offsets.append(offset)
+    values = [float(prof[start + o : start + o + length].mean()) for o in offsets]
+    best_value = max(values)
+    # 平坦部を「最大値と**実質同じ**位置の連なり」として取り、その中心を返す。
+    # 許容を厳密な一致にしてはいけない (#100): FRONT の帯は 23px、ROI は 50px なので
+    # 平坦部は 27px あり、実機ではその中で 0.001 (=9 画素) の差が付く。厳密一致だと
+    # その 0.001 が勝者を決め、静止したまま読みが 12px = 7mm 跳ぶ。
+    # **連なりで取る**のも要点で、離れた位置がたまたま同値でも巻き込まない。
+    tolerance = max(PLATEAU_ABS_TOLERANCE, best_value * PLATEAU_REL_TOLERANCE)
+    peak = values.index(best_value)
+    lo = hi = peak
+    while lo > 0 and values[lo - 1] >= best_value - tolerance:
+        lo -= 1
+    while hi < len(values) - 1 and values[hi + 1] >= best_value - tolerance:
+        hi += 1
+    best_offsets = offsets[lo : hi + 1]
     chosen = best_offsets[len(best_offsets) // 2]
     # 端が最良で、かつその端が「フレームに切られた端」なら飽和 (もっと先を見たかった)
     saturated = ((chosen == offsets[-1] and offsets[-1] < search_px)
