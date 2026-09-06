@@ -428,21 +428,21 @@ def test_geometry_reproduces_the_measured_band_centres():
         assert CALIBRATED_GEOMETRY.band_center(edge) == pytest.approx((lo + hi) / 2.0)
 
 
-def test_roi_shape_is_the_same_at_every_calibrated_resolution():
-    """ROI の**形**は解像度によらず同じであること (位置だけが変わる)。
+def test_only_the_size_the_camera_uses_is_calibrated():
+    """校正済みの解像度は**実機が撮る 1 つだけ**であること。
 
-    形を mm で持ち、出力解像度を画角と同じ倍率にしているのでこうなる (#88)。
-    形まで変わるなら、どこかで px/mm が変わってしまっている。
+    使っていない解像度の古い表を残すと、カメラの高さが変わった後もそれが生き残り、
+    ROI が帯から外れたまま走ることになる (#56 / #88 が繰り返し踏んだ穴)。実際に
+    640x480 の表は、床板の撓み対策で機体を組み直した時点で実機と合わなくなった
+    (px/mm 1.694 -> 1.706)。**未知の解像度では止まる**方が安いので消してある。
+
+    ROI の形が px/mm だけで決まること自体は
+    :func:`test_geometry_keeps_the_roi_shape_when_the_field_of_view_changes` が
+    合成した幾何で確かめている (実測の表を 2 つ持つ必要はない)。
     """
     from krilly.perception.wall_detect import CALIBRATED_GEOMETRIES
 
-    shapes = [
-        {e: (r.w, r.h) for e, r in calibrated_rois(g).items()}
-        for _, g in sorted(CALIBRATED_GEOMETRIES.items())
-    ]
-    assert len(shapes) >= 2
-    for other in shapes[1:]:
-        assert other == shapes[0]
+    assert set(CALIBRATED_GEOMETRIES) == {DEFAULT_FRAME_SIZE}
 
 
 def test_geometry_keeps_the_roi_shape_when_the_field_of_view_changes():
