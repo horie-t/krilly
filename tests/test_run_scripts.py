@@ -70,7 +70,7 @@ def test_build_parser_does_not_touch_hardware(module):
 # --- カメラの露出引数がスクリプト間で食い違わないこと (#78 / #100) -----------
 
 CAMERA_SCRIPTS = ("search_run", "speed_run", "survey_shot", "wall_detect",
-                  "cell_move_demo")
+                  "cell_move_demo", "camera_fov")
 
 
 def _source(name: str) -> str:

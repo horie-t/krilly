@@ -14,8 +14,12 @@
 前提: **4 辺すべてに壁のあるセルの中央に機体を置く**。帯の位置から px/mm を出すので、
 対向する帯の間隔が 1 ピッチ = 180mm であることを使う。
 
+**黒い床では ``--ev -2`` を付けること** (#100)。付けないと後方の壁の帯が淡くなって
+``band_positions`` が拾えず、px/mm の基準になる帯の間隔が片方しか出ない。
+
 例:
     python -m scripts.camera_fov                      # 現状と全画素を比べる
+    python -m scripts.camera_fov --full-only --emit-bands --ev -2   # 黒い床で再校正
     python -m scripts.camera_fov --size 960x720       # 全画素側の出力を指定
     python -m scripts.camera_fov --out-dir fov        # フレームも保存する
 """
@@ -29,7 +33,7 @@ from pathlib import Path
 import cv2
 
 from krilly.config import load_maze_config
-from krilly.hal.camera import Camera
+from krilly.hal.camera import Camera, add_camera_args, camera_kwargs
 from krilly.logging_config import get_logger, setup_logging
 from krilly.perception.camera_tilt import measure_tilt
 from krilly.perception.red_wall import red_mask
@@ -213,6 +217,7 @@ def main() -> None:
     p.add_argument("--full-only", action="store_true", help="全画素モードだけ測る")
     p.add_argument("--emit-bands", action="store_true",
                    help="CALIBRATED_BANDS に貼る値を出す (定規でセル中央に置いて撮ること)")
+    add_camera_args(p)
     p.add_argument("--camera-height", type=float, default=390.0,
                    help="床からカメラまでの高さ [mm] (既定 390)。傾きの角度はこれに比例する")
     args = p.parse_args()
@@ -224,13 +229,13 @@ def main() -> None:
 
     if not args.full_only:
         w, h = parse_size(args.current_size)
-        with Camera(width=w, height=h, full_fov=False) as cam:
+        with Camera(width=w, height=h, full_fov=False, **camera_kwargs(args)) as cam:
             results["現行"] = measure(cam, pitch_mm, "current", out_dir,
                                     camera_height_mm=args.camera_height,
                                     emit=args.emit_bands)
 
     w, h = parse_size(args.size)
-    with Camera(width=w, height=h, full_fov=True) as cam:
+    with Camera(width=w, height=h, full_fov=True, **camera_kwargs(args)) as cam:
         results["全画素"] = measure(cam, pitch_mm, "full_fov", out_dir,
                                  camera_height_mm=args.camera_height,
                                  emit=args.emit_bands)
