@@ -72,10 +72,17 @@ def test_rounding_the_corner_is_looser_than_the_straight_corridor():
 
 
 def test_the_tuned_blend_has_a_wide_margin():
-    """採用中の設定 (v=0.24 / a=0.8) での実数値を固定する。"""
-    assert TUNED_BLEND == pytest.approx(0.036, abs=0.001)
-    assert corner_bulge_m(TUNED_BLEND) == pytest.approx(0.009, abs=0.001)
-    assert min_post_clearance_m(TUNED_BLEND) == pytest.approx(0.034, abs=0.002)
+    """採用中の設定 (v=0.30 / a=0.8) での実数値を固定する。
+
+    **ブレンドは速度の 2 乗で伸びる**ので、ここが速度を上げたとき最初に効く
+    (#80)。0.24 では 36 / 9 / 34mm だった。0.30 でも内側の柱まで 26mm 残り、
+    同じ機体が廊下を真横に通り抜けるときの 21.4mm より広い —
+    :func:`test_rounding_the_corner_is_looser_than_the_straight_corridor` の
+    「決めているのは廊下の方」が 0.30 でも成り立っている。
+    """
+    assert TUNED_BLEND == pytest.approx(0.056, abs=0.001)
+    assert corner_bulge_m(TUNED_BLEND) == pytest.approx(0.014, abs=0.001)
+    assert min_post_clearance_m(TUNED_BLEND) == pytest.approx(0.026, abs=0.002)
 
 
 def test_the_speed_dips_through_the_corner_so_the_wheels_see_no_new_peak():

@@ -172,9 +172,12 @@ def test_forward_corrects_lateral_and_heading_disturbance(motion):
     run_until_done(motion)
     along, cross, heading = motion.residual()
     assert abs(along) <= motion.cfg.pos_tol_m
-    # 注入した 10mm / 5° に対して十分戻っている。横ずれの上限は「保持の速度上限で
-    # 1 セル走る間に詰められる量」で決まるので、v_max を上げると残りも増える。
-    assert abs(cross) < 0.010 / 4
+    # 注入した 10mm / 5° に対して十分戻っている。横ずれの上限は「保持の速度上限
+    # (v_cross_max) で 1 セル走る間に詰められる量」で決まるので、**v_max を上げると
+    # 残りも増える**: このシミュレーションで v=0.24 なら 2.00mm、v=0.30 なら 2.62mm。
+    # 0.30 を採った (#103) 代償のひとつ。詰めたければ v_cross_max を上げることになるが、
+    # 実機で測っていないので既定は 0.04 のまま。
+    assert abs(cross) < 0.010 / 3
     assert abs(heading) < math.radians(0.5)
 
 
@@ -580,8 +583,12 @@ def test_the_machine_never_stops_at_a_corner(motion):
     motion.start_path_cells([(1, 0), (1, 1), (1, 0)])
     _t, _path, speeds = drive(motion)
     cruise = speeds[15:-15]                     # 出だしのランプと最後の整定を除く
-    # 両軸が入れ替わる途中で 1/√2 まで落ちるが、そこが下限
-    assert min(cruise) > 0.65 * motion.cfg.v_max
+    # 両軸が入れ替わる途中で速度ベクトルは落ちるが、0 にはならない。
+    # **1/√2 = 0.707 は「両軸が完全に相補的に入れ替わる」理想値で、有限のランプ上限
+    # (RampLimits) では届かない**: 谷は v=0.24 で 0.735、v=0.30 で 0.640 x v_max
+    # (絶対値では 0.176 -> 0.192 m/s と、速くした方が谷も速い)。ランプ上限を緩めると
+    # 0.24 側は 0.99 まで浅くなるので、谷の深さを決めているのは主にランプの方。
+    assert min(cruise) > 0.60 * motion.cfg.v_max
     assert motion.corners == 2
 
 

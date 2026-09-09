@@ -41,7 +41,7 @@ from krilly.sim.check import (
 from krilly.sim.generate import walled_maze
 from krilly.sim.session import fit_search_overhead
 from krilly.solver.maze import Direction, Maze
-from krilly.strategy.shortest_path import LEGACY_COST, shortest_path
+from krilly.strategy.shortest_path import LEGACY_COST, MoveCost, shortest_path
 
 MAZE_DIR = Path(__file__).resolve().parents[1] / "mazes"
 
@@ -272,6 +272,13 @@ def test_a_sealed_goal_aborts_instead_of_looping():
     assert result.runs_used == 1
 
 
+# #87 (安全率 1.5 -> 1.2) の判断は **v=0.24 m/s の機体**で測った。既定は #103 で
+# 0.30 m/s 用に更新したので、当時の結論を再現するテストには当時の定数を明示的に渡す。
+# 機体が速くなれば予算はどこも楽になる方へ動くだけで、1.2 という選択は変わらない。
+TIMES_V024 = {"cell_time_s": 0.74, "lateral_cell_time_s": 0.76, "straight_time_s": 0.83}
+COST_V024 = MoveCost(cell_ns=1.0, cell_ew=1.03, leg=1.10)
+
+
 def test_the_manager_refuses_a_run_it_cannot_finish():
     """探索が長引いたら最速ランを始めない (中途半端に走って時間切れになるより良い)。
 
@@ -312,8 +319,9 @@ def test_past_that_the_last_run_can_overrun_and_that_is_the_deal_we_took():
     7 面から 3 面へ、最速ランの総数が 34 本から 42 本へ増える。
     """
     truth = random_maze(16, seed=5)
-    bold = simulate_session(truth, actual_scale=1.4, time_margin=1.2)
-    safe = simulate_session(truth, actual_scale=1.4, time_margin=1.5)
+    kw = dict(actual_scale=1.4, times=TIMES_V024, cost=COST_V024)
+    bold = simulate_session(truth, time_margin=1.2, **kw)
+    safe = simulate_session(truth, time_margin=1.5, **kw)
 
     assert bold.elapsed_s > 420.0 >= safe.elapsed_s     # 大胆な方ははみ出す
     assert len(bold.speed_runs) > len(safe.speed_runs)  # が、走った本数は多い
@@ -586,8 +594,8 @@ def test_lowering_the_margin_turns_a_shut_out_maze_into_a_racing_one():
     """
     maze = Maze.from_ascii(
         (CONTEST_DIR / "2018_japan.txt").read_text(encoding="utf-8"))
-    safe = simulate_session(maze, time_margin=1.5)
-    bold = simulate_session(maze, time_margin=1.2)
+    safe = simulate_session(maze, time_margin=1.5, times=TIMES_V024, cost=COST_V024)
+    bold = simulate_session(maze, time_margin=1.2, times=TIMES_V024, cost=COST_V024)
 
     assert safe.reached_goal and not safe.speed_runs      # 着いたが走れない
     assert len(bold.speed_runs) == 1                       # 走れる
@@ -601,18 +609,27 @@ def test_a_faster_machine_closes_the_mazes_the_margin_could_not():
     (2014/2015/2017 の exp 決勝) には効かない。0.24 -> 0.30 m/s にすると
     30 面すべてが最速ランを走れるようになる。
 
-    速くしても**固定費は縮まない**ので、そこを一緒に割ってはいけない: 停止 0.44s は
-    そのままで、ランプの超過 v/a はむしろ増える。ここではその形で見積もる。
+    速くしても**固定費は縮まない**ので、そこを一緒に割ってはいけない: 停止 + 撮影の
+    0.55s はそのままで、ランプの超過 v/2*(1/accel + 1/decel) はむしろ増える。
+
+    **#103 で両方の速度を実測したので、ここは推定式ではなく実測値で回す** (8x8 の
+    対照セッション、同じ日・同じ電池)。区間のコスト比も速度で変わる (1.07 -> 1.48)
+    ので、経路の選び方ごと切り替えて比べる。
     """
     mazes = [Maze.from_ascii(p.read_text(encoding="utf-8"))
              for p in contest_mazes() if p.stem not in KNOWN_BAD_TRANSCRIPTIONS]
+    #: v -> (時間定数, コスト比) の実測 (#103)。
+    MEASURED = {
+        0.24: ({"cell_time_s": 0.77, "lateral_cell_time_s": 0.75,
+                "straight_time_s": 0.825}, MoveCost(cell_ew=0.75 / 0.77, leg=0.825 / 0.77)),
+        0.30: ({"cell_time_s": 0.61, "lateral_cell_time_s": 0.60,
+                "straight_time_s": 0.900}, MoveCost(cell_ew=0.60 / 0.61, leg=0.900 / 0.61)),
+    }
 
     def shut_out(v: float) -> int:
-        ratio = 0.24 / v
-        times = {"cell_time_s": 0.74 * ratio, "lateral_cell_time_s": 0.76 * ratio,
-                 "straight_time_s": 0.44 + (0.39 - 0.24 / 0.9) + v / 0.9}
+        times, cost = MEASURED[v]
         return sum(1 for m in mazes
-                   if not simulate_session(m, times=times).speed_runs)
+                   if not simulate_session(m, times=times, cost=cost).speed_runs)
 
     assert shut_out(0.24) == 3
     assert shut_out(0.30) == 0
