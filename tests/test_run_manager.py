@@ -136,7 +136,7 @@ def test_estimate_adds_turns_only_in_the_turning_mode(explorer):
     """旋回する走り方では旋回の時間が乗る (#76 の退避路)。"""
     legs = [Leg(Direction.N, 3), Leg(Direction.E, 2)]      # 北 -> 東 = 90° 1 回
     # 旋回する走り方は常に前後軸で進むので、比較のため東西も前後と同じ時間に揃える
-    # (既定は東西 0.76s / 南北 0.74s と少し違う)。
+    # (既定は東西 0.60s / 南北 0.61s と少し違う)。
     same = RunManager(explorer).cell_time_s
     turning = RunManager(explorer, holonomic=False, lateral_cell_time_s=same)
     assert turning.estimate_s(legs, Direction.N) - turning.turn_time_s == pytest.approx(
@@ -283,15 +283,21 @@ def test_motions_counts_chunks_not_legs(manager):
     assert manager.motions(MEASURED_5X5) == 12
 
 
-def test_the_estimate_matches_the_measured_chained_speed_run(manager):
+def test_the_estimate_matches_the_measured_chained_speed_run(explorer):
     """実測との突き合わせ: 5x5 の最速経路 (20 セル / 12 区間)。
 
     区間ごとに停止 25.0s / 2 本ずつ繋いで 20.0s (いずれも実機、同じ日・同じ電池)。
     ここが合っていないと、7 分の予算判断が「走れる走行を断る」方へ狂う。
+
+    この対 (#80) は **v=0.24 m/s** の機体で測ったもの。既定は #103 で 0.30 m/s 用に
+    更新したので、当時の定数を明示的に渡してモデルの検証だけを行う
+    (:func:`test_estimate_matches_the_measured_speed_run` が M5 の定数でやるのと同じ)。
     """
-    assert manager.estimate_s(MEASURED_5X5) == pytest.approx(25.0, abs=0.3)
-    manager.chain_legs = 2
-    assert manager.estimate_s(MEASURED_5X5) == pytest.approx(20.0, abs=0.3)
+    m = RunManager(explorer, cell_time_s=0.74, lateral_cell_time_s=0.76,
+                   straight_time_s=0.83)
+    assert m.estimate_s(MEASURED_5X5) == pytest.approx(25.0, abs=0.3)
+    m.chain_legs = 2
+    assert m.estimate_s(MEASURED_5X5) == pytest.approx(20.0, abs=0.3)
 
 
 def test_chaining_never_makes_the_estimate_longer(manager):
