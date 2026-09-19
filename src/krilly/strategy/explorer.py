@@ -244,6 +244,23 @@ class Explorer:
         self.steps += 1
         return self.cell
 
+    def relocate(self, cell: tuple[int, int]) -> tuple[int, int]:
+        """現在セルを ``cell`` に置き直す (自律リカバリ、#113)。
+
+        **``advance`` と違い「進んだ」ことにはしない** — 手数も進行方向も変えず、
+        「居ると思っていた場所が違った」という訂正だけを入れる。姿勢を作り直した
+        ときに壁のパターンからセルが ±1 訂正されることがあり、そのときに使う
+        (:func:`krilly.localization.recovery.verify_cell`)。
+
+        訪問済みには入れる — カメラでそのセルの壁を読んだ上で確定しているので、
+        実際にそこに居る。
+        """
+        if not self.maze.in_bounds(*cell):
+            raise IndexError(cell)
+        self.cell = cell
+        self.visited.add(cell)
+        return self.cell
+
     # -- 進捗 ---------------------------------------------------------------
     def goal_distance(self) -> int:
         """現在セルからゴールまでの flood-fill 距離 (到達不能なら UNREACHABLE)。"""

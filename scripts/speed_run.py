@@ -31,6 +31,11 @@ from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.localization.grid import apply_axis_heading, apply_cell_offset
+from krilly.localization.recovery import (
+    RECOVERY_MAX_HEADING_RAD,
+    recoverable,
+    verify_cell,
+)
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
@@ -41,6 +46,7 @@ from krilly.perception.cell_pose import cell_offset
 from krilly.perception.survey import FrameRecord, label_run, write_rows
 from krilly.perception.wall_detect import (
     BODY_DIRS,
+    body_walls_to_maze,
     WallDetector,
     calibrated_config,
     path_block_threshold,
@@ -100,6 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-heading-residual", type=float, default=2.5,
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
     p.add_argument("--no-front-check", action="store_true", help="前進前の前方確認を無効化")
+    p.add_argument("--no-recover", action="store_true",
+                   help="中断したらその場で終わる (#113 の姿勢作り直しを切る)")
+    p.add_argument("--recover-frames", type=int, default=5,
+                   help="姿勢を作り直すときに軸角を測るフレーム数 (#113、既定 5)。"
+                        "ばらつきも見るので 2 以上が要る")
+    p.add_argument("--max-recoveries", type=int, default=1,
+                   help="1 セッションで姿勢を作り直す回数の上限 (#113、既定 1)。"
+                        "原因不明の異常が繰り返す機体を走らせ続ける方が危険なので、"
+                        "既定では 1 回だけ試して 2 回目は諦める")
     p.add_argument("--chain-legs", type=int, default=2,
                    help="最速・復帰で止まらずに繋ぐ区間の本数の上限 (#80、既定 2)。"
                         "1 = 区間ごとに停止 (従来)。繋ぐと位置補正の間隔も伸びる")
@@ -196,6 +211,8 @@ def main() -> None:
         )
         frame_no = [0]
         saved_name = [""]
+        recovered = [0]                 # 姿勢を作り直した回数 (#113)
+        recovered_cell: list = [None]   # 回復でセルが訂正されたら入る
 
         # 最初の駆動指令でロータが谷へスナップし車体が最大 0.5° 跳ねる。
         # カメラで壁・位置を測る前に済ませておく (VelocityDriver.energize 参照)。
@@ -327,7 +344,8 @@ def main() -> None:
             return True
 
         def move_was_clean(label: str, timeout: float | None = None,
-                           kind: str = "") -> bool:
+                           kind: str = "", cell: tuple[int, int] | None = None,
+                           travel: Direction | None = None) -> bool:
             """移動を回し、**指令していない回転**が出ていないかを見る。
 
             平行移動では回転を一切指令しないので、測れた回転は異常の証拠になる
@@ -338,13 +356,86 @@ def main() -> None:
                           kind=kind)
             if args.turn_in_place:
                 return True
-            residual = abs(math.degrees(motion.residual()[2]))
-            if residual > args.max_heading_residual:
-                log.error("進行中止: 回転を指令していないのに %.2f° 回った (上限 %.2f°)。"
-                          "壁との接触かスリップの可能性が高い。",
-                          residual, args.max_heading_residual)
+            residual_rad = motion.residual()[2]
+            residual = abs(math.degrees(residual_rad))
+            if residual <= args.max_heading_residual:
+                return True
+            log.error("回転を指令していないのに %.2f° 回った (上限 %.2f°)。"
+                      "壁との接触かスリップの可能性が高い。",
+                      residual, args.max_heading_residual)
+            if args.no_recover or cell is None or travel is None:
+                log.error("進行中止。")
                 return False
+            here = recover_pose(cell, travel, residual_rad)
+            if here is None:
+                return False
+            recovered_cell[0] = here      # 呼び出し側が ±1 の訂正を受け取る
             return True
+
+        def recover_pose(cell: tuple[int, int], travel: Direction,
+                         residual_rad: float) -> tuple[int, int] | None:
+            """中断の後、**その場で**姿勢を作り直して続行を試みる (#113)。
+
+            中断は必ず停止中に起きている (残差の判定は整定後) のでカメラが使える。
+            方位は ``axis_yaw`` で厳密に測れ、セル内位置は ``cell_offset`` で測れる。
+            回復できないのは**どのセルに居るか**だけなので、そこは**壁のパターン**を
+            学習済みマップと照合して決める (:func:`verify_cell`)。
+
+            規定 3-5 の「走行中止の申し出」は操作者によるものなので、機体が自力で
+            姿勢を作り直して走り続けるのは違反ではない。**スタートへ戻る必要も
+            再スタートも走行回数の消費も無い。**
+            """
+            if recovered[0] >= args.max_recoveries:
+                log.error("進行中止: 回復は 1 セッション %d 回まで "
+                          "(原因不明の異常が繰り返す機体を走らせ続ける方が危険)。",
+                          args.max_recoveries)
+                return None
+            frames = [capture() for _ in range(max(2, args.recover_frames))]
+            yaws = [y for y in (axis_yaw(f, yaw_cfg) for f in frames) if y is not None]
+            spread = (max(y.angle_rad for y in yaws) - min(y.angle_rad for y in yaws)
+                      if len(yaws) >= 2 else None)
+            why = recoverable(residual_rad, spread)
+            if why is not None:
+                log.error("進行中止: 回復できない (%s)。", why)
+                return None
+            yaw = sorted(yaws, key=lambda y: y.angle_rad)[len(yaws) // 2]
+
+            # どのセルに居るか: 幾何では決まらないので壁のパターンで決める
+            measured = detector.measure(frames[-1])
+            observed = body_walls_to_maze(
+                {d: measured[d][0] >= detector.cfg.threshold_for(d) for d in BODY_DIRS},
+                explorer.facing)
+            verdict = verify_cell(maze, cell, travel, observed)
+            if not verdict.ok:
+                log.error("進行中止: 居るセルを確定できない (%s)。", verdict.reason)
+                return None
+
+            # 姿勢を作り直す。**ガードは正常運転より広い** — 姿勢が狂っているのは
+            # 既に分かっているので前提が反転する (#113)
+            here = verdict.cell
+            if not apply_axis_heading(est, yaw.angle_rad,
+                                      max_error=RECOVERY_MAX_HEADING_RAD):
+                log.error("進行中止: 方位補正が回復用のガードにも入らない。")
+                return None
+            off = cell_offset(frames[-1], detector, measured=measured)
+            if off.measured:
+                apply_cell_offset(est, cell_center(here, maze_cfg.cell_pitch_m),
+                                  off.forward_m, off.left_m,
+                                  phi=heading_rad(explorer.facing))
+            # **基準姿勢を、確定したセルの理想格子へ置き直す。** セル番号が ±1
+            # 訂正されていれば基準も 1 ピッチずれているので、ここを直さないと次の
+            # 移動が 1 セル分ずれたまま走る。通常の停止では基準は既に正しいので
+            # correct_at は触らない (そこが回復との違い)。
+            cx, cy = cell_center(here, maze_cfg.cell_pitch_m)
+            motion.set_reference(x=cx, y=cy, phi=heading_rad(explorer.facing))
+            recovered[0] += 1
+            log.warning("姿勢を作り直して続行する (%d/%d 回目): %s / 軸角 %+.2f° "
+                        "(ばらつき %.2f°) / セル内 前後=%s 左右=%s",
+                        recovered[0], args.max_recoveries, verdict.reason,
+                        yaw.angle_deg, math.degrees(spread),
+                        "測れず" if off.forward_m is None else f"{off.forward_m*1e3:+.1f}mm",
+                        "測れず" if off.left_m is None else f"{off.left_m*1e3:+.1f}mm")
+            return here
 
         def turn_to(facing: Direction, target: Direction) -> Direction:
             turn = quarter_turns(facing, target)
@@ -393,12 +484,19 @@ def main() -> None:
                 if not path_is_clear(direction, facing, cells):
                     return None
                 motion.start_move_cells(cells, axis)
+                recovered_cell[0] = None
                 if not move_was_clean(f"{direction.name}へ{cells}セル",
-                                      timeout=max(args.timeout, cells * 3.0)):
+                                      timeout=max(args.timeout, cells * 3.0),
+                                      cell=steps[-1].to_cell, travel=direction):
                     return None
                 stops += 1
                 for step in steps:
                     explorer.advance(step)
+                if recovered_cell[0] is not None and recovered_cell[0] != explorer.cell:
+                    # 回復でセルが ±1 訂正された。explorer を実際の位置へ合わせる
+                    log.warning("  探索の現在セルを %s -> %s に訂正",
+                                explorer.cell, recovered_cell[0])
+                    explorer.relocate(recovered_cell[0])
             log.error("探索が %d 手で終わらなかった", args.max_steps)
             return None
 
@@ -441,15 +539,19 @@ def main() -> None:
                     axis_name = ("ns" if head.direction in (Direction.N, Direction.S)
                                  else "ew")
                     kind = f"{axis_name}{head.cells}"
+                dest = cell
+                for leg in chunk:
+                    for _ in range(leg.cells):
+                        dest = maze.neighbor(*dest, leg.direction)
+                recovered_cell[0] = None
                 if not move_was_clean(
                         "->".join(f"{leg.direction.name}へ{leg.cells}" for leg in chunk),
-                        timeout=max(args.timeout, cells * 3.0), kind=kind):
+                        timeout=max(args.timeout, cells * 3.0), kind=kind,
+                        cell=dest, travel=chunk[-1].direction):
                     return None
                 if len(chunk) > 1:
                     log.info("  止まらずに曲がった回数 %d", motion.corners)
-                for leg in chunk:
-                    for _ in range(leg.cells):
-                        cell = maze.neighbor(*cell, leg.direction)
+                cell = recovered_cell[0] or dest
             correct_at(cell, facing)
             return (cell, facing)
 
