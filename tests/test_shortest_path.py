@@ -167,9 +167,9 @@ def test_path_cost_matches_what_the_search_minimises():
     assert path_cost(path, Direction.N, flat) == pytest.approx(4.0)
     turning = MoveCost(cell_ew=1.0, leg=0.0, turn=1.0)
     assert path_cost(path, Direction.N, turning) == pytest.approx(5.0)   # 旋回1回
-    # 旋回レス既定 (#103、v=0.30): 南北 2 セル + 東西 2 セル x 0.98 + 区間 2 本 x 1.48
+    # 旋回レス既定 (#107、v=0.30 / ランプ 0.7): 南北 2 + 東西 2 x 0.98 + 区間 2 x 1.62
     assert path_cost(path, Direction.N, DEFAULT_COST) == pytest.approx(
-        2 * 1.0 + 2 * 0.98 + 2 * 1.48
+        2 * 1.0 + 2 * 0.98 + 2 * 1.62
     )
     assert path_cost([(0, 0)]) == pytest.approx(0.0)
 
