@@ -100,7 +100,7 @@ class CellMotionConfig:
     # -0.60/-0.36/-0.50°。2.0 が最速かつ最も正確で、2.5 は速くならずやり直しも増える。
     v_max: float = 0.30                    # 前進の最大速度 [m/s]
     omega_max: float = 2.0                 # 旋回の最大角速度 [rad/s]
-    decel_mps2: float = 0.8                # 前進の減速度 [m/s^2] (driver ランプ以下に丸める)
+    decel_mps2: float = 0.6                # 前進の減速度 [m/s^2] (driver ランプ以下に丸める、#107)
     angular_decel_radps2: float = 7.0      # 旋回の角減速度 [rad/s^2] (同上)
 
     # 主軸以外の保持ゲイン (P 制御)

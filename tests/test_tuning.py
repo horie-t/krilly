@@ -67,8 +67,11 @@ def test_defaults_are_within_driver_limits():
 def test_speed_over_max_speed_warns():
     warnings = check_limits(build_tuning(parse(["--v", "0.35"])))
     assert any("MAX_SPEED" in w for w in warnings)
-    # --max-speed を上げれば消える
-    assert check_limits(build_tuning(parse(["--v", "0.35", "--max-speed", "800"]))) == []
+    # --max-speed を上げれば消える。**accel/decel も上げる必要がある** — 既定の
+    # decel 0.6 (#107) では v=0.35 のブレンドが 102mm で半セル 90mm を超え、
+    # 別の警告が出てしまう。ここで見たいのは MAX_SPEED の警告だけ。
+    assert check_limits(build_tuning(parse(
+        ["--v", "0.35", "--max-speed", "800", "--accel", "0.9", "--decel", "0.9"]))) == []
 
 
 def test_ramp_over_driver_accel_warns():
