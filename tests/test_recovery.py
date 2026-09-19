@@ -155,3 +155,58 @@ def test_it_refuses_when_both_neighbours_look_alike():
     m.set_wall(2, 2, Direction.N)
     v = verify_cell(m, (2, 2), Direction.E, walls_of(m, (1, 2)))
     assert not v.ok and "区別がつかない" in v.reason
+
+
+# --- 未観測の辺を「壁なし」と読んではいけない (実機で踏んだ穴) ----------------
+def test_an_unobserved_edge_is_not_evidence_of_no_wall():
+    """**探索中は地図が未完成なので、全辺を比べると必ず迷子になる。**
+
+    実機 1 本目 (#113) がこれで探索 2 手目に停止した。`Maze` に壁の三値は無く、
+    「未知」を担うのは ``Explorer.observed`` の方 — CLAUDE.md が「新しい消費者は
+    それを通さないといけない」と書いているとおりで、通し忘れていた。
+    """
+    m = open_maze(5)
+    m.set_wall(2, 2, Direction.E)          # 実際には壁がある
+    observed = walls_of(m, (2, 2))         # カメラは正しく読んでいる
+
+    # 地図がまだ何も知らない状態 (探索の途中)
+    nothing_known: dict = {}
+    v = verify_cell(m, (2, 2), Direction.N, observed, known_edges=nothing_known)
+    assert not v.ok
+    assert v.unverifiable, "「矛盾した」ではなく「材料が無い」と言わなければならない"
+    assert "照合できない" in v.reason
+
+    # known_edges を渡さなければ従来どおり全辺で照合する (地図が完成している最速ラン)
+    assert verify_cell(m, (2, 2), Direction.N, observed).ok
+
+
+def test_partially_observed_cells_are_compared_on_the_known_edges_only():
+    """一部だけ観測済みなら、その辺だけで照合する。"""
+    m = open_maze(5)
+    m.set_wall(2, 2, Direction.E)
+    observed = walls_of(m, (2, 2))
+    known = {(2, 2): {Direction.E}}        # 東だけ見たことがある
+    v = verify_cell(m, (2, 2), Direction.N, observed, known_edges=known)
+    assert v.ok and v.shift == 0
+
+    # 東を見たことがあるのに観測と食い違うなら、それは本当の矛盾
+    m.set_wall(2, 2, Direction.E, False)
+    v = verify_cell(m, (2, 2), Direction.N, observed, known_edges=known)
+    assert not v.ok and not v.unverifiable
+
+
+def test_outer_walls_count_as_known_without_being_observed():
+    """迷路の外へ出る辺は観測しなくても既知 (``_fully_observed`` と同じ扱い)。"""
+    m = open_maze(5)
+    v = verify_cell(m, (0, 0), Direction.N, walls_of(m, (0, 0)), known_edges={})
+    assert v.ok and v.shift == 0      # 南と西が外周なので、それだけで照合できる
+
+
+def test_min_edges_can_demand_more_evidence():
+    """``min_edges`` を上げれば、根拠の薄い照合を拒める。"""
+    m = open_maze(5)
+    known = {(2, 2): {Direction.E}}
+    args = (m, (2, 2), Direction.N, walls_of(m, (2, 2)))
+    assert verify_cell(*args, known_edges=known, min_edges=1).ok
+    v = verify_cell(*args, known_edges=known, min_edges=2)
+    assert not v.ok and v.unverifiable

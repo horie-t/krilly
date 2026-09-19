@@ -32,7 +32,9 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.localization.grid import apply_axis_heading, apply_cell_offset
 from krilly.localization.recovery import (
+    CELL_SLIP_MAX_M,
     RECOVERY_MAX_HEADING_RAD,
+    CellVerdict,
     recoverable,
     verify_cell,
 )
@@ -405,7 +407,21 @@ def main() -> None:
             observed = body_walls_to_maze(
                 {d: measured[d][0] >= detector.cfg.threshold_for(d) for d in BODY_DIRS},
                 explorer.facing)
-            verdict = verify_cell(maze, cell, travel, observed)
+            verdict = verify_cell(maze, cell, travel, observed,
+                                  known_edges=explorer.observed)
+            if not verdict.ok and verdict.unverifiable:
+                # **探索中は地図が未完成なので、照合材料が無いのが普通。** そこで
+                # 1 セルずれだけは別の証拠で排除する: 進行方向の残差が小さければ
+                # 180mm も余計に進んでいないので、居るセルは思っているとおり。
+                along = abs(motion.residual()[0])
+                if along <= CELL_SLIP_MAX_M:
+                    verdict = CellVerdict(cell, 0,
+                                          f"照合できないが進行方向の残差が {along*1e3:.1f}mm "
+                                          f"なので 1 セルずれは無い")
+                else:
+                    log.error("進行中止: 居るセルを確定できず、進行方向の残差も "
+                              "%.1fmm ある (1 セルずれを排除できない)。", along * 1e3)
+                    return None
             if not verdict.ok:
                 log.error("進行中止: 居るセルを確定できない (%s)。", verdict.reason)
                 return None
