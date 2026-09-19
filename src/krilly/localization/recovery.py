@@ -38,6 +38,14 @@ RECOVERY_MAX_HEADING_RAD = math.radians(20.0)
 #: 持たせて 30° で切る。そもそも 30° 回っていれば壁は倒れていて走行は既に終わっている。
 RECOVERY_ABANDON_RAD = math.radians(30.0)
 
+#: 「1 セルずれていない」と言い切れる進行方向の残差の上限 [m]。
+#:
+#: 地図が未完成で壁の照合ができないとき (探索中) の代わりの証拠。セルの間隔は 180mm
+#: なので、残差がこの程度なら 1 セル飛ばしてはいない。実機の中断 3 件の進行方向残差は
+#: 10-14mm だったので、**そもそも 1 セルずれは今のところ observed されていない** —
+#: ±1 の探索は安全網であって、期待されるケースではない。
+CELL_SLIP_MAX_M = 0.030
+
 #: 軸角のフレーム間ばらつきの上限 [rad]。これを超える測定は信用しない。
 #:
 #: 960x720 でのフレーム間ばらつきは実測 0.11-0.26° (#88) なので、0.5° は 2 倍の余裕。
@@ -53,22 +61,53 @@ class CellVerdict:
     cell: tuple[int, int] | None    # 確定したセル (None = 確定できなかった)
     shift: int                      # 進行軸に何セルずれていたか (0 = 思っていたとおり)
     reason: str                     # 人間向けの要約 (ログに出す)
+    #: True なら「矛盾した」のではなく「**照合材料が足りなかった**」。
+    #: 探索中は地図が未完成なので普通に起きる。呼び出し側は他の証拠で 1 セルずれを
+    #: 排除できれば続行してよい (矛盾した場合と混ぜてはいけない)。
+    unverifiable: bool = False
 
     @property
     def ok(self) -> bool:
         return self.cell is not None
 
 
-def _matches(maze: Maze, cell: tuple[int, int],
-             observed: dict[Direction, bool]) -> bool:
-    """``cell`` の 4 壁が観測と一致するか。範囲外は不一致扱い。"""
+def _comparable(maze: Maze, cell: tuple[int, int],
+                observed: dict[Direction, bool],
+                known_edges: dict[tuple[int, int], set[Direction]] | None
+                ) -> list[Direction]:
+    """``cell`` について、照合に使える辺 (地図が実際に知っている辺) を返す。
+
+    **`Maze` に壁の三値は無く、「未知」を担うのは観測済み集合の方**なので、
+    `has_wall` が False を返しても「壁が無い」とは限らない — まだ見ていないだけ
+    かもしれない。`flood_fill` はそれを楽観的に「開いている」と読んでよいが
+    (見に行くため)、照合でそれをやると**探索中は必ず不一致になる**。
+    実際にそうなった (#113 の実機 1 本目: 探索 2 手目で「迷子」と判定して停止)。
+
+    ``known_edges`` が None なら全辺を既知として扱う (地図が完成している最速・
+    復帰ランはこれでよい)。
+    """
     if not maze.in_bounds(*cell):
+        return []
+    if known_edges is None:
+        return list(observed)
+    edges = known_edges.get(cell, set())
+    return [d for d in observed
+            if d in edges or not maze.in_bounds(*maze.neighbor(*cell, d))]
+
+
+def _matches(maze: Maze, cell: tuple[int, int], observed: dict[Direction, bool],
+             known_edges, min_edges: int) -> bool:
+    """``cell`` の壁が観測と一致するか。**照合に使える辺が足りなければ不一致扱い**。"""
+    usable = _comparable(maze, cell, observed, known_edges)
+    if len(usable) < min_edges:
         return False
-    return all(maze.has_wall(*cell, d) == present for d, present in observed.items())
+    return all(maze.has_wall(*cell, d) == observed[d] for d in usable)
 
 
 def verify_cell(maze: Maze, believed: tuple[int, int], travel: Direction,
-                observed: dict[Direction, bool], span: int = 1) -> CellVerdict:
+                observed: dict[Direction, bool], span: int = 1,
+                known_edges: dict[tuple[int, int], set[Direction]] | None = None,
+                min_edges: int = 1) -> CellVerdict:
     """壁のパターンから、いま居るセルを確定する (#113)。
 
     ``believed`` が一致すればそれを採る (**事前確率が高い方を優先する**)。一致しない
@@ -76,24 +115,40 @@ def verify_cell(maze: Maze, believed: tuple[int, int], travel: Direction,
     そこへ訂正する。0 個なら迷子、2 個以上なら区別がつかないので、どちらも諦める。
 
     ``observed`` は :func:`~krilly.perception.wall_detect.body_walls_to_maze` の出力
-    (迷路方角 -> 壁の有無)。4 辺そろっていなくてもよい (渡された辺だけ照合する)。
+    (迷路方角 -> 壁の有無)。
+
+    ``known_edges`` は :attr:`~krilly.strategy.explorer.Explorer.observed`
+    (セル -> 観測済みの辺)。**これを渡さないと探索中は必ず迷子になる** —
+    :func:`_comparable` を見ること。``min_edges`` は照合に要る辺の本数で、
+    これを満たせないセルは「照合できない」として候補から外す。
+
+    照合材料が足りず ``believed`` を確認できなかった場合は :attr:`CellVerdict.cell`
+    が None・:attr:`CellVerdict.unverifiable` が True で返る。**呼び出し側が
+    「材料が無いだけ」と「矛盾した」を区別できる**ようにするためで、前者は他の
+    証拠 (進行方向の残差など) で 1 セルずれを排除できれば続行してよい。
     """
     if not observed:
-        return CellVerdict(None, 0, "壁の観測が無い")
-    if _matches(maze, believed, observed):
+        return CellVerdict(None, 0, "壁の観測が無い", unverifiable=True)
+    if _matches(maze, believed, observed, known_edges, min_edges):
         return CellVerdict(believed, 0, "思っていたセルと壁が一致")
 
+    usable = _comparable(maze, believed, observed, known_edges)
     dx, dy = travel.delta
     hits = []
     for k in range(-span, span + 1):
         if k == 0:
             continue
         cand = (believed[0] + dx * k, believed[1] + dy * k)
-        if _matches(maze, cand, observed):
+        if _matches(maze, cand, observed, known_edges, min_edges):
             hits.append((k, cand))
     if len(hits) == 1:
         k, cand = hits[0]
         return CellVerdict(cand, k, f"進行軸に {k:+d} セルずれていた ({believed} -> {cand})")
+    if len(usable) < min_edges:
+        return CellVerdict(None, 0,
+                           f"照合できない ({believed} の辺のうち地図が知っているのは "
+                           f"{len(usable)} 本で {min_edges} 本に足りない)",
+                           unverifiable=True)
     if not hits:
         return CellVerdict(None, 0, "思っていたセルも隣も壁が一致しない (迷子)")
     return CellVerdict(None, 0,
