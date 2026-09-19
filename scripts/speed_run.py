@@ -398,7 +398,11 @@ def main() -> None:
                       if len(yaws) >= 2 else None)
             why = recoverable(residual_rad, spread)
             if why is not None:
-                log.error("進行中止: 回復できない (%s)。", why)
+                log.error("進行中止: 回復できない (%s)。軸角の測定: %d/%d フレーム成功 "
+                          "/ 線分 %s 本 %s px。",
+                          why, len(yaws), len(frames),
+                          yaws[-1].segments if yaws else "-",
+                          f"{yaws[-1].total_length_px:.0f}" if yaws else "-")
                 return None
             yaw = sorted(yaws, key=lambda y: y.angle_rad)[len(yaws) // 2]
 
@@ -445,10 +449,14 @@ def main() -> None:
             cx, cy = cell_center(here, maze_cfg.cell_pitch_m)
             motion.set_reference(x=cx, y=cy, phi=heading_rad(explorer.facing))
             recovered[0] += 1
+            # 線分の本数と総長も出す: **ばらつきが大きい回が「壁が少ないセル」なのか
+            # 「何か異常」なのかは、これが無いと後から区別できない** (実機 1 本目で
+            # 1.03° が出たとき、まさにそれが分からなかった)。
             log.warning("姿勢を作り直して続行する (%d/%d 回目): %s / 軸角 %+.2f° "
-                        "(ばらつき %.2f°) / セル内 前後=%s 左右=%s",
+                        "(ばらつき %.2f° / 線分 %d 本 %.0fpx) / セル内 前後=%s 左右=%s",
                         recovered[0], args.max_recoveries, verdict.reason,
                         yaw.angle_deg, math.degrees(spread),
+                        yaw.segments, yaw.total_length_px,
                         "測れず" if off.forward_m is None else f"{off.forward_m*1e3:+.1f}mm",
                         "測れず" if off.left_m is None else f"{off.left_m*1e3:+.1f}mm")
             return here

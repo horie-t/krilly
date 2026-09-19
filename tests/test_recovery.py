@@ -96,9 +96,16 @@ def test_a_large_rotation_is_not_recoverable_because_of_the_90_degree_fold():
         assert recoverable(math.radians(deg), math.radians(0.1)) is None
 
 
-def test_a_noisy_yaw_measurement_is_not_recoverable():
-    """**測定が暴れているときに広いガードで補正するのが最悪の組み合わせ。**"""
-    assert recoverable(math.radians(3.0), math.radians(1.2)) is not None
+def test_a_collapsed_line_fit_is_not_recoverable():
+    """線分の当てはめが崩れたら回復しない。**ただしこれは粗い検出器**。
+
+    実走のばらつきは 0.08-0.45° (実機 14 回) なので、そこは通す。最初 0.5° にして
+    いたら 15 回目の 1.03° で落ちてセッションが終わった。危険な失敗は「自信を持った
+    誤測定」の方で、ばらつきには出ない (#113 の docstring)。
+    """
+    for deg in (0.08, 0.45, 1.03):          # 実走で実際に出た値はすべて通す
+        assert recoverable(math.radians(3.0), math.radians(deg)) is None, deg
+    assert recoverable(math.radians(3.0), math.radians(2.0)) is not None
     assert recoverable(math.radians(3.0), None) is not None
 
 
@@ -109,8 +116,10 @@ def test_the_recovery_guard_is_wider_than_the_normal_one_but_below_the_fold():
     """
     assert MAX_HEADING_CORRECTION_RAD < RECOVERY_MAX_HEADING_RAD < RECOVERY_ABANDON_RAD
     assert RECOVERY_ABANDON_RAD < math.radians(45.0)
-    # 測定の質のガードは実測のばらつき (0.11-0.26°, #88) より緩く、1° より厳しい
-    assert math.radians(0.26) < RECOVERY_MAX_YAW_SPREAD_RAD < math.radians(1.0)
+    # 測定の質のガードは**実走**のばらつき (0.08-0.45°) より十分緩い。据え置きで
+    # 測った 0.11-0.26° (#88) を根拠にすると実走で足りない、というのが実機の教訓。
+    assert RECOVERY_MAX_YAW_SPREAD_RAD > math.radians(0.45) * 2
+    assert RECOVERY_MAX_YAW_SPREAD_RAD < math.radians(3.0)
 
 
 # --- 実機の 3 件を再生する ---------------------------------------------------
