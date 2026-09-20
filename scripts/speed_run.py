@@ -37,14 +37,17 @@ from krilly.localization.recovery import (
     CellVerdict,
     recoverable,
     verify_cell,
+    wall_contact,
 )
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
+from krilly.motion.corner import corridor_clearance_m
 from krilly.motion.tuning import add_tuning_args, build_tuning, check_limits, describe_faults
 from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
+from krilly.perception.lattice import lattice_offset, offset_to_shift_px
 from krilly.perception.survey import FrameRecord, label_run, write_rows
 from krilly.perception.wall_detect import (
     BODY_DIRS,
@@ -412,11 +415,28 @@ def main() -> None:
                 return None
             yaw = sorted(yaws, key=lambda y: y.angle_rad)[len(yaws) // 2]
 
-            # どのセルに居るか: 幾何では決まらないので壁のパターンで決める
-            measured = detector.measure(frames[-1])
-            observed = body_walls_to_maze(
-                {d: measured[d][0] >= detector.cfg.threshold_for(d) for d in BODY_DIRS},
-                explorer.facing)
+            # **まず格子でセル内位置を測る** (#85)。ROI はセル中央を前提に置いてあり、
+            # 探索は ±40px = ±23.5mm しかないので、それを超えてずれていると帯を
+            # 見失って**幽霊の壁が生える** — 実機で壁に食い込んだとき、真は {E} だけ
+            # なのに {N, E} と読んで「迷子」になった。格子の位相なら ROI の位置に
+            # 関係なく測れるので、そのぶん ROI を動かしてから読み直す。
+            #
+            # **どこに居るか分かっても、そのまま走ってよいとは限らない。** ずれが
+            # 廊下の余裕 (21.4mm) を超えていて、その側に壁があるなら接触している。
+            lattice = lattice_offset(frames[-1], yaw.angle_rad)
+            shift = offset_to_shift_px(lattice)
+            log.warning("  格子から測ったセル内位置: %s -> ROI を (%+d, %+d)px 動かす",
+                        lattice.describe(), *shift)
+            measured = detector.measure(frames[-1], shift)
+            body_walls = {d: measured[d][0] >= detector.cfg.threshold_for(d)
+                          for d in BODY_DIRS}
+            touching = wall_contact(lattice, body_walls,
+                                    corridor_clearance_m())
+            if touching is not None:
+                log.error("進行中止: %s。**機体を持ち上げて外すこと** "
+                          "(この姿勢から走り出すと壁を倒す)。", touching)
+                return None
+            observed = body_walls_to_maze(body_walls, explorer.facing)
             verdict = verify_cell(maze, cell, travel, observed,
                                   known_edges=explorer.observed)
             if not verdict.ok and verdict.unverifiable:
@@ -443,7 +463,11 @@ def main() -> None:
                                       max_error=RECOVERY_MAX_HEADING_RAD):
                 log.error("進行中止: 方位補正が回復用のガードにも入らない。")
                 return None
-            off = cell_offset(frames[-1], detector, measured=measured)
+            # **測り方を混ぜない。** ROI を動かしたときは ROI 基準で測る
+            # `cell_offset` がそのぶんずれる (ROI の中心が左右のゼロ点なので) ので、
+            # 動かしたなら格子で測った値をそのまま使う。動かしていなければ従来どおり。
+            off = (cell_offset(frames[-1], detector, measured=measured)
+                   if shift == (0, 0) else lattice)
             if off.measured:
                 apply_cell_offset(est, cell_center(here, maze_cfg.cell_pitch_m),
                                   off.forward_m, off.left_m,

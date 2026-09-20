@@ -183,3 +183,32 @@ def recoverable(residual_rad: float, yaw_spread_rad: float | None) -> str | None
         return (f"軸角のフレーム間ばらつきが {math.degrees(yaw_spread_rad):.2f}° で "
                 f"{math.degrees(RECOVERY_MAX_YAW_SPREAD_RAD):.1f}° を超える")
     return None
+
+
+def wall_contact(offset, body_walls: dict[str, bool],
+                 clearance_m: float) -> str | None:
+    """壁に接触しているなら、その説明を返す (していなければ None) — #85。
+
+    廊下の余裕は片側 ``clearance_m`` (実機 21.4mm) しかないので、それを超えて
+    ずれていて**その側に壁がある**なら接触している。壁が無ければずれているだけなので、
+    読み直した壁で普通に続行してよい。
+
+    **ROI の探索範囲 (±23.5mm) と余裕 (21.4mm) がほぼ同じ**なのがここの肝。
+    「ROI が帯を見失うほどずれた」はほぼそのまま「壁に触れているかもしれない」を
+    意味するので、**位置を測り直す機能と接触の判定は対で入れる**。片方だけ入れると、
+    居るセルは正しく分かるのに壁へ食い込んだまま走り出す機体になる。
+
+    ``offset`` は :class:`~krilly.perception.lattice.LatticeOffset` か
+    :class:`~krilly.perception.cell_pose.CellOffset` (``forward_m`` / ``left_m``)。
+    ``body_walls`` は機体相対の壁の有無 (front/back/left/right)。
+    """
+    for value, positive, negative in ((offset.left_m, "left", "right"),
+                                      (offset.forward_m, "front", "back")):
+        if value is None or abs(value) <= clearance_m:
+            continue
+        side = positive if value > 0 else negative      # 寄っている側の辺
+        if body_walls.get(side):
+            return (f"セル中央から {abs(value) * 1e3:.0f}mm ずれていて "
+                    f"({side} 側、余裕は {clearance_m * 1e3:.1f}mm) "
+                    f"その側に壁がある = 接触している")
+    return None
