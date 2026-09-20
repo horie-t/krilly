@@ -16,6 +16,10 @@
     # 手持ちの壁 70 枚に収まるものだけ
     python -m scripts.maze_excerpt --size 8 --wall-budget 70 --maze mazes/contest/*.txt
 
+    # 中断の発生率を測るための盤面を選ぶ (#85: 曲がりが多いほどサンプルが増える)
+    python -m scripts.maze_excerpt --size 8 --maze mazes/contest/*.txt \
+        --wall-budget 80 --sort exposure --min-cells 24 --out mazes/twisty8.txt
+
     # 選んだものを書き出す (既定は 1 位、--rank で順位を選ぶ)
     python -m scripts.maze_excerpt --size 7 --maze mazes/contest/*.txt --out mazes/excerpt7.txt
     python -m scripts.maze_excerpt --size 8 --maze mazes/contest/*.txt --rank 2 --out mazes/excerpt8_2015.txt
@@ -29,7 +33,8 @@ from pathlib import Path
 
 from krilly.logging_config import get_logger, setup_logging
 from krilly.sim import check_maze, open_maze, sense, sense_neighbors
-from krilly.sim.check import posts_without_wall, reachable_cells
+from krilly.sim.generate import random_maze
+from krilly.sim.check import goal_entrances, posts_without_wall, reachable_cells
 from krilly.sim.excerpt import (
     Difficulty,
     excerpts,
@@ -39,11 +44,18 @@ from krilly.sim.excerpt import (
     pieces_needed,
 )
 from krilly.sim.check import wall_counts
+from krilly.app.run_manager import RunManager
+from krilly.strategy.shortest_path import chunk_legs
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import Explorer, Unreachable
 from krilly.strategy.shortest_path import path_to_legs, shortest_path
 
 log = get_logger(__name__)
+
+#: 実機の既定と同じ設定 (#80 / #85)。連結動作の本数はここで決まる。
+CHAIN_LEGS = 2
+#: 露出を数えるときに想定するセッションの走行回数 (`speed_run --max-runs 25`)。
+SESSION_RUNS = 25
 
 
 def measure(maze: Maze, max_steps: int = 2000) -> Difficulty | None:
@@ -69,6 +81,14 @@ def measure(maze: Maze, max_steps: int = 2000) -> Difficulty | None:
         return None
     legs = path_to_legs(path)
     counts = wall_counts(maze)
+    # **実機と同じ設定**で復帰・最速の区間を引き、1 セッションぶんの連結動作を数える。
+    # 区間長の上限 (#85) と束ねる本数で本数が変わるので、既定値をそのまま使う。
+    mgr = RunManager(ex, chain_legs=CHAIN_LEGS)
+    run_legs = [mgr.speed_legs(Direction.N), mgr.return_legs(ex.cell, ex.facing)]
+    chained = sum(
+        sum(1 for chunk in chunk_legs(one, CHAIN_LEGS) if len(chunk) > 1)
+        for one in run_legs if one
+    ) * (SESSION_RUNS - 1)          # 探索の 1 走を除く = 復帰 + 最速の回数
     return Difficulty(
         # 柱は**実際に立てる本数** (格子点 (N+1)^2 からゴール中央の 1 本を引いたもの)。
         # 格子点の数をそのまま出すと 8x8 が 81 本に見え、手持ちの照らし合わせが 1 本ずれる。
@@ -82,13 +102,38 @@ def measure(maze: Maze, max_steps: int = 2000) -> Difficulty | None:
             1 for x in range(maze.size) for y in range(maze.size)
             if not any(maze.has_wall(x, y, d) for d in Direction)
         ),
+        chained_motions=chained,
     )
+
+
+def candidates(args):
+    """候補の迷路を ``(Maze, 名前)`` で流す。切り出しと生成の 2 通り。
+
+    切り出しはそのままではゴールが競技の形にならない (元の迷路では普通のセルだった
+    場所をゴールと宣言するため) ので、入口の選び方ごとに候補を作る。生成の方は
+    :func:`~krilly.sim.generate.random_maze` が最後に直してくれる。
+    """
+    for seed in range(args.generate):
+        yield (random_maze(args.size, seed=seed, loop_ratio=args.loop_ratio),
+               f"生成 seed={seed} loop={args.loop_ratio:g}")
+    for path in args.maze or []:
+        source = Maze.from_ascii(Path(path).read_text(encoding="utf-8"))
+        for x0, y0, window in excerpts(source, args.size):
+            for maze in goal_variants(window):
+                yield (maze, f"{Path(path).stem} ({x0},{y0})")
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--maze", nargs="+", required=True, help="元にする迷路 (ASCII)")
+    p.add_argument("--maze", nargs="+", help="元にする迷路 (ASCII)")
+    p.add_argument("--generate", type=int, default=0, metavar="N",
+                   help="切り出す代わりに**生成した完全迷路から選ぶ** (種 0..N-1)。"
+                        "露出を稼ぐ盤面は大会迷路の中に無いことがある — 本物は"
+                        "長い廊下を持つので、曲がりの密度は設計した方が上げられる")
+    p.add_argument("--loop-ratio", type=float, default=0.04, metavar="比",
+                   help="--generate のときに壁を抜く割合 (既定 0.04)。**0 に近いほど"
+                        "ゴールへの道が 1 本になり、経路計画が曲がりを避けられなくなる**")
     p.add_argument("--size", type=int, default=8, help="切り出す大きさ (既定 8)")
     p.add_argument("--wall-budget", type=int, default=None, help="手持ちの壁の枚数")
     p.add_argument("--post-budget", type=int, default=None, help="手持ちの柱の本数")
@@ -99,6 +144,11 @@ def main() -> int:
     p.add_argument("--min-cells", type=int, default=0, help="最速経路のセル数の下限")
     p.add_argument("--max-stranded", type=int, default=4,
                    help="到達できないセルの上限 (窓を切ると必ず数個は出る)")
+    p.add_argument("--sort", choices=("difficulty", "exposure"), default="difficulty",
+                   help="並べ替えの目的。difficulty = 実機でしか試せない要素が多い順 "
+                        "(既定)、exposure = **1 セッションで採れるサンプルが多い順** "
+                        "(#85: 中断の発生率を測るための盤面。曲がりが多く直進が短い方が"
+                        "連結動作が増える)")
     p.add_argument("--top", type=int, default=10, help="表示する件数")
     p.add_argument("--out", default=None, help="--rank 位を書き出すファイル")
     p.add_argument("--rank", type=int, default=1, metavar="N",
@@ -106,6 +156,8 @@ def main() -> int:
                         "指標が同点なら組みやすさや探索の長さで選ぶことがある")
     args = p.parse_args()
     setup_logging()
+    if not args.maze and not args.generate:
+        p.error("--maze か --generate のどちらかが要る")
 
     walls_max, posts_max = pieces_needed(args.size)
     log.info("%dx%d を組むのに要るのは 壁 %d 枚 / 柱 %d 本 (どんなレイアウトでも)",
@@ -115,42 +167,45 @@ def main() -> int:
 
     found: list[tuple[Difficulty, str, Maze]] = []
     rejected = {"組めない": 0, "予算超過": 0, "走れない": 0}
-    for path in args.maze:
-        source = Maze.from_ascii(Path(path).read_text(encoding="utf-8"))
-        for x0, y0, window in excerpts(source, args.size):
-            # 切り出したままではゴールが競技の形にならない (元の迷路では普通のセル
-            # だった場所をゴールと宣言するため)。入口の選び方ごとに候補を作る。
-            for maze in goal_variants(window):
-                # 組む迷路なので、健全性は「誤りが無い」だけでは足りない:
-                #   壁の付かない柱 -> 公式規則違反。物理的にも自立しない
-                #   到達できないセル -> 窓を切ると必ず出るが、多いと盤面が無駄になる
-                if not check_maze(maze).ok or posts_without_wall(maze):
-                    rejected["組めない"] += 1
-                    continue
-                stranded = maze.size ** 2 - len(reachable_cells(maze))
-                if stranded > args.max_stranded:
-                    rejected["孤立が多い"] = rejected.get("孤立が多い", 0) + 1
-                    continue
-                if (args.wall_budget is not None
-                        and wall_counts(maze).total > args.wall_budget):
-                    rejected["予算超過"] += 1
-                    continue
-                metrics = measure(maze)
-                if metrics is None:
-                    rejected["走れない"] += 1
-                    continue
-                if (metrics.search_steps < args.min_search
-                        or metrics.path_cells < args.min_cells):
-                    rejected["易しすぎ"] = rejected.get("易しすぎ", 0) + 1
-                    continue
-                found.append((metrics, f"{Path(path).stem} ({x0},{y0})", maze))
+    for maze, name in candidates(args):
+        # 組む迷路なので、健全性は「誤りが無い」だけでは足りない:
+        #   壁の付かない柱 -> 公式規則違反。物理的にも自立しない
+        #   到達できないセル -> 窓を切ると必ず出るが、多いと盤面が無駄になる
+        if not check_maze(maze).ok or posts_without_wall(maze):
+            rejected["組めない"] += 1
+            continue
+        # ゴールの入口は 1 つに揃える。大会迷路 31 面のうち 23 面が 1 つで、2-3 つの
+        # ものもあるが、**入口が増えると経路に逃げ道ができる** — 曲がりを増やしたくて
+        # 選んでいるのに、planner が真っ直ぐな別ルートを取れてしまう。
+        # 切り出しは goal_variants が 1 つに絞るので、これが効くのは --generate の側。
+        if len(goal_entrances(maze)) != 1:
+            rejected["入口が複数"] = rejected.get("入口が複数", 0) + 1
+            continue
+        stranded = maze.size ** 2 - len(reachable_cells(maze))
+        if stranded > args.max_stranded:
+            rejected["孤立が多い"] = rejected.get("孤立が多い", 0) + 1
+            continue
+        if (args.wall_budget is not None
+                and wall_counts(maze).total > args.wall_budget):
+            rejected["予算超過"] += 1
+            continue
+        metrics = measure(maze)
+        if metrics is None:
+            rejected["走れない"] += 1
+            continue
+        if (metrics.search_steps < args.min_search
+                or metrics.path_cells < args.min_cells):
+            rejected["易しすぎ"] = rejected.get("易しすぎ", 0) + 1
+            continue
+        found.append((metrics, name, maze))
 
     log.info("候補 %d 件 (除外: %s)", len(found),
              " / ".join(f"{k} {v}" for k, v in rejected.items()))
     if not found:
         log.error("条件を満たす切り出しが無い。--size か --wall-budget を見直すこと。")
         return 1
-    found.sort(key=lambda t: t[0].score, reverse=True)
+    key = (lambda t: t[0].exposure) if args.sort == "exposure" else (lambda t: t[0].score)
+    found.sort(key=key, reverse=True)
     for metrics, name, _maze in found[:args.top]:
         log.info("  %-28s %s", name, metrics.describe())
     if args.out:

@@ -159,12 +159,13 @@ class Difficulty:
     blind_y: int               # 同 南北
     blind_cross: int           # **進行方向と直交する**補正が入らない連続 (危険なのはこれ)
     no_wall_cells: int         # 四辺とも壁が無いセル
+    chained_motions: int = 0   # 25 走セッションで得られる連結動作の本数 (:attr:`exposure`)
 
     def describe(self) -> str:
         return (f"壁 {self.walls} 柱 {self.posts} / 探索 {self.search_steps} 手 / "
                 f"最速 {self.path_cells} セル {self.legs} 区間 (最長 {self.longest_leg}) / "
                 f"補正なし連続 直交{self.blind_cross} (X{self.blind_x} Y{self.blind_y}) / "
-                f"無壁セル {self.no_wall_cells}")
+                f"無壁セル {self.no_wall_cells} / 連結動作 {self.chained_motions}")
 
     @property
     def score(self) -> tuple:
@@ -177,3 +178,18 @@ class Difficulty:
         """
         return (self.blind_cross, self.no_wall_cells, self.search_steps,
                 self.path_cells)
+
+    @property
+    def exposure(self) -> tuple:
+        """並べ替え用その 2: **中断の発生率を測るための露出**が多い順 (#85)。
+
+        :attr:`score` とは目的が違う。あちらは「1 回の走行でどこが壊れうるか」だが、
+        こちらは「**1 セッションで何サンプル採れるか**」。中断のガードが発火するのは
+        コーナーを含む動作なので、サンプル数は連結動作の本数で決まる — 探索の動作は
+        1 区間ずつでコーナーが無いので数に入らず、**稼げるのは復帰と最速だけ**。
+
+        だから欲しいのは「曲がりが多く直進が短い」盤面になる。同じセル数でも区間が
+        細かいほど束ねる数が増える。セッションの所要時間は同時に伸びるので、
+        同点なら短い方を採る。
+        """
+        return (self.chained_motions, self.legs, self.path_cells)
