@@ -576,8 +576,20 @@ class WallDetector:
             mask[r.y : r.y + r.h, r.x : r.x + r.w] = 0
         return mask
 
-    def measure(self, bgr: np.ndarray) -> dict[str, tuple[float, int, bool]]:
-        """各辺の (赤割合, 帯のずれ[px], 飽和したか)。``search_px=0`` なら固定 ROI。"""
+    def measure(self, bgr: np.ndarray, shift_px: tuple[int, int] = (0, 0)
+                ) -> dict[str, tuple[float, int, bool]]:
+        """各辺の (赤割合, 帯のずれ[px], 飽和したか)。``search_px=0`` なら固定 ROI。
+
+        ``shift_px`` は **ROI を丸ごと平行移動する量** (#85)。ROI はセル中央に居る
+        前提で置いてあるので、機体が探索範囲 (±``search_px``) より大きくずれると
+        帯を見失い、**隣の柱を掴んで幽霊の壁を生やす**。実機で壁に食い込んで止まった
+        フレームがまさにそれで、真は ``{E}`` だけなのに ``{N, E}`` と読んだ。
+        :func:`~krilly.perception.lattice.lattice_offset` で測ったずれを渡せば直る。
+
+        **正常運転では渡さないこと。** 探索範囲に収まっている限り ROI は帯を掴んで
+        おり、ずれの測定を挟むと誤測定の経路が 1 つ増えるだけになる。これは姿勢を
+        作り直すとき専用の道具。
+        """
         if self.cfg.frame_size is not None:
             h, w = bgr.shape[:2]
             if (w, h) != self.cfg.frame_size:
@@ -588,7 +600,10 @@ class WallDetector:
                 )
         mask = self._mask(bgr)
         out = {}
-        for name, roi in self.cfg.rois.items():
+        dx, dy = shift_px
+        for name, base in self.cfg.rois.items():
+            roi = base if (dx, dy) == (0, 0) else Roi(base.x + dx, base.y + dy,
+                                                      base.w, base.h)
             vertical = self.cfg.target(name).vertical
             if self.cfg.search_px <= 0:
                 out[name] = (roi_red_fraction(mask, roi), 0, False)

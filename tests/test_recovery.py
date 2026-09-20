@@ -10,6 +10,7 @@ from krilly.localization.recovery import (
     RECOVERY_MAX_YAW_SPREAD_RAD,
     recoverable,
     verify_cell,
+    wall_contact,
 )
 from krilly.localization.grid import MAX_HEADING_CORRECTION_RAD
 from krilly.solver.maze import Direction
@@ -219,3 +220,35 @@ def test_min_edges_can_demand_more_evidence():
     assert verify_cell(*args, known_edges=known, min_edges=1).ok
     v = verify_cell(*args, known_edges=known, min_edges=2)
     assert not v.ok and v.unverifiable
+
+
+# --- 壁への接触 (#85) -------------------------------------------------------
+class _Offset:
+    def __init__(self, forward_m=None, left_m=None):
+        self.forward_m, self.left_m = forward_m, left_m
+
+
+@pytest.mark.parametrize("offset, walls, contact", [
+    # 余裕 (21.4mm) を超えて寄っていて、その側に壁がある = 接触
+    (_Offset(left_m=-0.028), {"right": True}, True),
+    (_Offset(left_m=+0.028), {"left": True}, True),
+    (_Offset(forward_m=+0.030), {"front": True}, True),
+    # 寄っている側に壁が無ければ、ずれているだけ (読み直して続行してよい)
+    (_Offset(left_m=-0.028), {"right": False, "left": True}, False),
+    # 余裕の中なら接触しようがない
+    (_Offset(left_m=-0.015), {"right": True}, False),
+    # 測れなかった軸は判断材料にしない
+    (_Offset(left_m=None), {"right": True}, False),
+])
+def test_contact_needs_both_the_offset_and_a_wall_on_that_side(offset, walls, contact):
+    """**ずれているだけ**と**壁に食い込んでいる**を分ける (#85)。
+
+    ROI の探索範囲 (±23.5mm) と廊下の余裕 (21.4mm) がほぼ同じなので、
+    「ROI が帯を見失うほどずれた」はほぼ「触れているかもしれない」と同義。
+    位置を測り直す機能と接触の判定は対で入れないと、居るセルは正しく分かるのに
+    壁へ食い込んだまま走り出す機体になる。
+    """
+    said = wall_contact(offset, walls, 0.0214)
+    assert (said is not None) is contact
+    if contact:
+        assert "接触している" in said
