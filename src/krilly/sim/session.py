@@ -113,7 +113,8 @@ def simulate_session(
     actual_scale: float = 1.0,
     max_steps: int = 5000,
     neighbor_sensing: bool = True,
-    max_leg_cells: int = 2,
+    pass_cells: int = 2,
+    max_leg_cells: int = 4,
     chain_legs: int = 2,
     times: dict[str, float] | None = None,
 ) -> SessionResult:
@@ -128,9 +129,13 @@ def simulate_session(
     ``chain_legs`` は最速・復帰で止まらずに繋ぐ区間の本数 (#80)。固定費は動作に
     付くので、繋ぐと見積もりが縮む。
 
-    ``neighbor_sensing`` は左右の隣セルまで読むか (#89)。``max_leg_cells`` は
+    ``neighbor_sensing`` は左右の隣セルまで読むか (#89)。``pass_cells`` は**探索で**
     止まらずに続けて通過してよいセル数の上限。両方そろって初めて停止回数が減る
     (隣を読むと進行先のセルが「4 壁とも既知」になり、通過してよくなる)。
+
+    ``max_leg_cells`` は**最速・復帰の 1 区間**の長さの上限 (#85)。別物なので混ぜない
+    こと — ``pass_cells`` は「探索で何セル覗いてから止まるか」、``max_leg_cells`` は
+    「補正なしで何セル走り切ってよいか」。前者は速さの話、後者は壁に擦るかの話。
 
     ``actual_scale`` は「実際は見積もりの何倍かかるか」。1.0 なら見積もりが定義上
     ぴったり当たるので、予算判断の余裕を試すには 1.2-1.5 を入れる。
@@ -152,6 +157,7 @@ def simulate_session(
     mgr = RunManager(ex, holonomic=holonomic, cost=cost, time_limit_s=time_limit_s,
                      max_runs=max_runs, time_margin=time_margin,
                      chain_legs=1 if not holonomic else chain_legs,
+                     max_leg_cells=max_leg_cells,
                      **(times or {}))
     result = SessionResult(truth=truth, explorer=ex)
     result.limit_s = time_limit_s
@@ -170,7 +176,7 @@ def simulate_session(
         ex.observe(sense(truth, ex.cell, ex.facing),
                    sense_neighbors(truth, ex.cell, ex.facing) if neighbor_sensing else None)
         try:
-            steps = ex.plan_leg(max_leg_cells)
+            steps = ex.plan_leg(pass_cells)
         except Unreachable as exc:
             result.aborted = f"探索中に到達不能: {exc}"
             mgr.abort()
