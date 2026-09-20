@@ -161,3 +161,44 @@ def test_the_second_excerpt_is_buildable_and_has_a_longer_search():
     assert metrics.search_steps >= 39                    # excerpt8 は 22 手
     assert metrics.blind_y >= 5
     assert metrics.blind_cross >= 2
+
+
+def test_the_exposure_board_is_buildable_and_turns_often():
+    """サンプル数で選んだ盤面 (#85)。**難しさではなく連結動作の本数で選んでいる。**
+
+    中断のガードが発火するのはコーナーを含む動作なので、1 セッションで採れる
+    サンプル数 = 連結動作の本数。探索の動作は 1 区間ずつでコーナーが無いから
+    数に入らず、稼げるのは復帰と最速だけ — つまり**曲がりが多く直進が短い**ほどよい。
+    """
+    from pathlib import Path
+
+    from krilly.sim.check import check_maze, wall_counts
+    from scripts.maze_excerpt import measure
+
+    maze = Maze.from_ascii(Path("mazes/twisty8.txt").read_text(encoding="utf-8"))
+    counts = wall_counts(maze)
+    assert check_maze(maze).ok
+    assert counts.total == 77 and counts.posts == 80      # 手持ち 80/85 に予備 3 枚
+    assert len(goal_entrances(maze)) == 1
+
+    metrics = measure(maze)
+    assert metrics.chained_motions == 384                 # excerpt8_2015 は 288
+    assert metrics.path_cells == 27                       # ゴールまでが長い
+    assert metrics.path_cells / metrics.legs < 1.7        # 1.6 セルごとに曲がる
+    assert metrics.longest_leg <= 4                       # 区間長の上限 (#85) に掛からない
+    # **この盤面は横流れの検証には向かない。** 目的が違うことを明示しておく。
+    assert metrics.blind_cross == 0
+
+
+def test_the_two_sort_orders_disagree_and_that_is_the_point():
+    """``score`` と ``exposure`` は別物 — 同じ盤面でも順位が逆になりうる (#85)。"""
+    from pathlib import Path
+
+    from scripts.maze_excerpt import measure
+
+    twisty = measure(Maze.from_ascii(
+        Path("mazes/twisty8.txt").read_text(encoding="utf-8")))
+    hard = measure(Maze.from_ascii(
+        Path("mazes/excerpt8_2015.txt").read_text(encoding="utf-8")))
+    assert twisty.exposure > hard.exposure      # サンプル数はこちらが多い
+    assert hard.score > twisty.score            # 実機でしか試せない要素は向こうが多い

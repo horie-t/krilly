@@ -16,6 +16,10 @@
     # 手持ちの壁 70 枚に収まるものだけ
     python -m scripts.maze_excerpt --size 8 --wall-budget 70 --maze mazes/contest/*.txt
 
+    # 中断の発生率を測るための盤面を選ぶ (#85: 曲がりが多いほどサンプルが増える)
+    python -m scripts.maze_excerpt --size 8 --maze mazes/contest/*.txt \
+        --wall-budget 80 --sort exposure --min-cells 24 --out mazes/twisty8.txt
+
     # 選んだものを書き出す (既定は 1 位、--rank で順位を選ぶ)
     python -m scripts.maze_excerpt --size 7 --maze mazes/contest/*.txt --out mazes/excerpt7.txt
     python -m scripts.maze_excerpt --size 8 --maze mazes/contest/*.txt --rank 2 --out mazes/excerpt8_2015.txt
@@ -39,11 +43,18 @@ from krilly.sim.excerpt import (
     pieces_needed,
 )
 from krilly.sim.check import wall_counts
+from krilly.app.run_manager import RunManager
+from krilly.strategy.shortest_path import chunk_legs
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import Explorer, Unreachable
 from krilly.strategy.shortest_path import path_to_legs, shortest_path
 
 log = get_logger(__name__)
+
+#: 実機の既定と同じ設定 (#80 / #85)。連結動作の本数はここで決まる。
+CHAIN_LEGS = 2
+#: 露出を数えるときに想定するセッションの走行回数 (`speed_run --max-runs 25`)。
+SESSION_RUNS = 25
 
 
 def measure(maze: Maze, max_steps: int = 2000) -> Difficulty | None:
@@ -69,6 +80,14 @@ def measure(maze: Maze, max_steps: int = 2000) -> Difficulty | None:
         return None
     legs = path_to_legs(path)
     counts = wall_counts(maze)
+    # **実機と同じ設定**で復帰・最速の区間を引き、1 セッションぶんの連結動作を数える。
+    # 区間長の上限 (#85) と束ねる本数で本数が変わるので、既定値をそのまま使う。
+    mgr = RunManager(ex, chain_legs=CHAIN_LEGS)
+    run_legs = [mgr.speed_legs(Direction.N), mgr.return_legs(ex.cell, ex.facing)]
+    chained = sum(
+        sum(1 for chunk in chunk_legs(one, CHAIN_LEGS) if len(chunk) > 1)
+        for one in run_legs if one
+    ) * (SESSION_RUNS - 1)          # 探索の 1 走を除く = 復帰 + 最速の回数
     return Difficulty(
         # 柱は**実際に立てる本数** (格子点 (N+1)^2 からゴール中央の 1 本を引いたもの)。
         # 格子点の数をそのまま出すと 8x8 が 81 本に見え、手持ちの照らし合わせが 1 本ずれる。
@@ -82,6 +101,7 @@ def measure(maze: Maze, max_steps: int = 2000) -> Difficulty | None:
             1 for x in range(maze.size) for y in range(maze.size)
             if not any(maze.has_wall(x, y, d) for d in Direction)
         ),
+        chained_motions=chained,
     )
 
 
@@ -99,6 +119,11 @@ def main() -> int:
     p.add_argument("--min-cells", type=int, default=0, help="最速経路のセル数の下限")
     p.add_argument("--max-stranded", type=int, default=4,
                    help="到達できないセルの上限 (窓を切ると必ず数個は出る)")
+    p.add_argument("--sort", choices=("difficulty", "exposure"), default="difficulty",
+                   help="並べ替えの目的。difficulty = 実機でしか試せない要素が多い順 "
+                        "(既定)、exposure = **1 セッションで採れるサンプルが多い順** "
+                        "(#85: 中断の発生率を測るための盤面。曲がりが多く直進が短い方が"
+                        "連結動作が増える)")
     p.add_argument("--top", type=int, default=10, help="表示する件数")
     p.add_argument("--out", default=None, help="--rank 位を書き出すファイル")
     p.add_argument("--rank", type=int, default=1, metavar="N",
@@ -150,7 +175,8 @@ def main() -> int:
     if not found:
         log.error("条件を満たす切り出しが無い。--size か --wall-budget を見直すこと。")
         return 1
-    found.sort(key=lambda t: t[0].score, reverse=True)
+    key = (lambda t: t[0].exposure) if args.sort == "exposure" else (lambda t: t[0].score)
+    found.sort(key=key, reverse=True)
     for metrics, name, _maze in found[:args.top]:
         log.info("  %-28s %s", name, metrics.describe())
     if args.out:

@@ -89,6 +89,8 @@ python -m scripts.maze_sim --maze mazes/contest/*.txt --max-leg-cells 0  # ... w
 python -m scripts.maze_from_image shot.png --out-dir mazes/contest   # transcribe a contest maze
 python -m scripts.maze_excerpt --size 8 --maze mazes/contest/*.txt --wall-budget 80 --min-search 18
                                                             # pick an 8×8 to build from the real mazes (#23/#85)
+python -m scripts.maze_excerpt --size 8 --maze mazes/contest/*.txt --wall-budget 80 --sort exposure --min-cells 24
+                                                            # ... pick one for sample count instead: twisty, short straights (#85)
 
 # perception tuning
 python -m scripts.wall_detect --image shot.png --out walls.png   # off-Pi: per-edge red fraction + verdict
