@@ -172,22 +172,41 @@ def test_the_exposure_board_is_buildable_and_turns_often():
     """
     from pathlib import Path
 
-    from krilly.sim.check import check_maze, wall_counts
+    from krilly.sim.check import check_maze, reachable_cells, wall_counts
     from scripts.maze_excerpt import measure
 
     maze = Maze.from_ascii(Path("mazes/twisty8.txt").read_text(encoding="utf-8"))
     counts = wall_counts(maze)
     assert check_maze(maze).ok
-    assert counts.total == 77 and counts.posts == 80      # 手持ち 80/85 に予備 3 枚
+    assert counts.total == 80 and counts.posts == 80      # 手持ちちょうど (予備ゼロ)
     assert len(goal_entrances(maze)) == 1
+    assert len(reachable_cells(maze)) == maze.size ** 2   # 全セルへ行ける
 
     metrics = measure(maze)
-    assert metrics.chained_motions == 384                 # excerpt8_2015 は 288
-    assert metrics.path_cells == 27                       # ゴールまでが長い
-    assert metrics.path_cells / metrics.legs < 1.7        # 1.6 セルごとに曲がる
+    assert metrics.chained_motions == 864                 # excerpt8_2015 は 288
+    assert metrics.path_cells == 45 and metrics.legs == 37
+    assert metrics.path_cells / metrics.legs < 1.25       # 1.22 セルごとに曲がる
     assert metrics.longest_leg <= 4                       # 区間長の上限 (#85) に掛からない
     # **この盤面は横流れの検証には向かない。** 目的が違うことを明示しておく。
-    assert metrics.blind_cross == 0
+    assert metrics.blind_cross <= 1
+
+
+def test_the_exposure_board_is_a_perfect_maze_and_reproducible():
+    """`twisty8` は**生成した完全迷路**。切り出しではこの密度に届かない (#85)。
+
+    ループがあると ``DEFAULT_COST`` が区間を 1.62 セル分に見積もって曲がりを嫌うので、
+    planner が真っ直ぐな迂回路を選んでしまう。ゴールへの道が 1 本しかない全域木なら
+    **曲がりを避けられない**。内壁は全域木でちょうど 48 枚 = 合計 80 枚になる。
+    """
+    from pathlib import Path
+
+    from krilly.sim.check import wall_counts
+    from krilly.sim.generate import random_maze
+
+    maze = Maze.from_ascii(Path("mazes/twisty8.txt").read_text(encoding="utf-8"))
+    assert maze.to_ascii() == random_maze(8, seed=1770, loop_ratio=0.04).to_ascii()
+    # 全域木 + ゴール 2x2 を開ける = 内壁 112 - (64 セルを繋ぐ 63 + ゴールの 1) = 48
+    assert wall_counts(maze).inner == 48
 
 
 def test_the_two_sort_orders_disagree_and_that_is_the_point():
@@ -200,5 +219,5 @@ def test_the_two_sort_orders_disagree_and_that_is_the_point():
         Path("mazes/twisty8.txt").read_text(encoding="utf-8")))
     hard = measure(Maze.from_ascii(
         Path("mazes/excerpt8_2015.txt").read_text(encoding="utf-8")))
-    assert twisty.exposure > hard.exposure      # サンプル数はこちらが多い
+    assert twisty.exposure > hard.exposure      # サンプル数はこちらが多い (864 vs 288)
     assert hard.score > twisty.score            # 実機でしか試せない要素は向こうが多い
