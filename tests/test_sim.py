@@ -5,6 +5,7 @@
 カメラの見落としや姿勢の誤差は模擬しない (実機 #23 の担当)。
 """
 
+import statistics
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,12 @@ from krilly.sim.check import (
 from krilly.sim.generate import walled_maze
 from krilly.sim.session import fit_search_overhead
 from krilly.solver.maze import Direction, Maze
-from krilly.strategy.shortest_path import LEGACY_COST, MoveCost, shortest_path
+from krilly.strategy.shortest_path import (
+    LEGACY_COST,
+    MoveCost,
+    path_to_legs,
+    shortest_path,
+)
 
 MAZE_DIR = Path(__file__).resolve().parents[1] / "mazes"
 
@@ -507,7 +513,7 @@ def test_sense_neighbors_follows_the_facing():
 def test_neighbour_sensing_cuts_stops_without_breaking_the_map(seed):
     """隣を読んで既知セルを通過しても、地図は真の迷路と一致したままであること。"""
     truth = random_maze(12, seed=seed)
-    base = simulate_session(truth, neighbor_sensing=False, max_leg_cells=1)
+    base = simulate_session(truth, neighbor_sensing=False, pass_cells=1)
     fast = simulate_session(truth)          # 既定 = 実機の既定 (隣を読む / 2 セル通過)
     assert fast.reached_goal and not fast.mismatches
     assert fast.search.legs < base.search.legs           # 停止回数が減る
@@ -517,14 +523,14 @@ def test_neighbour_sensing_cuts_stops_without_breaking_the_map(seed):
 def test_neighbour_sensing_needs_the_pass_through_to_save_stops():
     """隣を読むだけでは停止は減らない (通過を許して初めて減る)。"""
     truth = random_maze(12, seed=3)
-    looked = simulate_session(truth, neighbor_sensing=True, max_leg_cells=1)
+    looked = simulate_session(truth, neighbor_sensing=True, pass_cells=1)
     assert looked.search.legs == looked.search.cells
 
 
 def test_pass_through_never_enters_a_cell_with_unobserved_walls():
     """止まらずに通過したセルも 4 壁が観測済みであること (見ていない壁へ突っ込まない)。"""
     truth = random_maze(12, seed=5)
-    result = simulate_session(truth, neighbor_sensing=True, max_leg_cells=4)
+    result = simulate_session(truth, neighbor_sensing=True, pass_cells=4)
     ex = result.explorer
     assert ex.visited <= ex.known
     assert not map_agrees(truth, ex.maze, ex.known)      # 確定した壁は真の迷路と一致
@@ -609,7 +615,9 @@ def test_a_faster_machine_closes_the_mazes_the_margin_could_not():
 
     安全率は「始めた走行を終えられるか」しか動かせないので、探索そのものが長い面
     (2014/2015/2017 の exp 決勝) には効かない。0.24 -> 0.30 m/s にすると
-    30 面すべてが最速ランを走れるようになる。
+    30 面すべてが最速ランを走れるようになる — **区間長に上限を入れなければ** (#85)。
+    上限 4 では 0.30 でも 2 面が走れない。速度の効果そのものは変わらない
+    (0.24 では上限を入れても数字が動かない。もともと時間で落ちている面なので)。
 
     速くしても**固定費は縮まない**ので、そこを一緒に割ってはいけない: 停止 + 撮影の
     0.55s はそのままで、ランプの超過 v/2*(1/accel + 1/decel) はむしろ増える。
@@ -628,10 +636,53 @@ def test_a_faster_machine_closes_the_mazes_the_margin_could_not():
                 "straight_time_s": 0.900}, MoveCost(cell_ew=0.60 / 0.61, leg=0.900 / 0.61)),
     }
 
-    def shut_out(v: float) -> int:
+    def shut_out(v: float, cap: int) -> int:
         times, cost = MEASURED[v]
         return sum(1 for m in mazes
-                   if not simulate_session(m, times=times, cost=cost).speed_runs)
+                   if not simulate_session(m, times=times, cost=cost,
+                                           max_leg_cells=cap).speed_runs)
 
-    assert shut_out(0.24) == 3
-    assert shut_out(0.30) == 0
+    # 区間長の上限なし (#85 以前) の数字。速度だけの効果はここで見る。
+    assert shut_out(0.24, 0) == 3
+    assert shut_out(0.30, 0) == 0
+    # 上限 4 を入れると 0.30 でも 2 面が走れなくなる。**それでも 0.24 より良い。**
+    assert shut_out(0.24, 4) == 3
+    assert shut_out(0.30, 4) == 2
+
+
+# --- 区間長の上限の値段 (#85) ------------------------------------------------
+def test_the_leg_cap_costs_races_on_real_16x16_mazes():
+    """**上限はタダではない。大会迷路では最速ランを 48 -> 44 本に減らす** (#85)。
+
+    床の 8x8 では最長区間が 4 セルなので上限 4 は 0 秒だが、16x16 の大会迷路は
+    最短経路の最長区間が**中央値 11.5 セル / 最大 15 セル**で、30 面中 29 面が 4 を
+    超える。上限を入れると動作が増え、最速ランの中央値は 58.8 -> 62.0s になり、
+    7 分に収まらない面が 2 -> 3 面に増える。
+
+    これは #87 が「走行を断るのが一番高くつく誤り」と書いたのと同じ形の取引で、
+    **今回は断る側を選んでいる**: 擦れば自立した壁が倒れて走行ごと失われるうえ、
+    実測があるのは 4 セルまでだから。上限を上げるなら、先に 5-7 セルの横ずれを
+    実測すること (``cell_move_demo --seq F5 --align --camera-pose``)。
+    """
+    mazes = [Maze.from_ascii(p.read_text(encoding="utf-8"))
+             for p in contest_mazes() if p.stem not in KNOWN_BAD_TRANSCRIPTIONS]
+
+    def sweep(cap: int) -> tuple[int, int]:
+        """現行の既定定数 (#107 のランプ) で回す。``maze_sim`` の既定と同じ。"""
+        runs = [simulate_session(m, max_leg_cells=cap) for m in mazes]
+        return (sum(1 for r in runs if not r.speed_runs),
+                sum(len(r.speed_runs) for r in runs))
+
+    longest = []
+    for m in mazes:
+        known = {(x, y) for x in range(m.size) for y in range(m.size)}
+        legs = path_to_legs(shortest_path(m, m.start, start_facing=Direction.N,
+                                          known=known))
+        longest.append(max(leg.cells for leg in legs))
+    assert statistics.median(longest) == 11.5        # 長い廊下だらけ
+    assert sum(1 for v in longest if v > 4) == 29    # 30 面中 29 面
+
+    assert sweep(0) == (2, 48)      # 上限なし
+    assert sweep(6) == (2, 46)
+    assert sweep(5) == (2, 45)
+    assert sweep(4) == (3, 44)      # 既定。最速ランが 4 本、走れる面が 1 面減る

@@ -34,6 +34,7 @@ from krilly.strategy.shortest_path import (
     DEFAULT_COST,
     Leg,
     MoveCost,
+    chunk_legs,
     path_to_legs,
     shortest_path,
     turns_in,
@@ -159,6 +160,12 @@ class RunManager:
     #: **短い方へ**外れ、予算判断が終われない走行を始めてしまう。1 なら外れ方は
     #: 「走れる走行を断る」側になる。渡し忘れが高くつかない向きに倒しておく。
     chain_legs: int = 1
+    #: 1 区間の長さの上限 [セル] (0 で無制限、#85)。長い直進は**その間ずっと位置補正も
+    #: 進路確認も入らない**ので、横ずれが距離に比例して育つ。実測があるのは 4 セルまで
+    #: (#87 の軸合わせ横移動で最悪 11.2mm / 720mm) で、7 セルに伸ばすと比例計算で
+    #: 19.6mm = 廊下の余裕 21.4mm の 92% になる。実機でも 6-7 セルの区間で擦った。
+    #: 分割の詳細と、分割しただけでは効かない理由は :func:`split_legs` / :func:`chunk_legs`。
+    max_leg_cells: int = 4
     cost: MoveCost = DEFAULT_COST
 
     phase: RunPhase = field(default=RunPhase.WAIT, init=False)
@@ -203,8 +210,10 @@ class RunManager:
         所要は「セル数 × 1 セルの時間 + 固定費 1 回分」で、コーナーの有無で変わらない
         (コーナーのブレンドは、どのみち必要な減速を次の区間の加速と重ねただけだから)。
         """
-        size = max(1, self.chain_legs)
-        return -(-len(legs) // size)          # 切り上げ
+        # 同じ方角が続くところでは繋げない (:func:`chunk_legs`) ので、単純な切り上げでは
+        # 数が合わない。**区間を分割すると動作が増える**のを見積もりに乗せるため、
+        # 実機と同じまとめ方を共有する。
+        return len(chunk_legs(legs, self.chain_legs))
 
     # -- 経路 -----------------------------------------------------------------
     def _route(
@@ -221,7 +230,7 @@ class RunManager:
             self.explorer.maze, start, goals,
             start_facing=facing, known=self.explorer.known, cost=self.cost,
         )
-        return path_to_legs(path) if path else None
+        return path_to_legs(path, self.max_leg_cells) if path else None
 
     def speed_legs(self, facing: Direction) -> list[Leg] | None:
         """スタート -> ゴールの最速経路 (スタート区画で ``facing`` を向いている前提)。"""

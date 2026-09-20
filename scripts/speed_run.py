@@ -66,6 +66,7 @@ from krilly.strategy.shortest_path import (
     DEFAULT_COST,
     LEGACY_COST,
     Leg,
+    chunk_legs,
     describe_legs,
 )
 
@@ -117,6 +118,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="1 セッションで姿勢を作り直す回数の上限 (#113、既定 1)。"
                         "原因不明の異常が繰り返す機体を走らせ続ける方が危険なので、"
                         "既定では 1 回だけ試して 2 回目は諦める")
+    p.add_argument("--max-leg-cells", type=int, default=4, metavar="セル",
+                   help="1 区間の長さの上限 (既定 4、0 で無制限)。長い直進の間は"
+                        "位置補正も進路確認も入らないので横ずれが育つ (#85)")
     p.add_argument("--chain-legs", type=int, default=2,
                    help="最速・復帰で止まらずに繋ぐ区間の本数の上限 (#80、既定 2)。"
                         "1 = 区間ごとに停止 (従来)。繋ぐと位置補正の間隔も伸びる")
@@ -148,6 +152,7 @@ def main() -> None:
                          **({} if args.time_margin is None
                             else {"time_margin": args.time_margin}),
                          chain_legs=1 if args.turn_in_place else max(1, args.chain_legs),
+                         max_leg_cells=max(0, args.max_leg_cells),
                          cost=LEGACY_COST if args.turn_in_place else DEFAULT_COST)
     neighbors = not args.no_neighbors
     detector = WallDetector(calibrated_config(neighbors=neighbors))
@@ -171,9 +176,10 @@ def main() -> None:
              manager.time_margin)
     log.info("探索の観測: 自セルの 4 壁%s / 1 動作で最大 %d セル",
              " + 左右の隣セル (#89)" if neighbors else "", pass_cells)
-    log.info("最速・復帰: 1 動作で最大 %d 区間%s",
+    log.info("最速・復帰: 1 動作で最大 %d 区間%s / 1 区間は最大 %s",
              args.chain_legs,
-             " (止まらずに曲がる #80)" if args.chain_legs > 1 else " (区間ごとに停止)")
+             " (止まらずに曲がる #80)" if args.chain_legs > 1 else " (区間ごとに停止)",
+             f"{args.max_leg_cells} セル (#85)" if args.max_leg_cells > 0 else "無制限")
     log.info("チューニング: %s", tuning.describe())
     for warning in check_limits(tuning, kin):
         log.warning("%s", warning)
@@ -531,9 +537,12 @@ def main() -> None:
             旋回する走り方では繋がない (区間の間に旋回が入るので必ず止まる)。
             まとまりの**先頭でしか位置補正もカメラの進路確認もできない**ので、
             長くするほど誤差の蓄積に賭けることになる。
+
+            :func:`chunk_legs` は **RunManager の見積もりと同じもの**を使う。別々に
+            持つと「見積もりは繋ぐつもりの数、実機は繋がない数」で静かにずれる。
             """
             size = 1 if args.turn_in_place else max(1, args.chain_legs)
-            return [legs[i:i + size] for i in range(0, len(legs), size)]
+            return chunk_legs(legs, size)
 
         def execute_legs(
             legs: list[Leg], cell: tuple[int, int], facing: Direction, label: str

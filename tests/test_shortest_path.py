@@ -13,10 +13,12 @@ from krilly.strategy.shortest_path import (
     LEGACY_COST,
     Leg,
     MoveCost,
+    chunk_legs,
     describe_legs,
     direction_between,
     path_cost,
     path_to_legs,
+    split_legs,
     route,
     shortest_path,
     turns_in,
@@ -238,3 +240,44 @@ def test_known_restriction_matters_after_a_partial_search():
     optimistic = shortest_path(ex.maze, ex.maze.start)      # 未探索も通れると仮定
     assert path_cost(safe) >= path_cost(optimistic)
     assert len(ex.visited) < ex.maze.size ** 2              # 未探索セルが残っている
+
+
+# --- 区間長の上限 (#85) -----------------------------------------------------
+def test_a_long_leg_is_split_into_pieces_of_at_most_the_cap():
+    """長い直進は上限ごとに割る。0 なら無制限 (#85 以前の挙動)。"""
+    legs = [Leg(Direction.N, 7), Leg(Direction.E, 1), Leg(Direction.S, 4)]
+    assert [(l.direction, l.cells) for l in split_legs(legs, 4)] == [
+        (Direction.N, 4), (Direction.N, 3), (Direction.E, 1), (Direction.S, 4)]
+    assert split_legs(legs, 0) == legs          # 無制限
+    assert sum(l.cells for l in split_legs(legs, 3)) == sum(l.cells for l in legs)
+
+
+def test_splitting_alone_does_nothing_unless_the_chunker_breaks_there():
+    """**分割は束ね方とセットで初めて効く。**
+
+    ``CellMotion.queue_move`` は同じ向きの予約を繋いで 1 つの長い区間にしてしまう
+    (丸めるのは直交する向きの変更だけ)。位置で 2 本ずつ切るだけだと、割った 2 本が
+    同じまとまりに入って**元の 1 動作に戻る** — 停止も補正も増えない。
+    """
+    legs = split_legs([Leg(Direction.N, 7), Leg(Direction.E, 1)], 4)
+    naive = [legs[i:i + 2] for i in range(0, len(legs), 2)]
+    assert naive[0] == [Leg(Direction.N, 4), Leg(Direction.N, 3)]   # 繋がって元通り
+    chunks = chunk_legs(legs, 2)
+    assert chunks == [[Leg(Direction.N, 4)],
+                      [Leg(Direction.N, 3), Leg(Direction.E, 1)]]
+    assert all(len({leg.direction for leg in c}) == len(c) for c in chunks)
+
+
+def test_chunking_matches_the_old_grouping_when_no_leg_was_split():
+    """割っていない経路では、まとめ方は従来どおり ``size`` 本ずつ。"""
+    legs = [Leg(d, 1) for d in (Direction.N, Direction.E, Direction.S,
+                                Direction.W, Direction.N)]
+    assert [len(c) for c in chunk_legs(legs, 2)] == [2, 2, 1]
+    assert [len(c) for c in chunk_legs(legs, 1)] == [1, 1, 1, 1, 1]
+
+
+def test_path_to_legs_applies_the_cap():
+    """``path_to_legs`` に上限を渡すと、圧縮した直後に割る。"""
+    path = [(0, y) for y in range(8)]           # 北へ 7 セル
+    assert [l.cells for l in path_to_legs(path)] == [7]
+    assert [l.cells for l in path_to_legs(path, 4)] == [4, 3]

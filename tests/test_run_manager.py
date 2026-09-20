@@ -341,3 +341,54 @@ def test_a_lower_margin_accepts_a_run_the_old_one_refused(explorer):
     need = bold.estimate_s(legs)
     # 1.2 倍ぶんは足りるが 1.5 倍には足りない残り時間
     assert bold.time_margin * need < 1.35 * need < safe.time_margin * need
+
+
+# --- 区間長の上限 (#85) -----------------------------------------------------
+def test_the_route_is_capped_and_the_estimate_counts_the_extra_motions():
+    """長い直進を割ると**動作が増え、見積もりもそのぶん伸びる**こと (#85)。
+
+    割った区間を繋いでしまうと停止も補正も増えないので、:func:`chunk_legs` は
+    同じ方角の境目で必ず切る。見積もりがそれを数えていないと、実機より短い時間を
+    信じて走行を始めてしまう。
+    """
+    from krilly.solver.maze import Maze
+    from krilly.strategy.explorer import Explorer
+
+    maze = Maze(16)                      # 壁なし = スタートからゴールまで直進できる
+    maze.set_outer_walls()
+    ex = Explorer(maze, cell=(0, 0))
+    ex.known.update({(x, y) for x in range(16) for y in range(16)})
+
+    free = RunManager(ex, chain_legs=2, max_leg_cells=0)
+    capped = RunManager(ex, chain_legs=2, max_leg_cells=4)
+    long_legs = free.speed_legs(Direction.N)
+    short_legs = capped.speed_legs(Direction.N)
+    assert max(leg.cells for leg in long_legs) > 4
+    assert max(leg.cells for leg in short_legs) <= 4
+    assert (sum(leg.cells for leg in short_legs)
+            == sum(leg.cells for leg in long_legs))          # 距離は同じ
+    assert capped.motions(short_legs) > free.motions(long_legs)
+    assert capped.estimate_s(short_legs) > free.estimate_s(long_legs)
+
+
+def test_the_cap_costs_nothing_on_the_board_that_is_on_the_floor():
+    """床の 8x8 (excerpt8_2015) は最長区間が 4 セルなので、上限 4 はタダ (#85)。
+
+    **上限の値段は盤面で全く違う**: ここでは 0 秒だが、16x16 の大会迷路は最短経路の
+    最長区間の中央値が 11.5 セルあるので、同じ上限が最速ランを 48 本 -> 44 本に減らす
+    (:mod:`tests.test_sim` 側で固定してある)。
+    """
+    from pathlib import Path
+
+    from krilly.solver.maze import Maze
+    from krilly.strategy.explorer import Explorer
+
+    truth = Maze.from_ascii(
+        Path("mazes/excerpt8_2015.txt").read_text(encoding="utf-8"))
+    ex = Explorer(truth, cell=truth.start)
+    ex.known.update({(x, y) for x in range(truth.size) for y in range(truth.size)})
+    free = RunManager(ex, chain_legs=2, max_leg_cells=0)
+    capped = RunManager(ex, chain_legs=2, max_leg_cells=4)
+    assert capped.speed_legs(Direction.N) == free.speed_legs(Direction.N)
+    assert capped.estimate_s(capped.speed_legs(Direction.N)) == pytest.approx(
+        free.estimate_s(free.speed_legs(Direction.N)))

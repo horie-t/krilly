@@ -171,12 +171,70 @@ def _reconstruct(prev, origin, node) -> list[tuple[int, int]]:
     return cells
 
 
-def path_to_legs(path: list[tuple[int, int]]) -> list[Leg]:
-    """セル列を「方角 + セル数」の区間列へ run-length 圧縮する。"""
+def path_to_legs(path: list[tuple[int, int]], max_cells: int = 0) -> list[Leg]:
+    """セル列を「方角 + セル数」の区間列へ run-length 圧縮する。
+
+    ``max_cells`` を渡すと、それより長い区間を分割する (0 なら無制限)。
+    理由は :func:`split_legs` を見ること。
+    """
     if len(path) < 2:
         return []
     dirs = [direction_between(path[i], path[i + 1]) for i in range(len(path) - 1)]
-    return [Leg(d, sum(1 for _ in group)) for d, group in groupby(dirs)]
+    legs = [Leg(d, sum(1 for _ in group)) for d, group in groupby(dirs)]
+    return split_legs(legs, max_cells)
+
+
+def split_legs(legs: list[Leg], max_cells: int) -> list[Leg]:
+    """``max_cells`` セルを超える区間を分割する (0 なら何もしない)。
+
+    **1 区間 = 1 回の連続移動**であり、その間はカメラの位置補正も進路確認も入らない
+    (どちらもまとまりの先頭でしか行わない)。横ずれは進んだ距離に比例して育ち、
+    廊下の余裕は**片側 21.4mm しかない**ので、区間が長いほど壁に擦る:
+
+    - 直接の実測は #87 の「軸合わせ済み 4 セル横移動 @0.30m/s (黒床)」で
+      **横ずれ最悪 11.2mm / 720mm**。距離に比例させると 7 セルで **19.6mm =
+      余裕の 92%** になる (カメラ補正が残す 2-3mm と壁の据え付け誤差を数える前)
+    - 角度で見ると 4 セルなら 1.70° まで許されるが **7 セルでは 0.97°** で、
+      実測の方位残差 (長い区間で 0.2-0.9°、外れ値 1.42°) の**分布の中に入る**
+    - 進路確認が見えるのは南北 1 セル先・東西 2 セル先まで (#89) なので、
+      7 セル区間は後半 5 セルを地図だけで走ることになる
+
+    既定を 4 にしているのは、**直接の実測がある最長の長さ**だから。実機で 6-7 セルの
+    区間を走ると実際に擦った (#85)。
+    """
+    if max_cells <= 0:
+        return list(legs)
+    out: list[Leg] = []
+    for leg in legs:
+        remaining = leg.cells
+        while remaining > max_cells:
+            out.append(Leg(leg.direction, max_cells))
+            remaining -= max_cells
+        out.append(Leg(leg.direction, remaining))
+    return out
+
+
+def chunk_legs(legs: list[Leg], size: int) -> list[list[Leg]]:
+    """区間列を「1 動作で走るまとまり」に切る (#80)。
+
+    ``size`` 本ずつ束ねるが、**同じ方角が続くところでは必ず切る**。
+    :meth:`~krilly.motion.cell_motion.CellMotion.queue_move` は同じ向きの予約を
+    繋いで 1 つの長い区間にしてしまうので (丸めるのは直交する向きの変更だけ)、
+    切らないと :func:`split_legs` で分けた区間がそのまま元に戻り、**停止も補正も
+    増えない**。分割を実装するとき最初に踏む穴なので、束ねる側に寄せてある。
+    """
+    size = max(1, size)
+    chunks: list[list[Leg]] = []
+    current: list[Leg] = []
+    for leg in legs:
+        if current and (len(current) >= size
+                        or current[-1].direction is leg.direction):
+            chunks.append(current)
+            current = []
+        current.append(leg)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def path_cost(
