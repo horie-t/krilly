@@ -150,7 +150,7 @@ class Difficulty:
     """実機で試す価値を表す指標 (大きいほど厳しい)。"""
 
     walls: int
-    posts: int
+    posts: int             # 実際に立てる柱の本数 (ゴール中央の 1 本を含まない)
     search_steps: int          # 探索の手数
     path_cells: int            # 最速経路のセル数
     legs: int                  # 最速経路の区間数

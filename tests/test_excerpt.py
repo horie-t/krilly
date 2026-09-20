@@ -11,6 +11,7 @@ from krilly.sim.excerpt import (
     longest_blind_run,
     pieces_needed,
 )
+from krilly.sim.check import goal_entrances
 from krilly.solver.maze import Direction, Maze
 
 
@@ -134,3 +135,29 @@ def test_the_chosen_excerpt_is_buildable_and_harder():
     assert metrics.blind_cross >= 2      # 5x5 と practice8 は 0
     assert metrics.no_wall_cells >= 3    # 赤帯が 1 本も写らないセル (5x5 は 0)
     assert metrics.path_cells >= 20
+
+
+def test_the_second_excerpt_is_buildable_and_has_a_longer_search():
+    """2 面目 (2015 予選 (8,1)) が手持ちちょうどで組め、探索が長いこと (#85)。
+
+    **直交の補正なしは 2 で 1 面目と同じ** — 壁 80 枚に収まる切り出し 73 件すべてが
+    2 以下で、9x9 は柱が 99 本要って手持ち 85 本では届かないので、ここは上限に
+    張り付いている。この盤面が足すのは探索の長さと、**進行方向 (Y) の補正なし 5 連続**。
+    """
+    from pathlib import Path
+
+    from krilly.sim.check import check_maze, wall_counts
+    from scripts.maze_excerpt import measure
+
+    maze = Maze.from_ascii(
+        Path("mazes/excerpt8_2015.txt").read_text(encoding="utf-8"))
+    counts = wall_counts(maze)
+    assert check_maze(maze).ok
+    assert counts.total == 80 and counts.posts == 80     # 手持ち 80 枚 / 85 本ちょうど
+    assert len(goal_entrances(maze)) == 1
+
+    metrics = measure(maze)
+    assert metrics.posts == 80                           # 格子点 81 ではない
+    assert metrics.search_steps >= 39                    # excerpt8 は 22 手
+    assert metrics.blind_y >= 5
+    assert metrics.blind_cross >= 2

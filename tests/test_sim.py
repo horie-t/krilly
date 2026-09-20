@@ -148,11 +148,13 @@ def test_the_practice_mazes_are_buildable_and_legal():
     壁を抱えていた (2x2 が 1 つの区画になっていなかった)。直したぶん practice8 は
     70 -> 71 枚になったが、手持ちは 80 枚あるので問題ない。
     """
-    for name, size in (("practice5", 5), ("practice8", 8), ("excerpt8", 8)):
+    for name, size in (("practice5", 5), ("practice8", 8),
+                       ("excerpt8", 8), ("excerpt8_2015", 8)):
         m = Maze.from_ascii((MAZE_DIR / f"{name}.txt").read_text(encoding="utf-8"))
         assert m.size == size, name
         assert wall_counts(m).total <= WALL_STOCK, name
-        assert (size + 1) ** 2 <= POST_STOCK, name
+        # 柱は格子点の数ではなく**実際に立てる本数**で見る (ゴール中央の 1 本は無い)。
+        assert wall_counts(m).posts <= POST_STOCK, name
         assert check_maze(m, wall_budget=WALL_STOCK).ok, name
 
 

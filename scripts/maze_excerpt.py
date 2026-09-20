@@ -16,8 +16,9 @@
     # 手持ちの壁 70 枚に収まるものだけ
     python -m scripts.maze_excerpt --size 8 --wall-budget 70 --maze mazes/contest/*.txt
 
-    # 選んだものを書き出す (--top 1 の 1 面)
+    # 選んだものを書き出す (既定は 1 位、--rank で順位を選ぶ)
     python -m scripts.maze_excerpt --size 7 --maze mazes/contest/*.txt --out mazes/excerpt7.txt
+    python -m scripts.maze_excerpt --size 8 --maze mazes/contest/*.txt --rank 2 --out mazes/excerpt8_2015.txt
 """
 
 from __future__ import annotations
@@ -69,7 +70,9 @@ def measure(maze: Maze, max_steps: int = 2000) -> Difficulty | None:
     legs = path_to_legs(path)
     counts = wall_counts(maze)
     return Difficulty(
-        walls=counts.total, posts=(maze.size + 1) ** 2,
+        # 柱は**実際に立てる本数** (格子点 (N+1)^2 からゴール中央の 1 本を引いたもの)。
+        # 格子点の数をそのまま出すと 8x8 が 81 本に見え、手持ちの照らし合わせが 1 本ずれる。
+        walls=counts.total, posts=counts.posts,
         search_steps=ex.steps, path_cells=len(path) - 1, legs=len(legs),
         longest_leg=max(leg.cells for leg in legs),
         blind_x=longest_blind_run(maze, path, 0),
@@ -97,7 +100,10 @@ def main() -> int:
     p.add_argument("--max-stranded", type=int, default=4,
                    help="到達できないセルの上限 (窓を切ると必ず数個は出る)")
     p.add_argument("--top", type=int, default=10, help="表示する件数")
-    p.add_argument("--out", default=None, help="1 位を書き出すファイル")
+    p.add_argument("--out", default=None, help="--rank 位を書き出すファイル")
+    p.add_argument("--rank", type=int, default=1, metavar="N",
+                   help="--out で書き出す順位 (既定 1)。**1 位が床にあるとは限らない** — "
+                        "指標が同点なら組みやすさや探索の長さで選ぶことがある")
     args = p.parse_args()
     setup_logging()
 
@@ -148,9 +154,13 @@ def main() -> int:
     for metrics, name, _maze in found[:args.top]:
         log.info("  %-28s %s", name, metrics.describe())
     if args.out:
-        best, name, maze = found[0]
+        if not 1 <= args.rank <= len(found):
+            log.error("--rank %d は候補 %d 件の範囲外", args.rank, len(found))
+            return 1
+        best, name, maze = found[args.rank - 1]
         Path(args.out).write_text(maze.to_ascii() + "\n", encoding="utf-8")
-        log.info("1 位 (%s) を %s に書き出した:\n%s", name, args.out, maze.to_ascii())
+        log.info("%d 位 (%s) を %s に書き出した:\n%s",
+                 args.rank, name, args.out, maze.to_ascii())
     return 0
 
 
