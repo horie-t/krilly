@@ -3,7 +3,8 @@
 実機フレームは ``tests/data/white_tops`` (黒い床・EV -2・緑のフェルトで覆った機体、
 同じセル)。``wy_a`` は front/right が白・back/left が黄、``wy_b`` はその逆、
 ``on_0w_2s`` は柱だけで機体を光沢の強い右へ 15mm ずらしたもの (壁なしで一番
-危ない形)、``on_4w_2`` は赤い壁 4 枚。
+危ない形)、``on_4w_2`` は赤い壁 4 枚、``wy_a_s`` は白い壁を front/right の 2 枚だけ
+立てて機体を右へ ~13mm ずらしたもの (白い帯と床の光沢が同じ ROI に並ぶ)。
 """
 
 from pathlib import Path
@@ -111,3 +112,24 @@ def test_red_walls_read_exactly_as_before():
     for edge in BODY_DIRS:
         assert both[edge].source == RED
         assert tuple(both[edge]) == tuple(red_only[edge])
+
+
+def test_white_walls_next_to_the_glossy_floor_with_the_machine_off_centre():
+    """白い壁 2 枚 + 壁なし 2 辺を、光沢の強い右へずらした位置で。"""
+    det = WallDetector(calibrated_config(white_tops=True, neighbors=True))
+    measured = det.measure(_frame("wy_a_s"))
+    assert det.detect(_frame("wy_a_s")) == {"front": True, "back": False,
+                                             "left": False, "right": True}
+    for edge in ("front", "right"):
+        assert measured[edge][0] >= PATH_BLOCK_MIN_FRACTION
+    for edge in ("back", "left"):
+        assert measured[edge][0] <= NEIGHBOR_CLEAR_MAX_FRACTION
+
+
+def test_far_neighbour_edges_stay_undecided_when_only_white_bands_are_seen():
+    """機体の左右のずれは赤い帯からしか測らないので、白い帯しか無いセルでは
+    遠い側の辺を「壁なし」と言い切れない (#89 の飽和対策がそのまま効く)。"""
+    det = WallDetector(calibrated_config(white_tops=True, neighbors=True))
+    measured = det.measure(_frame("wy_a_s"))
+    assert det.lateral_shift_px(measured) is None
+    assert "right" not in det.neighbor_walls(measured).get("right", {})
