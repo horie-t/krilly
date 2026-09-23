@@ -168,3 +168,24 @@ def test_a_confident_red_wall_stays_red_even_with_yellow_wood_beyond_it():
     red_only = WallDetector(calibrated_config()).measure(frame)
     assert both["back"].source == RED
     assert tuple(both["back"]) == tuple(red_only["back"])
+
+
+def test_a_white_wall_whose_saturation_straddles_the_old_cap_reads_full_strength():
+    """始点の西の白い壁 (S 中央 77 / 上側 5% 86)。上限 80 では帯の 27% が落ちて 0.29。
+
+    白の彩度は壁ごと・AWB のロックごとに動くので、上限は白の実測の端ではなく
+    落としたい側 (テープ S 180-) との中間に置く。帯が全部残れば他の白い壁と同じ強さ。
+    """
+    det = WallDetector(calibrated_config(white_tops=True))
+    measured = det.measure(_frame("start_west_s77"))
+    for edge in ("back", "left", "right"):          # 始点の 3 壁 (白・白・黄)
+        assert measured[edge][0] >= 0.40, (edge, measured[edge])
+        assert measured[edge].source == WHITE_YELLOW
+    assert measured["front"][0] <= NEIGHBOR_CLEAR_MAX_FRACTION
+
+
+def test_the_saturation_cap_sits_between_white_and_the_tape():
+    from krilly.perception.wall_detect import CALIBRATED_WHITE_YELLOW
+
+    # 白の実測の上端 86 (始点の西) とテープ 180 の両方から 30 以上離す
+    assert 86 + 30 <= CALIBRATED_WHITE_YELLOW.white_s_max <= 180 - 30
