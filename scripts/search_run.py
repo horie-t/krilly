@@ -90,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", type=int, default=0, help="SPI デバイス/CE (既定 0)")
     p.add_argument("--size", type=int, default=None,
                    help="迷路サイズ (既定 maze.yaml の grid_size=16)")
+    p.add_argument("--goal", default=None, metavar="X,Y[,X1,Y1]",
+                   help="ゴールのセル (既定は中央)。3x3 でゴールを隅に置くときなど (#125)")
     add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.4, help="動作の前後で止まる秒数")
@@ -140,6 +142,7 @@ def main() -> None:
     maze_cfg = load_maze_config()
     maze = Maze(args.size) if args.size else Maze.from_config(maze_cfg)
     maze.set_outer_walls()
+    maze.set_goal_arg(args.goal)
     explorer = Explorer(maze, holonomic=not args.turn_in_place)
     neighbors = not args.no_neighbors
     detector = WallDetector(calibrated_config(neighbors=neighbors,

@@ -92,3 +92,41 @@ def test_every_script_that_opens_the_camera_uses_the_shared_args(name):
         if "Camera(" in line and "camera_kwargs" not in line and "picam2" not in line:
             # 引数なしの Camera() は露出オプションが効かない
             assert "Camera()" not in line, f"{name}: {line.strip()} が引数を渡していない"
+
+
+# --- ゴールを隅へ動かす (#125: 黒い床が 3x3 分しかない) ----------------------
+
+@pytest.mark.parametrize("module", SCRIPTS, ids=IDS)
+def test_goal_defaults_to_the_centre_and_can_be_moved(module):
+    from krilly.solver.maze import Maze
+
+    assert module.build_parser().parse_args([]).goal is None
+    args = module.build_parser().parse_args(["--size", "3", "--goal", "2,2"])
+    maze = Maze(args.size)
+    maze.set_goal_arg(args.goal)
+    assert maze.goal_cells() == [(2, 2)]
+
+
+def test_the_white_goal_board_makes_the_search_pass_beside_the_white_wall():
+    """``mazes/white_goal3.txt``: 探索は (1,2) を通り、ゴールの西の壁 (白) の真横に来る。
+    そこで白を読めなければ、楽観的な flood fill はその壁を抜けて東へ入ろうとする。"""
+    from pathlib import Path
+
+    from krilly.sim.sense import sense, sense_neighbors
+    from krilly.solver.maze import Direction, Maze
+    from krilly.strategy.explorer import Explorer
+
+    truth = Maze.from_ascii(Path("mazes/white_goal3.txt").read_text())
+    assert truth.goal_cells() == [(2, 2)]
+    assert truth.has_wall(2, 2, Direction.W) and not truth.has_wall(2, 2, Direction.S)
+    maze = Maze(3)
+    maze.set_outer_walls()
+    maze.set_goal_arg("2,2")
+    ex = Explorer(maze, holonomic=True)
+    cells = [ex.cell]
+    while not ex.at_goal:
+        ex.observe(sense(truth, ex.cell, ex.facing), sense_neighbors(truth, ex.cell, ex.facing))
+        for step in ex.plan_leg(2):
+            ex.advance(step)
+        cells.append(ex.cell)
+    assert (1, 2) in cells and cells[-1] == (2, 2)
