@@ -55,6 +55,7 @@ from krilly.perception.wall_detect import (
     WallDetector,
     add_wall_args,
     calibrated_config,
+    seed_start_enabled,
     path_block_threshold,
     path_check_slots,
 )
@@ -167,6 +168,10 @@ def main() -> None:
                                               white_tops=args.white_tops))
     if args.white_tops:
         log.info("白/黄の壁上面も読む (#125、黒い床専用)")
+    if seed_start_enabled(args):
+        seeded = explorer.seed_start()
+        log.info("始点の壁を規定から書き込んだ: %s (#126、--no-seed-start で無効)",
+                 "".join(d.name for d in seeded))
     pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z
@@ -332,6 +337,13 @@ def main() -> None:
             if off.saturated:
                 log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
                          "/".join(off.saturated))
+            # 補正できたかを覚える (#126)。始点・終点で補正できないと、次の経路の
+            # その側のまとまりを 1 区間に切る (RunManager.chunks)。
+            if (cell in manager.unfixable) != (not off.measured):
+                log.info("  位置補正: セル %s は%s", cell,
+                         "補正できる" if off.measured else
+                         "補正できない (白/黄の壁か壁なし) -> ここに出入りするまとまりは 1 区間")
+            manager.mark_fix(cell, off.measured)
             if not off.measured:
                 return off
             apply_cell_offset(est, cell_center(cell, maze_cfg.cell_pitch_m),
@@ -563,24 +575,26 @@ def main() -> None:
             return None
 
         # -- Leg 列の実行 (復帰・最速: 複数セルを 1 動作で) ---------------------
-        def leg_chunks(legs: list[Leg]) -> list[list[Leg]]:
+        def leg_chunks(legs: list[Leg], origin: tuple[int, int]) -> list[list[Leg]]:
             """止まらずに走る区間のまとまりに切る (#80)。
 
             旋回する走り方では繋がない (区間の間に旋回が入るので必ず止まる)。
             まとまりの**先頭でしか位置補正もカメラの進路確認もできない**ので、
             長くするほど誤差の蓄積に賭けることになる。
 
-            :func:`chunk_legs` は **RunManager の見積もりと同じもの**を使う。別々に
+            :meth:`RunManager.chunks` は **見積もりと同じもの**を使う。別々に
             持つと「見積もりは繋ぐつもりの数、実機は繋がない数」で静かにずれる。
+            補正できない始点・終点の側を 1 区間にする切り方 (#126) もそこに入っている。
             """
-            size = 1 if args.turn_in_place else max(1, args.chain_legs)
-            return chunk_legs(legs, size)
+            if args.turn_in_place:
+                return chunk_legs(legs, 1)
+            return manager.chunks(legs, origin)
 
         def execute_legs(
             legs: list[Leg], cell: tuple[int, int], facing: Direction, label: str
         ) -> tuple[tuple[int, int], Direction] | None:
             log.info("%s: %s", label, describe_legs(legs))
-            for chunk in leg_chunks(legs):
+            for chunk in leg_chunks(legs, cell):
                 head = chunk[0]
                 if args.turn_in_place:
                     facing = turn_to(facing, head.direction)

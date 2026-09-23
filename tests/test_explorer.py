@@ -360,3 +360,47 @@ def test_neighbour_sensing_reaches_the_goal_with_fewer_stops():
         for d in Direction:
             assert ex_fast.maze.has_wall(*cell, d) is truth.has_wall(*cell, d)
     assert ex_fast.known >= ex_fast.visited
+
+
+# --- 始点の壁を規定から書く (#126) ---------------------------------------------
+
+def _fresh(size: int = 3) -> Explorer:
+    maze = Maze(size)
+    maze.set_outer_walls()
+    return Explorer(maze)
+
+
+def test_seed_start_writes_the_three_walls_behind_and_beside_the_machine():
+    ex = _fresh()
+    assert set(ex.seed_start()) == {Direction.E, Direction.S, Direction.W}
+    assert ex.maze.has_wall(0, 0, Direction.E)               # 内壁: これが本題
+    assert ex.observed[(0, 0)] >= {Direction.E, Direction.S, Direction.W}
+    # 共有辺なので東隣のセルの西も観測済みになる
+    assert Direction.W in ex.observed[(1, 0)] and ex.maze.has_wall(1, 0, Direction.W)
+
+
+def test_seed_start_never_declares_the_opening():
+    """前 (北) は書かない。規定どおりでない盤面で見えない壁を「無し」にしないため。"""
+    ex = _fresh()
+    ex.seed_start()
+    assert Direction.N not in ex.observed[(0, 0)]
+    assert not ex.is_known((0, 0))
+
+
+def test_a_white_start_wall_the_camera_misses_stays_a_wall():
+    """カメラが白い東の壁を読み損ねて「無し」と言っても、書いた壁は消えない。"""
+    ex = _fresh()
+    ex.seed_start()
+    ex.observe({FRONT: False, BACK: True, LEFT: True, RIGHT: False})
+    assert ex.maze.has_wall(0, 0, Direction.E)
+    assert ex.conflicts == 1
+
+
+def test_a_board_whose_start_is_not_competition_shaped_fails_loudly():
+    """自宅の twisty8 は北が壁で東へ出る。書き込むと始点が閉じ、到達不能で止まる
+    (見えない壁へ突っ込む側には倒れない)。"""
+    ex = _fresh()
+    ex.seed_start()
+    ex.observe({FRONT: True, BACK: True, LEFT: True, RIGHT: False})
+    with pytest.raises(Unreachable):
+        ex.plan()

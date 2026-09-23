@@ -392,3 +392,60 @@ def test_the_cap_costs_nothing_on_the_board_that_is_on_the_floor():
     assert capped.speed_legs(Direction.N) == free.speed_legs(Direction.N)
     assert capped.estimate_s(capped.speed_legs(Direction.N)) == pytest.approx(
         free.estimate_s(free.speed_legs(Direction.N)))
+
+
+# --- 補正できない始点・終点 (#126) -----------------------------------------------
+# 位置補正はまとまりの先頭でしか入らない。始点・終点の壁が白/黄だとそこで補正が
+# 入らず、補正の無い区間が「前の走行の最後のまとまり + 次の最初のまとまり」に伸びる。
+
+from krilly.strategy.shortest_path import chunk_legs, walk_legs  # noqa: E402
+
+N1, E2, N3, W1 = (Leg(Direction.N, 1), Leg(Direction.E, 2),
+                  Leg(Direction.N, 3), Leg(Direction.W, 1))
+
+
+def test_chunk_legs_can_shorten_only_the_first_or_last_chunk():
+    legs = [N1, E2, N3, W1]
+    assert chunk_legs(legs, 2) == [[N1, E2], [N3, W1]]
+    assert chunk_legs(legs, 2, head=1) == [[N1], [E2, N3], [W1]]
+    assert chunk_legs(legs, 2, tail=1) == [[N1, E2], [N3], [W1]]
+    assert chunk_legs(legs, 2, head=1, tail=1) == [[N1], [E2, N3], [W1]]
+    assert chunk_legs([N1, E2], 2, head=1, tail=1) == [[N1], [E2]]
+
+
+def test_walk_legs_ends_where_the_legs_end():
+    assert walk_legs((0, 0), [N1, E2, N3, W1]) == (1, 4)
+
+
+def test_an_unfixable_endpoint_keeps_the_blind_stretch_within_chain_legs(explorer):
+    mgr = RunManager(explorer, chain_legs=2)
+    start = explorer.maze.start
+    legs = [N1, E2, N3, W1]
+    end = walk_legs(start, legs)
+    assert mgr.chunks(legs, start) == [[N1, E2], [N3, W1]]
+    mgr.mark_fix(start, False)
+    assert mgr.chunks(legs, start)[0] == [N1]            # 始点を出る側
+    mgr.mark_fix(end, False)
+    assert mgr.chunks(legs, start)[-1] == [W1]           # 行き先に入る側
+    mgr.mark_fix(start, True)
+    mgr.mark_fix(end, True)
+    assert mgr.chunks(legs, start) == [[N1, E2], [N3, W1]]
+
+
+def test_the_estimate_pays_for_the_extra_stops(explorer):
+    """見積もりも実機と同じ切り方で数える (でないと予算判断が甘くなる)。"""
+    mgr = RunManager(explorer, chain_legs=2)
+    start = explorer.maze.start
+    legs = [N1, E2, N3, W1]
+    before = mgr.estimate_s(legs, origin=start)
+    mgr.mark_fix(start, False)
+    assert mgr.motions(legs, start) == 3
+    assert mgr.estimate_s(legs, origin=start) == pytest.approx(before + mgr.straight_time_s)
+    # 出発点を渡さない見積もりは従来どおり (端点を気にしない)
+    assert mgr.motions(legs) == 2
+
+
+def test_stopping_at_every_leg_is_unaffected(explorer):
+    mgr = RunManager(explorer, chain_legs=1)
+    mgr.mark_fix(explorer.maze.start, False)
+    assert mgr.chunks([N1, E2], explorer.maze.start) == [[N1], [E2]]

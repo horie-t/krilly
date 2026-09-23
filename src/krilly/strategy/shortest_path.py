@@ -214,7 +214,8 @@ def split_legs(legs: list[Leg], max_cells: int) -> list[Leg]:
     return out
 
 
-def chunk_legs(legs: list[Leg], size: int) -> list[list[Leg]]:
+def chunk_legs(legs: list[Leg], size: int, head: int | None = None,
+               tail: int | None = None) -> list[list[Leg]]:
     """区間列を「1 動作で走るまとまり」に切る (#80)。
 
     ``size`` 本ずつ束ねるが、**同じ方角が続くところでは必ず切る**。
@@ -222,19 +223,37 @@ def chunk_legs(legs: list[Leg], size: int) -> list[list[Leg]]:
     繋いで 1 つの長い区間にしてしまうので (丸めるのは直交する向きの変更だけ)、
     切らないと :func:`split_legs` で分けた区間がそのまま元に戻り、**停止も補正も
     増えない**。分割を実装するとき最初に踏む穴なので、束ねる側に寄せてある。
+
+    ``head`` / ``tail`` は**最初 / 最後のまとまりの本数の上限** (#126)。位置補正は
+    まとまりの先頭でしか入らないので、出発点 (または行き先) で補正できないと、
+    補正の無い区間が隣の走行のまとまりと繋がって倍の長さになる。そこだけ短くする。
     """
     size = max(1, size)
     chunks: list[list[Leg]] = []
     current: list[Leg] = []
     for leg in legs:
-        if current and (len(current) >= size
+        limit = max(1, head) if head is not None and not chunks else size
+        if current and (len(current) >= limit
                         or current[-1].direction is leg.direction):
             chunks.append(current)
             current = []
         current.append(leg)
     if current:
         chunks.append(current)
+    if tail is not None and chunks and len(chunks[-1]) > max(1, tail):
+        last = chunks.pop()
+        cut = len(last) - max(1, tail)
+        chunks += [last[:cut], last[cut:]]
     return chunks
+
+
+def walk_legs(start: tuple[int, int], legs: list[Leg]) -> tuple[int, int]:
+    """``legs`` を ``start`` から走り終えたときのセル。"""
+    x, y = start
+    for leg in legs:
+        dx, dy = leg.direction.delta
+        x, y = x + dx * leg.cells, y + dy * leg.cells
+    return (x, y)
 
 
 def path_cost(

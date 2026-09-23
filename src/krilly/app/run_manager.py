@@ -38,6 +38,7 @@ from krilly.strategy.shortest_path import (
     path_to_legs,
     shortest_path,
     turns_in,
+    walk_legs,
 )
 
 
@@ -168,6 +169,12 @@ class RunManager:
     max_leg_cells: int = 4
     cost: MoveCost = DEFAULT_COST
 
+    #: 止まっても**位置補正ができなかった**セル (#126)。始点・終点の壁の上面は白・黄で
+    #: よく (規定 2-1)、白・黄の帯は位置に使わないので、そこでは補正が入らない。
+    #: 位置補正はまとまりの先頭でしか入らないから、ここを出発点・行き先にする経路は
+    #: そちら側のまとまりを 1 区間にして、補正の無い区間が ``chain_legs`` を超えない
+    #: ようにする (:meth:`chunks`)。:meth:`mark_fix` で更新する。
+    unfixable: set[tuple[int, int]] = field(default_factory=set, init=False)
     phase: RunPhase = field(default=RunPhase.WAIT, init=False)
     runs_used: int = field(default=0, init=False)
     started_at: float | None = field(default=None, init=False)
@@ -180,7 +187,8 @@ class RunManager:
     def remaining_s(self, now: float) -> float:
         return self.time_limit_s - self.elapsed_s(now)
 
-    def estimate_s(self, legs: list[Leg], facing: Direction = Direction.N) -> float:
+    def estimate_s(self, legs: list[Leg], facing: Direction = Direction.N,
+                   origin: tuple[int, int] | None = None) -> float:
         """Leg 列の所要時間の見積もり (安全率は掛けない素の値)。
 
         セル数だけでなく**動作の回数**も数える (:meth:`motions`)。連続直進はランプの
@@ -191,18 +199,22 @@ class RunManager:
         機体の前後軸・東西は左右軸の移動になり、所要時間が違いうる。旋回する走り方
         (``holonomic=False``) では常に前を向いて進むので両者は同じで、代わりに旋回の
         時間が乗る。
+
+        ``origin`` (出発セル) を渡すと、補正できない端点で増える停止も数える
+        (:meth:`chunks`)。渡さなければ端点を気にしない切り方になる。
         """
         ns = sum(leg.cells for leg in legs if leg.direction in (Direction.N, Direction.S))
         ew = sum(leg.cells for leg in legs if leg.direction in (Direction.E, Direction.W))
         # 旋回レスでは東西が機体の左右軸 (横移動) になる。旋回するなら常に前を向いて
         # 進むので、東西も南北も同じ時間。
         ew_time = self.lateral_cell_time_s if self.holonomic else self.cell_time_s
-        total = ns * self.cell_time_s + ew * ew_time + self.motions(legs) * self.straight_time_s
+        total = (ns * self.cell_time_s + ew * ew_time
+                 + self.motions(legs, origin) * self.straight_time_s)
         if not self.holonomic:
             total += turns_in(legs, facing) * self.turn_time_s
         return total
 
-    def motions(self, legs: list[Leg]) -> int:
+    def motions(self, legs: list[Leg], origin: tuple[int, int] | None = None) -> int:
         """``legs`` を実行するのに必要な**動作の回数** (#80)。
 
         固定費 (ランプ + 整定 + 撮影 + 停止) は区間ではなく動作に付く。コーナーを
@@ -213,7 +225,33 @@ class RunManager:
         # 同じ方角が続くところでは繋げない (:func:`chunk_legs`) ので、単純な切り上げでは
         # 数が合わない。**区間を分割すると動作が増える**のを見積もりに乗せるため、
         # 実機と同じまとめ方を共有する。
-        return len(chunk_legs(legs, self.chain_legs))
+        return len(self.chunks(legs, origin))
+
+    def chunks(self, legs: list[Leg], origin: tuple[int, int] | None = None
+               ) -> list[list[Leg]]:
+        """``legs`` を止まらずに走るまとまりに切る。**実機 (speed_run) も見積もりもこれ**。
+
+        ``origin`` から出発して、出発点が :attr:`unfixable` なら最初のまとまりを、
+        行き先がそうなら最後のまとまりを 1 区間にする (#126)。そうしないと、補正の
+        無い区間は「前の走行の最後のまとまり + 次の走行の最初のまとまり」になり、
+        ``chain_legs`` 2 でも最大 4 区間を補正なしで走る。3x3 の実測で、白い始点から
+        北1 -> 東2 と繋ぐと着いた先のずれが中央値 -8.8mm / 最大 -15.2mm (赤い始点
+        -5.9 / -8.2mm)。
+        """
+        head = tail = None
+        if origin is not None and self.chain_legs > 1:
+            if origin in self.unfixable:
+                head = 1
+            if walk_legs(origin, legs) in self.unfixable:
+                tail = 1
+        return chunk_legs(legs, self.chain_legs, head, tail)
+
+    def mark_fix(self, cell: tuple[int, int], fixed: bool) -> None:
+        """``cell`` で止まって位置補正ができたかを記録する (:attr:`unfixable`)。"""
+        if fixed:
+            self.unfixable.discard(cell)
+        else:
+            self.unfixable.add(cell)
 
     # -- 経路 -----------------------------------------------------------------
     def _route(
@@ -267,7 +305,8 @@ class RunManager:
                 next_speed = self.speed_legs(facing_after(home, facing))
                 if next_speed is not None:
                     budget = self.restart_dwell_s + self.time_margin * (
-                        self.estimate_s(home) + self.estimate_s(next_speed)
+                        self.estimate_s(home, origin=cell)
+                        + self.estimate_s(next_speed, origin=self.explorer.maze.start)
                     )
                     if self.remaining_s(now) >= budget:
                         self.phase = RunPhase.RETURN_HOME
@@ -284,7 +323,8 @@ class RunManager:
             legs is not None
             and self.runs_used < self.max_runs
             and self.remaining_s(now) >= (self.restart_dwell_s
-                                          + self.time_margin * self.estimate_s(legs))
+                                          + self.time_margin * self.estimate_s(
+                                              legs, origin=self.explorer.maze.start))
         ):
             self.runs_used += 1
             self.phase = RunPhase.SPEED

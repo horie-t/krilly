@@ -131,6 +131,32 @@ class Explorer:
                 self._apply(cell, walls)
         return walls_maze
 
+    def seed_start(self) -> list[Direction]:
+        """始点の区画の壁を競技規定から書き込む (#126)。書いた方角を返す。
+
+        規定 2-3: 始点は四隅のいずれかで、**開口は 1 つ**、機体はその開口を前にして
+        置かれる (書き起こした大会迷路 31 面すべて「開口 1 つ・北」)。だから機体の
+        向き以外の 3 辺は壁と決め打ちでき、観測済み (:attr:`observed`) にも入れる —
+        :func:`~krilly.localization.recovery.verify_cell` がその辺を照合に使える。
+
+        始点の壁の上面は白・黄でもよい (規定 2-1) ので、カメラが読み損ねても地図が
+        正しいようにするための保険。壁は ``sticky_walls`` で後から消えない。
+
+        **開口の側 (前) は書かない。** 「壁なし」を決め打ちすると、規定どおりでない
+        盤面 (自宅の ``twisty8`` は北が壁) で見えていない壁に突っ込む。書くのは壁だけ
+        なので、外れても回り道か「到達不能」で止まる側に倒れる。
+        """
+        x, y = self.cell
+        seeded: list[Direction] = []
+        for d in Direction:
+            if d is self.facing:
+                continue
+            self._mark_observed(self.cell, d)
+            if self.maze.in_bounds(*self.maze.neighbor(x, y, d)):
+                self.maze.set_wall(x, y, d, True)
+            seeded.append(d)
+        return seeded
+
     def _apply(self, cell: tuple[int, int],
                walls_body: dict[str, bool]) -> dict[Direction, bool]:
         """1 セル分の機体相対の壁観測を迷路へ反映する (部分的な観測も受け付ける)。"""
