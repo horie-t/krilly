@@ -53,6 +53,7 @@ from krilly.perception.wall_detect import (
     BODY_DIRS,
     body_walls_to_maze,
     WallDetector,
+    add_wall_args,
     calibrated_config,
     path_block_threshold,
     path_check_slots,
@@ -137,6 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--truth-maze", default=None, metavar="FILE",
                    help="正解ラベルに使う既知形状の迷路 (既定: 走行後に確定した地図)")
     add_camera_args(p)
+    add_wall_args(p)
     return p
 
 
@@ -158,7 +160,10 @@ def main() -> None:
                          max_leg_cells=max(0, args.max_leg_cells),
                          cost=LEGACY_COST if args.turn_in_place else DEFAULT_COST)
     neighbors = not args.no_neighbors
-    detector = WallDetector(calibrated_config(neighbors=neighbors))
+    detector = WallDetector(calibrated_config(neighbors=neighbors,
+                                              white_tops=args.white_tops))
+    if args.white_tops:
+        log.info("白/黄の壁上面も読む (#125、黒い床専用)")
     pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z

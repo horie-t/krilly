@@ -1,4 +1,4 @@
-"""赤い壁上部の検出 (issue #7)。
+"""赤い壁上部の検出 (issue #7)。白・黄の壁上面 (始点・終点、規定 2-1) は #125。
 
 下向きのカメラは迷路の壁を捉える。壁の上部は **赤** に塗られている。
 このモジュールは BGR フレームを赤のマスクと、赤い領域 (壁上部) の重心へと変換する。
@@ -75,6 +75,72 @@ def red_mask_parts(
         parts = [cv2.morphologyEx(cv2.morphologyEx(m, cv2.MORPH_OPEN, k),
                                   cv2.MORPH_CLOSE, k) for m in parts]
     return parts[0], parts[1]
+
+
+@dataclass(frozen=True)
+class WhiteYellowConfig:
+    """白・黄の壁上面を拾うマスクの設定 (#125)。
+
+    競技規定 2-1 は「壁の上面は赤」の例外として、**始点の区画と終点領域の区画の壁の
+    上面を赤・白・黄のいずれか**にしてよいとしている。赤しか見ないと、ゴールの境界の
+    壁 7 枚が全部「開」と読まれ、白い壁に突っ込む。
+
+    **白は明るさの絶対値でも彩度でも拾えない** — 黒い床は天井灯を映して白っぽく
+    光り (V 73-108)、その彩度は起動ごとに S 46-57 から S 11-30 まで動いて白 (S 6-39) と
+    重なった (実測)。分けられるのは**形**だけ: 壁の上面は幅 ~20px の細い帯、床の光沢は
+    広い斑。そこで帯に直交する向きの 1 次元トップハット (``tophat_px`` 幅の opening を
+    引く = 「周囲よりどれだけ明るいか」) を取り、広い光沢を消して細い帯だけを残す。
+    ``tophat_px`` は帯の幅より十分広く、光沢の斑より狭いこと。
+
+    ``white_s_max`` は光沢を分けるためのものでは**ない**。機体を覆うフェルト・テープ
+    (S 180-255) の縁を落とすため。外すとフェルトの縁が BACK で 0.19-0.39 と読める。
+
+    黄は有彩色なので色相で素直に取れる (H 25-29)。**木の床はこの黄に丸ごと入る** —
+    EV -2 で撮った黒い床の外側の木の床は全面が黄と判定された。だから黒い床専用。
+    """
+
+    tophat_px: int = 41          # 帯に直交する向きのトップハット幅 [px]
+    contrast_min: int = 40       # 周囲より明るい量 (V のトップハット) の下限
+    white_s_max: int = 60        # 白とみなす彩度の上限 (フェルト・テープを落とす)
+    yellow_h_lo: int = 18
+    yellow_h_hi: int = 40
+    yellow_s_min: int = 80
+    yellow_v_min: int = 80
+
+
+def white_yellow_mask_parts(
+    bgr: np.ndarray, config: WhiteYellowConfig | None = None, vertical: bool = False,
+    hsv: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """白・黄の壁上面のマスクを ``(white, yellow)`` で返す (どちらも 0/255、#125)。
+
+    ``vertical`` は帯が縦 (LEFT/RIGHT) かどうか。トップハットは帯に**直交する**向きに
+    掛ける (縦帯なら横方向) — 帯に沿った向きに掛けると帯そのものが「広い構造」として
+    消える。``hsv`` を渡せば色空間変換を省く (1 フレームで縦横 2 回呼ぶため)。
+    """
+    cfg = config or WhiteYellowConfig()
+    if hsv is None:
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    kernel = (np.ones((1, cfg.tophat_px), np.uint8) if vertical
+              else np.ones((cfg.tophat_px, 1), np.uint8))
+    contrast = cv2.morphologyEx(np.ascontiguousarray(hsv[..., 2]), cv2.MORPH_TOPHAT, kernel)
+    white = ((contrast >= cfg.contrast_min)
+             & (hsv[..., 1] <= cfg.white_s_max)).astype(np.uint8) * 255
+    yellow = cv2.inRange(
+        hsv,
+        np.array([cfg.yellow_h_lo, cfg.yellow_s_min, cfg.yellow_v_min], dtype=np.uint8),
+        np.array([cfg.yellow_h_hi, 255, 255], dtype=np.uint8),
+    )
+    return white, yellow
+
+
+def white_yellow_mask(
+    bgr: np.ndarray, config: WhiteYellowConfig | None = None, vertical: bool = False,
+    hsv: np.ndarray | None = None,
+) -> np.ndarray:
+    """白または黄の壁上面のマスク (0/255)。:func:`white_yellow_mask_parts` の OR。"""
+    white, yellow = white_yellow_mask_parts(bgr, config, vertical, hsv)
+    return cv2.bitwise_or(white, yellow)
 
 
 #: 色相を信じてよい最低の彩度・明度。**これ未満の画素の H は意味を持たない** —
