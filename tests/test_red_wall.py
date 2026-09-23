@@ -168,3 +168,62 @@ def test_the_hue_band_still_excludes_the_blue_wiring():
     assert 120 < CALIBRATED_RED.h2_lo <= 130
     for hue in (100, 110, 115, 120):                  # 配線が集中する色相
         assert not red_mask(_patch(hue, 150, 200), CALIBRATED_RED).any()
+
+
+# --- 白・黄の壁上面 (#125) ---------------------------------------------------
+
+from krilly.perception.red_wall import (  # noqa: E402
+    WhiteYellowConfig,
+    white_yellow_mask,
+    white_yellow_mask_parts,
+)
+
+
+def _floor(h=120, w=240, v=40):
+    """黒い床 (わずかに青みのある暗い灰)。"""
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    img[:] = _hsv_bgr(103, 50, v)
+    return img
+
+
+def test_a_narrow_white_band_is_picked_up():
+    img = _floor()
+    img[:, 100:120] = _hsv_bgr(105, 20, 170)          # 縦の白い帯 (幅 20px)
+    white, _yellow = white_yellow_mask_parts(img, vertical=True)
+    assert (white[:, 102:118] > 0).mean() > 0.95
+    assert (white[:, :90] > 0).mean() == 0.0
+
+
+def test_a_broad_glossy_patch_is_not_a_wall():
+    """床の光沢は白と同じ色で明るい。**形 (広さ) だけが違う** — トップハットで消える。"""
+    img = _floor()
+    img[:, 40:200] = _hsv_bgr(105, 20, 170)           # 160px の広い光沢
+    white, _yellow = white_yellow_mask_parts(img, vertical=True)
+    assert (white[:, 60:180] > 0).mean() == 0.0
+
+
+def test_the_tophat_runs_across_the_band_not_along_it():
+    """縦帯を横向き用 (vertical=False) で見ると、帯に沿って開くので帯ごと消える。"""
+    img = _floor()
+    img[:, 100:120] = _hsv_bgr(105, 20, 170)
+    assert (white_yellow_mask(img, vertical=False)[:, 100:120] > 0).mean() == 0.0
+
+
+def test_saturated_felt_is_neither_white_nor_yellow():
+    """機体を覆うフェルト (H 98, S 255) の縁は周囲より明るいが、彩度で落ちる。"""
+    img = _floor()
+    img[:, 100:120] = _hsv_bgr(98, 255, 160)
+    assert (white_yellow_mask(img, vertical=True) > 0).sum() == 0
+
+
+def test_a_yellow_band_is_picked_up_by_hue():
+    img = _floor()
+    img[:, 100:120] = _hsv_bgr(27, 200, 180)
+    _white, yellow = white_yellow_mask_parts(img, vertical=True)
+    assert (yellow[:, 100:120] > 0).mean() == 1.0
+
+
+def test_red_is_not_white_or_yellow():
+    img = _floor()
+    img[:, 100:120] = _hsv_bgr(175, 180, 150)
+    assert (white_yellow_mask(img, WhiteYellowConfig(), vertical=True) > 0).sum() == 0

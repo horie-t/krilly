@@ -10,6 +10,9 @@
 2. 機体前後左右 (FRONT/BACK/LEFT/RIGHT) の ROI ごとに赤割合を求め、閾値で壁有無を判定。
 3. ロボットの向き (迷路の N/E/S/W) で機体相対 -> 迷路方角に写像し、Maze へ反映。
 
+始点・終点の壁の上面は白か黄でもよい (競技規定 2-1、#125)。``white_yellow`` を
+設定すると、各 ROI で白・黄のマスクも同じ帯探索に掛け、赤と強い方を採る。
+
 ROI の位置・閾値は実迷路 (セル中央にロボットを置いた画像) で調整する。カメラの
 取付回転 (画像の上=機体のどの向きか) は取付依存なので、ROI をその向きに合わせる。
 画素->地面のメートル投影は本判定には不要 ("辺付近に赤があるか" のみ見る)。
@@ -17,11 +20,18 @@ ROI の位置・閾値は実迷路 (セル中央にロボットを置いた画�
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 
-from krilly.perception.red_wall import RedDetectorConfig, red_mask
+from krilly.perception.red_wall import (
+    RedDetectorConfig,
+    WhiteYellowConfig,
+    red_mask,
+    white_yellow_mask,
+)
 from krilly.solver.maze import Direction
 
 # 機体相対の方向 (FRONT=+x 前, BACK=-x 後, LEFT=+y 左, RIGHT=-y 右)
@@ -113,6 +123,16 @@ def default_rois(width: int = 640, height: int = 480, thickness: int = 70,
 # 出る。最初にそれをやって「ロットが 2 つある」と誤読した。壁の色を測るときは
 # S/V の下限だけを使い、色相では切らないこと (`red_breakdown` の hsv_lost も同じ罠)。
 CALIBRATED_RED = RedDetectorConfig(h2_lo=125, s_min=50, v_min=40)
+
+#: 白・黄の壁上面のマスク (#125)。黒い床・EV -2・緑のフェルトで覆った機体で実測した:
+#: 白い壁の最小 0.46 / 黄の最小 0.455 に対し、柱だけ (壁なし、光沢の強い床へ 15mm
+#: ずらした位置を含む 15 フレーム) の最大 0.006、赤い壁のフレームに掛けても 0.031。
+#: **木の床では使わないこと** — EV -2 では木の床が全面「黄」に入る (実測)。
+CALIBRATED_WHITE_YELLOW = WhiteYellowConfig()
+
+#: :class:`BandReading` の出どころ。
+RED = "red"
+WHITE_YELLOW = "white_yellow"
 
 # 実測した赤帯の位置 [px]。**機体を定規でセル中央に置いた姿勢**から測ること
 # (ここが cell_pose のゼロ点であり、px/mm の基準でもある)。ROI はこの帯を内側に
@@ -425,7 +445,8 @@ def calibrated_neighbor_rois(geometry: CameraGeometry | None = None,
 
 def calibrated_config(threshold: float = 0.08,
                       size: tuple[int, int] = DEFAULT_FRAME_SIZE,
-                      neighbors: bool = False) -> "WallDetectorConfig":
+                      neighbors: bool = False,
+                      white_tops: bool = False) -> "WallDetectorConfig":
     """実機校正済みの WallDetectorConfig を返す (ROI + 赤しきい値 + 帯探索)。
 
     しきい値は #65 の 5x5 手動調査 (``scripts/survey_shot.py``、113 枚 = 452 ラベル、
@@ -454,6 +475,8 @@ def calibrated_config(threshold: float = 0.08,
 
     ``neighbors=True`` で左右の隣セルを読む ROI も足す (#89)。既定で切ってあるのは、
     フレーム端に来る遠い側の帯が実機で本当に読めるかを確かめてから使うため。
+
+    ``white_tops=True`` で白・黄の壁上面も読む (#125、**黒い床専用**)。
     """
     geometry = geometry_for(size)
     rois = calibrated_rois(geometry)
@@ -464,7 +487,15 @@ def calibrated_config(threshold: float = 0.08,
     return WallDetectorConfig(
         rois=rois, slots=slots, threshold=threshold,
         red=CALIBRATED_RED, frame_size=size,
+        white_yellow=CALIBRATED_WHITE_YELLOW if white_tops else None,
     )
+
+
+def add_wall_args(p: argparse.ArgumentParser) -> None:
+    """壁判定の共通引数 (#125)。``hal.camera.add_camera_args`` と同じ形。"""
+    p.add_argument("--white-tops", action="store_true",
+                   help="始点・終点の白/黄の壁上面も壁と読む (競技規定 2-1、#125)。"
+                        "**黒い床専用** (--ev -2 と組で使う)。木の床は全面が黄と読まれる")
 
 
 @dataclass
@@ -495,6 +526,8 @@ class WallDetectorConfig:
     slots: dict[str, WallTarget] = field(default_factory=dict)
     #: 隣セルを「壁なし」と言い切れる赤割合の上限 (これ以上・壁しきい値未満は未確定)。
     neighbor_clear: float = NEIGHBOR_CLEAR_MAX_FRACTION
+    #: 白・黄の壁上面も読む (#125)。None なら赤だけ (従来の挙動)。
+    white_yellow: WhiteYellowConfig | None = None
 
     def target(self, name: str) -> WallTarget:
         """スロット名が見ている対象 (既定は自セルの同名の辺)。"""
@@ -564,21 +597,64 @@ def best_roi_red_fraction(
     return (best_value, chosen, saturated)
 
 
+class BandReading(tuple):
+    """1 スロットの測定 ``(割合, 帯のずれ[px], 飽和したか)`` と、その出どころ。
+
+    ただのタプルとしてそのまま分解できる (既存の呼び出し側は変えなくてよい)。
+    ``source`` は :data:`RED` か :data:`WHITE_YELLOW` (#125)。
+
+    出どころを持たせるのは**位置補正に白・黄の帯を使わない**ため
+    (:func:`krilly.perception.cell_pose.cell_offset`)。壁の有無と進路確認には使うが、
+    帯のずれは赤でしか検証していない — トップハットは壁の白い側面を帯の一部として
+    拾いうるので、帯の中心がずれて見えるおそれがある。位置補正は機体を物理的に
+    動かすので、検証していない証拠で動いてはいけない (#54 と同じ理屈)。
+    """
+
+    source: str
+
+    def __new__(cls, fraction: float, offset: int, saturated: bool,
+                source: str = RED) -> "BandReading":
+        self = super().__new__(cls, (fraction, offset, saturated))
+        self.source = source
+        return self
+
+
 class WallDetector:
     """ROI ごとの赤割合で機体相対の壁有無を判定する。"""
 
     def __init__(self, config: WallDetectorConfig) -> None:
         self.cfg = config
 
-    def _mask(self, bgr: np.ndarray) -> np.ndarray:
-        mask = red_mask(bgr, self.cfg.red)
+    def _exclude(self, mask: np.ndarray) -> np.ndarray:
         for r in self.cfg.exclude:                              # 自己遮蔽領域を除外
             mask[r.y : r.y + r.h, r.x : r.x + r.w] = 0
         return mask
 
+    def _mask(self, bgr: np.ndarray) -> np.ndarray:
+        return self._exclude(red_mask(bgr, self.cfg.red))
+
+    def _white_yellow_masks(self, bgr: np.ndarray) -> dict[bool, np.ndarray]:
+        """白・黄のマスクを帯の向きごとに (``{vertical: mask}``)。使う向きだけ作る。"""
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        needed = {self.cfg.target(name).vertical for name in self.cfg.rois}
+        return {v: self._exclude(white_yellow_mask(bgr, self.cfg.white_yellow, v, hsv))
+                for v in needed}
+
+    def _band(self, mask: np.ndarray, roi: Roi, vertical: bool
+              ) -> tuple[float, int, bool]:
+        if self.cfg.search_px <= 0:
+            return (roi_red_fraction(mask, roi), 0, False)
+        return best_roi_red_fraction(mask, roi, vertical, self.cfg.search_px,
+                                     self.cfg.search_step)
+
     def measure(self, bgr: np.ndarray, shift_px: tuple[int, int] = (0, 0)
-                ) -> dict[str, tuple[float, int, bool]]:
+                ) -> dict[str, BandReading]:
         """各辺の (赤割合, 帯のずれ[px], 飽和したか)。``search_px=0`` なら固定 ROI。
+
+        ``white_yellow`` が設定されていれば、白・黄のマスクでも同じ帯探索を掛け、
+        **割合の大きい方**を返す (#125)。どちらだったかは :class:`BandReading` の
+        ``source`` に残る。赤と白黄を OR した 1 枚で測らないのは、赤い壁の白い側面が
+        トップハットに乗って赤い帯を太らせ、位置の読みを動かさないため。
 
         ``shift_px`` は **ROI を丸ごと平行移動する量** (#85)。ROI はセル中央に居る
         前提で置いてあるので、機体が探索範囲 (±``search_px``) より大きくずれると
@@ -599,18 +675,19 @@ class WallDetector:
                     "ROI が帯から外れて壁を見落とす (#56)"
                 )
         mask = self._mask(bgr)
+        alt = self._white_yellow_masks(bgr) if self.cfg.white_yellow else None
         out = {}
         dx, dy = shift_px
         for name, base in self.cfg.rois.items():
             roi = base if (dx, dy) == (0, 0) else Roi(base.x + dx, base.y + dy,
                                                       base.w, base.h)
             vertical = self.cfg.target(name).vertical
-            if self.cfg.search_px <= 0:
-                out[name] = (roi_red_fraction(mask, roi), 0, False)
-            else:
-                out[name] = best_roi_red_fraction(
-                    mask, roi, vertical, self.cfg.search_px, self.cfg.search_step
-                )
+            reading = BandReading(*self._band(mask, roi, vertical))
+            if alt is not None:
+                other = self._band(alt[vertical], roi, vertical)
+                if other[0] > reading[0]:
+                    reading = BandReading(*other, source=WHITE_YELLOW)
+            out[name] = reading
         return out
 
     def red_fractions(self, bgr: np.ndarray) -> dict[str, float]:
@@ -637,8 +714,10 @@ class WallDetector:
         (あちらは mm に直して推定へ入れる)。ここでは**遠い側の帯がまだ写っているか**を
         判断するためだけに使うので、px のまま扱う。測れなければ None。
         """
+        # 白・黄の帯のずれは検証していないので使わない (BandReading 参照)
         offsets = [float(measured[e][1]) for e in (LEFT, RIGHT)
                    if e in measured and not measured[e][2]
+                   and getattr(measured[e], "source", RED) == RED
                    and measured[e][0] >= max(self.cfg.threshold_for(e),
                                              BAND_SHIFT_MIN_FRACTION)]
         return sum(offsets) / len(offsets) if offsets else None

@@ -48,6 +48,9 @@ labels.csv (正解ラベル付き) を読み、同じフレームを**別の HSV
     # 左右の隣セルまで読めているか (#89)。紫の枠は「未確定」
     python -m scripts.wall_detect --image shot.png --neighbors --out /tmp/walls.png
     python -m scripts.wall_detect --measure 5 --neighbors
+    # 始点・終点の白/黄の壁上面も読む (#125、黒い床専用)。橙 = 白/黄で拾った画素
+    python -m scripts.wall_detect --image shot.png --white-tops --out /tmp/walls.png
+    python -m scripts.wall_detect --measure 5 --ev -2 --white-tops
 
 ROI (front/back/left/right) を自機・ケーブル・支柱の外へ、壁が写る辺に合わせて
 --thickness / --span / --threshold で調整する。カメラ取付の回転に応じて画像の
@@ -77,6 +80,7 @@ from krilly.perception.red_wall import (
     red_breakdown,
     red_mask,
     red_mask_parts,
+    white_yellow_mask,
 )
 from krilly.perception.survey import (
     SurveyRow,
@@ -91,12 +95,15 @@ from krilly.perception.wall_detect import (
     BACK,
     BODY_DIRS,
     CALIBRATED_RED,
+    CALIBRATED_WHITE_YELLOW,
     FRONT,
+    WHITE_YELLOW,
     LEFT,
     RIGHT,
     WallDetector,
     WallDetectorConfig,
     WallTarget,
+    add_wall_args,
     calibrated_config,
     calibrated_neighbor_rois,
     calibrated_rois,
@@ -106,8 +113,14 @@ from krilly.perception.wall_detect import (
 log = get_logger("krilly.wall_detect")
 
 
+def _src(reading) -> str:
+    """白/黄で拾った読みに付ける印 (#125)。赤なら空。"""
+    return "w" if getattr(reading, "source", None) == WHITE_YELLOW else ""
+
+
 def measure_repeatability(count: int, interval: float, save_prefix: str | None,
-                          neighbors: bool = False, camera_args: dict | None = None) -> None:
+                          neighbors: bool = False, camera_args: dict | None = None,
+                          white_tops: bool = False) -> None:
     """静止したまま N フレーム撮り、位置測定のばらつきを表にする (#21)。
 
     帯探索は ROI を ±40px スライドして赤割合が最大の位置を採るので、本物の帯の
@@ -119,7 +132,7 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None,
 
     from krilly.hal.camera import Camera
 
-    det = WallDetector(calibrated_config(neighbors=neighbors))
+    det = WallDetector(calibrated_config(neighbors=neighbors, white_tops=white_tops))
     yaw_cfg = calibrated_axis_yaw_config()
     px_per_mm = {FRONT: PX_PER_MM_Y, BACK: PX_PER_MM_Y,
                  LEFT: PX_PER_MM_X, RIGHT: PX_PER_MM_X}
@@ -137,14 +150,15 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None,
             if yaw is not None:
                 yaws.append(yaw.angle_deg)
             rows.append((
-                {e: (measured[e][0], measured[e][1] / px_per_mm[e], measured[e][2])
-                 for e in edges}, off))
+                {e: (measured[e][0], measured[e][1] / px_per_mm[e], measured[e][2],
+                     _src(measured[e])) for e in edges}, off))
             if save_prefix:
                 cv2.imwrite(f"{save_prefix}_{i + 1:02d}.png", frame)
             log.info(
                 "#%02d %s | 前後=%s 左右=%s", i + 1,
-                " ".join("%s %.2f/%+.1fmm%s" % (e, rows[-1][0][e][0], rows[-1][0][e][1],
-                                                "!" if rows[-1][0][e][2] else "")
+                " ".join("%s %.2f%s/%+.1fmm%s" % (e, rows[-1][0][e][0], rows[-1][0][e][3],
+                                                  rows[-1][0][e][1],
+                                                  "!" if rows[-1][0][e][2] else "")
                          for e in edges),
                 "--" if off.forward_m is None else "%+.1fmm" % (off.forward_m * 1e3),
                 "--" if off.left_m is None else "%+.1fmm" % (off.left_m * 1e3),
@@ -154,7 +168,7 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None,
             if neighbors:
                 nb = det.neighbor_walls(measured)
                 log.info("      隣セル %s | 4 壁が確定 %s",
-                         " ".join("%s %.2f%s" % (k, v[0], "!" if v[2] else "")
+                         " ".join("%s %.2f%s%s" % (k, v[0], _src(v), "!" if v[2] else "")
                                   for k, v in measured.items() if k not in edges),
                          ", ".join("%s(%d/4)" % (side, len(w))
                                    for side, w in sorted(nb.items())) or "なし")
@@ -166,10 +180,11 @@ def measure_repeatability(count: int, interval: float, save_prefix: str | None,
         mean = sum(values) / len(values)
         return "平均 %+.1fmm 幅 %.1fmm (%.1f〜%.1f)" % (mean, hi - lo, lo, hi)
 
-    log.info("--- 静止中のばらつき (動いていないので幅は 0 であるべき。! = フレーム端で飽和) ---")
+    log.info("--- 静止中のばらつき (動いていないので幅は 0 であるべき。! = フレーム端で飽和"
+             "%s) ---", "、w = 白/黄で拾った帯 (位置には使わない)" if white_tops else "")
     for e in edges:
         used = [row[0][e][1] for row in rows
-                if not row[0][e][2]
+                if not row[0][e][2] and not row[0][e][3]
                 and row[0][e][0] >= max(det.cfg.threshold_for(e), OFFSET_MIN_FRACTION)]
         saturated = sum(1 for row in rows if row[0][e][2])
         log.info("%-6s 位置測定に使えたフレーム %d/%d%s  %s",
@@ -356,6 +371,7 @@ def main() -> None:
                    help="静止したまま N フレーム撮り、位置測定の再現性を表示する")
     p.add_argument("--interval", type=float, default=0.3, help="--measure のフレーム間隔 [s]")
     add_camera_args(p)
+    add_wall_args(p)
     p.add_argument("--save-prefix", default=None, help="--measure のフレーム保存先プレフィクス")
     p.add_argument("--image", default=None, help="入力画像 (未指定ならカメラ取得)")
     p.add_argument("--batch", default=None, metavar="DIR",
@@ -392,7 +408,7 @@ def main() -> None:
         return
     if args.measure:
         measure_repeatability(args.measure, args.interval, args.save_prefix,
-                              args.neighbors, camera_kwargs(args))
+                              args.neighbors, camera_kwargs(args), args.white_tops)
         return
     if args.image:
         frame = cv2.imread(args.image)
@@ -421,10 +437,12 @@ def main() -> None:
     # frame_size は**読み込んだ画像そのもの**にする。ROI は 960x720 の校正から作るので
     # 違うサイズの画像では帯から外れるが、調整用に眺めること自体は許したい。ここで
     # 実サイズを入れておくと、遠い側の帯が枠内かの判定 (#89) だけは効く。
+    wy = CALIBRATED_WHITE_YELLOW if args.white_tops else None
     det = WallDetector(WallDetectorConfig(rois=rois, slots=slots, red=red,
                                           threshold=0.15 if args.threshold is None
                                           else args.threshold,
-                                          frame_size=(frame.shape[1], frame.shape[0])))
+                                          frame_size=(frame.shape[1], frame.shape[0]),
+                                          white_yellow=wy))
 
     measured = det.measure(frame)
     neighbors = det.neighbor_walls(measured) if args.neighbors else {}
@@ -446,17 +464,23 @@ def main() -> None:
     out = frame.copy()
     mask = red_mask(frame, red)
     out[mask > 0] = (0.4 * out[mask > 0] + np.array([0, 0, 255]) * 0.6).astype(np.uint8)
+    if wy is not None:
+        # 白/黄 (#125) は橙で重ねる。トップハットの向きが帯の向きで違うので両方の和
+        alt = (white_yellow_mask(frame, wy, True) | white_yellow_mask(frame, wy, False)) > 0
+        alt &= mask == 0
+        out[alt] = (0.4 * out[alt] + np.array([0, 165, 255]) * 0.6).astype(np.uint8)
     for d, roi in rois.items():
         label, color = verdict(d)
         cv2.rectangle(out, (roi.x, roi.y), (roi.x + roi.w, roi.y + roi.h), color, 2)
-        cv2.putText(out, f"{d} {measured[d][0]:.2f} {label}",
+        cv2.putText(out, f"{d} {measured[d][0]:.2f}{_src(measured[d])} {label}",
                     (roi.x + 2, max(roi.y + 16, 16)), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, color, 1, cv2.LINE_AA)
 
     cv2.imwrite(args.out, out)
     for d in rois:
         label, _color = verdict(d)
-        log.info("%-12s red=%.3f ずれ=%+3dpx%s -> %s", d, measured[d][0], measured[d][1],
+        log.info("%-12s %s=%.3f ずれ=%+3dpx%s -> %s", d,
+                 "白黄" if _src(measured[d]) else "red", measured[d][0], measured[d][1],
                  " 飽和" if measured[d][2] else "    ",
                  {"WALL": "壁あり", "-": "なし", "?": "未確定"}[label])
     if args.neighbors:

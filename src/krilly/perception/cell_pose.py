@@ -34,6 +34,7 @@ from krilly.perception.wall_detect import (
     FRONT,
     LEFT,
     RIGHT,
+    RED,
     CameraGeometry,
     WallDetector,
 )
@@ -97,7 +98,10 @@ def cell_offset(
 
     def usable(e: str) -> bool:
         fraction, _offset, saturated = measured[e]
+        # 白・黄の帯 (#125) は壁の有無にだけ使い、位置には使わない (BandReading 参照)。
+        # 始点・終点ではその軸が「測れない」扱いになり、補正はそこだけ効かなくなる。
         return (not saturated
+                and getattr(measured[e], "source", RED) == RED
                 and fraction >= max(detector.cfg.threshold_for(e), min_fraction))
 
     dx_px = [float(measured[e][1]) for e in (LEFT, RIGHT) if usable(e)]

@@ -47,6 +47,7 @@ from krilly.perception.survey import FrameRecord, label_run, write_rows
 from krilly.perception.wall_detect import (
     BODY_DIRS,
     WallDetector,
+    add_wall_args,
     calibrated_config,
     path_block_threshold,
     path_check_slots,
@@ -126,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--truth-maze", default=None, metavar="FILE",
                    help="正解ラベルに使う既知形状の迷路 (既定: 走行後に確定した地図)")
     add_camera_args(p)
+    add_wall_args(p)
     return p
 
 
@@ -140,7 +142,10 @@ def main() -> None:
     maze.set_outer_walls()
     explorer = Explorer(maze, holonomic=not args.turn_in_place)
     neighbors = not args.no_neighbors
-    detector = WallDetector(calibrated_config(neighbors=neighbors))
+    detector = WallDetector(calibrated_config(neighbors=neighbors,
+                                              white_tops=args.white_tops))
+    if args.white_tops:
+        log.info("白/黄の壁上面も読む (#125、黒い床専用)")
     # 隣を読めるときだけ「進行先が既知なら通過」が効く (既知でなければ結局止まる)。
     pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
