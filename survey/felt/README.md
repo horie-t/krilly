@@ -22,3 +22,7 @@
 
 `tests/data/white_tops/` にはこのうち 5 枚 (`wy_a` / `wy_b` / `on_0w-2s` / `on_4w-2` / `wy_a_s`
 の各 `_03`) を回帰テスト用に置いてある。
+
+3x3 の実走 (`mazes/white_goal3.txt`) のフレームは `survey/white_goal/` にある。そちらでは
+白い壁が S 64-73 (青みがかった白) と写り、当時の `white_s_max = 60` を超えて (1,2) で
+白い壁に突っ込んだ。

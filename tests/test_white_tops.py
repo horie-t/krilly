@@ -133,3 +133,38 @@ def test_far_neighbour_edges_stay_undecided_when_only_white_bands_are_seen():
     measured = det.measure(_frame("wy_a_s"))
     assert det.lateral_shift_px(measured) is None
     assert "right" not in det.neighbor_walls(measured).get("right", {})
+
+
+# --- 3x3 の実走 (mazes/white_goal3.txt) で見つかった 3 つ -------------------------
+# goal3_run_003 = (1,2): 東がゴールの西の白い壁、西は開いていて床板の継ぎ目が写る。
+# goal3_run_002 = (0,2): 右の隣セル (1,2) の遠い側 = 同じ白い壁。
+# goal3_run_000 = (0,0): 南の外周の赤い壁の外が木の床。
+
+
+def test_a_bluish_white_wall_is_still_white():
+    """AWB のロックで白が S 64-73 と写った。s_max 60 では 0.05 と読んで突っ込んだ。"""
+    det = WallDetector(calibrated_config(white_tops=True))
+    reading = det.measure(_frame("goal3_run_003"))["right"]
+    assert reading[0] >= PATH_BLOCK_MIN_FRACTION and reading.source == WHITE_YELLOW
+
+
+def test_a_floor_seam_is_not_a_wall():
+    """幅 3px の継ぎ目はトップハットにも白にも入る。細い線は opening で落とす。"""
+    det = WallDetector(calibrated_config(white_tops=True))
+    assert det.measure(_frame("goal3_run_003"))["left"][0] <= NEIGHBOR_CLEAR_MAX_FRACTION
+
+
+def test_the_white_goal_wall_is_seen_one_cell_early_as_a_far_neighbour_band():
+    det = WallDetector(calibrated_config(white_tops=True, neighbors=True))
+    measured = det.measure(_frame("goal3_run_002"))
+    assert measured["right:right"][0] >= det.cfg.threshold_for("right:right")
+    assert det.neighbor_walls(measured)["right"]["right"] is True
+
+
+def test_a_confident_red_wall_stays_red_even_with_yellow_wood_beyond_it():
+    """探索範囲が外周の外の木の床 (黄 0.999) にはみ出しても、赤で壁と言えるなら赤。"""
+    frame = _frame("goal3_run_000")
+    both = WallDetector(calibrated_config(white_tops=True)).measure(frame)
+    red_only = WallDetector(calibrated_config()).measure(frame)
+    assert both["back"].source == RED
+    assert tuple(both["back"]) == tuple(red_only["back"])

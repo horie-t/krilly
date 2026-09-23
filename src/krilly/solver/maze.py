@@ -207,6 +207,20 @@ class Maze:
             raise ValueError(f"ゴール矩形の下限が上限を超えている ({lo} .. {hi})")
         self._goal_min, self._goal_max = lo, hi
 
+    def set_goal_arg(self, text: str | None) -> None:
+        """コマンドラインの ``--goal`` (``"X,Y"`` か ``"X0,Y0,X1,Y1"``) でゴールを置き換える。
+
+        None なら何もしない (既定の中央)。黒い床が 3x3 分しかないとき、ゴールを隅へ
+        動かして白い壁のゴールを試すために入れた (#125)。
+        """
+        if not text:
+            return
+        v = [int(t) for t in text.split(",")]
+        if len(v) not in (2, 4):
+            raise ValueError(f"--goal は X,Y か X0,Y0,X1,Y1 ({text!r})")
+        lo = (v[0], v[1])
+        self.set_goal(lo, (v[2], v[3]) if len(v) == 4 else lo)
+
     def goal_cells(self) -> list[tuple[int, int]]:
         return [
             (x, y)

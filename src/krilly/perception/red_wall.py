@@ -94,6 +94,13 @@ class WhiteYellowConfig:
 
     ``white_s_max`` は光沢を分けるためのものでは**ない**。機体を覆うフェルト・テープ
     (S 180-255) の縁を落とすため。外すとフェルトの縁が BACK で 0.19-0.39 と読める。
+    **白の彩度は AWB のロックで動く**ので、白の側に寄せて置かないこと。最初は 60 に
+    していて、3x3 の実走で白い壁が S 64-73 (青みがかった白) と写り、**0.05 と読んで
+    その壁に突っ込んだ**。同じ白い壁が前のセッションでは S 6-39 だった。
+
+    ``min_width_px`` は床板の継ぎ目を落とすため。継ぎ目は幅 3px の明るい線
+    (H 35 / S 30 / V 100) で、トップハットにも白にも入る (実走で開いた辺が 0.052)。
+    壁の上面は ~20px あるので、帯に直交する向きにこの幅で opening を掛ければ線だけ消える。
 
     黄は有彩色なので色相で素直に取れる (H 25-29)。**木の床はこの黄に丸ごと入る** —
     EV -2 で撮った黒い床の外側の木の床は全面が黄と判定された。だから黒い床専用。
@@ -101,7 +108,8 @@ class WhiteYellowConfig:
 
     tophat_px: int = 41          # 帯に直交する向きのトップハット幅 [px]
     contrast_min: int = 40       # 周囲より明るい量 (V のトップハット) の下限
-    white_s_max: int = 60        # 白とみなす彩度の上限 (フェルト・テープを落とす)
+    white_s_max: int = 80        # 白とみなす彩度の上限 (フェルト・テープを落とす)
+    min_width_px: int = 9        # 帯に直交する向きで、これより細い線 (継ぎ目) を落とす
     yellow_h_lo: int = 18
     yellow_h_hi: int = 40
     yellow_s_min: int = 80
@@ -131,6 +139,11 @@ def white_yellow_mask_parts(
         np.array([cfg.yellow_h_lo, cfg.yellow_s_min, cfg.yellow_v_min], dtype=np.uint8),
         np.array([cfg.yellow_h_hi, 255, 255], dtype=np.uint8),
     )
+    if cfg.min_width_px > 1:
+        thin = (np.ones((1, cfg.min_width_px), np.uint8) if vertical
+                else np.ones((cfg.min_width_px, 1), np.uint8))
+        white = cv2.morphologyEx(white, cv2.MORPH_OPEN, thin)
+        yellow = cv2.morphologyEx(yellow, cv2.MORPH_OPEN, thin)
     return white, yellow
 
 

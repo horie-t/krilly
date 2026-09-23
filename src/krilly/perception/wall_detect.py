@@ -124,9 +124,8 @@ def default_rois(width: int = 640, height: int = 480, thickness: int = 70,
 # S/V の下限だけを使い、色相では切らないこと (`red_breakdown` の hsv_lost も同じ罠)。
 CALIBRATED_RED = RedDetectorConfig(h2_lo=125, s_min=50, v_min=40)
 
-#: 白・黄の壁上面のマスク (#125)。黒い床・EV -2・緑のフェルトで覆った機体で実測した:
-#: 白い壁の最小 0.46 / 黄の最小 0.455 に対し、柱だけ (壁なし、光沢の強い床へ 15mm
-#: ずらした位置を含む 15 フレーム) の最大 0.006、赤い壁のフレームに掛けても 0.031。
+#: 白・黄の壁上面のマスク (#125)。黒い床・EV -2・緑のフェルトで覆った機体で実測した
+#: (``survey/felt`` と 3x3 の実走 ``survey/white_goal``)。数値は CLAUDE.md。
 #: **木の床では使わないこと** — EV -2 では木の床が全面「黄」に入る (実測)。
 CALIBRATED_WHITE_YELLOW = WhiteYellowConfig()
 
@@ -651,8 +650,8 @@ class WallDetector:
                 ) -> dict[str, BandReading]:
         """各辺の (赤割合, 帯のずれ[px], 飽和したか)。``search_px=0`` なら固定 ROI。
 
-        ``white_yellow`` が設定されていれば、白・黄のマスクでも同じ帯探索を掛け、
-        **割合の大きい方**を返す (#125)。どちらだったかは :class:`BandReading` の
+        ``white_yellow`` が設定されていれば、**赤がしきい値に届かない辺だけ**白・黄の
+        マスクでも同じ帯探索を掛け、割合の大きい方を返す (#125)。どちらだったかは :class:`BandReading` の
         ``source`` に残る。赤と白黄を OR した 1 枚で測らないのは、赤い壁の白い側面が
         トップハットに乗って赤い帯を太らせ、位置の読みを動かさないため。
 
@@ -683,7 +682,10 @@ class WallDetector:
                                                       base.w, base.h)
             vertical = self.cfg.target(name).vertical
             reading = BandReading(*self._band(mask, roi, vertical))
-            if alt is not None:
+            # 赤で壁と言えるなら赤のまま (位置補正に使える方を残す)。外周の壁の外が
+            # 木の床だと、探索範囲がそこへはみ出して「黄」0.999 と読み、赤 0.55 を
+            # 押しのけて始点の BACK の位置補正を消していた (3x3 の実走)。
+            if alt is not None and reading[0] < self.cfg.threshold_for(name):
                 other = self._band(alt[vertical], roi, vertical)
                 if other[0] > reading[0]:
                     reading = BandReading(*other, source=WHITE_YELLOW)

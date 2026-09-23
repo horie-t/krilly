@@ -46,6 +46,7 @@ from krilly.perception.cell_pose import cell_offset
 from krilly.perception.survey import FrameRecord, label_run, write_rows
 from krilly.perception.wall_detect import (
     BODY_DIRS,
+    WHITE_YELLOW,
     WallDetector,
     add_wall_args,
     calibrated_config,
@@ -74,6 +75,11 @@ from krilly.strategy.shortest_path import (
 
 log = get_logger("krilly.search_run")
 
+
+def _src(reading) -> str:
+    """白/黄で拾った読みに付ける印 (#125)。赤なら空。"""
+    return "w" if getattr(reading, "source", None) == WHITE_YELLOW else ""
+
 TURN_LABEL = {0: "直進", 1: "左90°", -1: "右90°", 2: "180°"}
 
 
@@ -90,6 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", type=int, default=0, help="SPI デバイス/CE (既定 0)")
     p.add_argument("--size", type=int, default=None,
                    help="迷路サイズ (既定 maze.yaml の grid_size=16)")
+    p.add_argument("--goal", default=None, metavar="X,Y[,X1,Y1]",
+                   help="ゴールのセル (既定は中央)。3x3 でゴールを隅に置くときなど (#125)")
     add_tuning_args(p)
     p.add_argument("--dt", type=float, default=0.02, help="制御周期 [s]")
     p.add_argument("--pause", type=float, default=0.4, help="動作の前後で止まる秒数")
@@ -140,6 +148,7 @@ def main() -> None:
     maze_cfg = load_maze_config()
     maze = Maze(args.size) if args.size else Maze.from_config(maze_cfg)
     maze.set_outer_walls()
+    maze.set_goal_arg(args.goal)
     explorer = Explorer(maze, holonomic=not args.turn_in_place)
     neighbors = not args.no_neighbors
     detector = WallDetector(calibrated_config(neighbors=neighbors,
@@ -303,14 +312,15 @@ def main() -> None:
 
                 saved = f"{Path(args.save_frames).name}_{explorer.steps:03d}.png"
                 cv2.imwrite(f"{args.save_frames}_{explorer.steps:03d}.png", frame)
+            # 末尾の w = 白/黄の上面で読んだ帯 (#125。位置補正には使わない)
             log.info("  壁 赤割合 %s -> 迷路 %s",
-                     {d: f"{measured[d][0]:.2f}" for d in BODY_DIRS},
+                     {d: f"{measured[d][0]:.2f}{_src(measured[d])}" for d in BODY_DIRS},
                      {d.name: p for d, p in sorted(walls_maze.items())})
             if walls_nb is not None:
                 # 隣セルは 3 値 (壁 / 壁なし / 未確定)。未確定の辺は辞書に入らないので、
                 # 4 辺そろわなかった側はそのまま「既知セル」にならず、通過対象から外れる。
                 log.info("  隣セル 赤割合 %s -> %s",
-                         {k: f"{v[0]:.2f}" for k, v in measured.items()
+                         {k: f"{v[0]:.2f}{_src(v)}" for k, v in measured.items()
                           if k not in BODY_DIRS},
                          {side: {e: w for e, w in sorted(walls.items())}
                           for side, walls in sorted(walls_nb.items())})
