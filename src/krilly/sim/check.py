@@ -164,6 +164,17 @@ def goal_entrances(maze: Maze) -> list[tuple[tuple[int, int], Direction]]:
             and not maze.has_wall(*c, d)]
 
 
+def start_openings(maze: Maze) -> list[Direction]:
+    """始点の区画の開いている辺 (迷路の外へ出る辺は数えない)。
+
+    競技の形は **北の 1 つだけ** (規定 2-3: 始点は四隅のいずれかで時計回りに出発する。
+    書き起こした大会迷路 31 面すべてがそうで、例外は無い)。
+    """
+    x, y = maze.start
+    return [d for d in Direction
+            if maze.in_bounds(*maze.neighbor(x, y, d)) and not maze.has_wall(x, y, d)]
+
+
 #: 入口がこれより多ければ注意する。実測 (大会迷路 31 面) では 1 が 23 面、2 が 7 面、
 #: 3 が 1 面で、4 つ以上は書き起こしが壊れていた 1 面だけだった。
 GOAL_ENTRANCE_WARN = 3
@@ -204,6 +215,10 @@ def check_maze(maze: Maze, wall_budget: int | None = None) -> MazeReport:
 
     - スタートから到達できないセルがある (大会迷路にも稀にあるので誤りにはしない)
     - ゴールの入口が多すぎる (実在の迷路は 1-3 個)
+    - **始点が競技の形でない** (開口が北の 1 つだけ、になっていない。#127)。実験用の
+      盤面 (``excerpt8`` 系・``twisty8``) がこれなので誤りにはしない。ただし実機で
+      ``--white-tops`` を付けると始点の 3 壁を規定から書き込む (#126) ので、この盤面では
+      ``--no-seed-start`` が要る
     - 壁が 1 枚も接していない内側の柱がある (公式規則違反。ゴール中央は除く)
     - 四方を壁で囲まれたセルがある
     - ``wall_budget`` を渡すと、手持ちの壁で組めるかを判定する (#23)
@@ -235,6 +250,14 @@ def check_maze(maze: Maze, wall_budget: int | None = None) -> MazeReport:
         report.warnings.append(
             f"ゴールの入口が {len(doors)} 個ある "
             f"(実在の迷路は 1-3 個): {[(c, d.name) for c, d in doors[:4]]}"
+        )
+
+    opens = start_openings(maze)
+    if opens != [Direction.N]:
+        report.warnings.append(
+            f"始点 {maze.start} が競技の形でない: 開口 "
+            f"{''.join(d.name for d in opens) or 'なし'} (規定 2-3 は北の 1 つだけ)。"
+            f"実機で --white-tops を付けるなら --no-seed-start"
         )
 
     stranded = n * n - len(reachable)

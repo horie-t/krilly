@@ -326,7 +326,9 @@ def test_past_that_the_last_run_can_overrun_and_that_is_the_deal_we_took():
     2 本で収まる。大会迷路 31 面では、この取引で最速ランを 1 本も走れない面が
     7 面から 3 面へ、最速ランの総数が 34 本から 42 本へ増える。
     """
-    truth = random_maze(16, seed=5)
+    # この種の迷路で取引を固定している。#127 で生成器が始点を直すようになり迷路が
+    # 変わった (直すと探索が短くなりはみ出さない) ので、直さない迷路で固定し続ける
+    truth = random_maze(16, seed=5, fix_start=False)
     kw = dict(actual_scale=1.4, times=TIMES_V024, cost=COST_V024)
     bold = simulate_session(truth, time_margin=1.2, **kw)
     safe = simulate_session(truth, time_margin=1.5, **kw)
@@ -686,3 +688,60 @@ def test_the_leg_cap_costs_races_on_real_16x16_mazes():
     assert sweep(6) == (2, 46)
     assert sweep(5) == (2, 45)
     assert sweep(4) == (3, 44)      # 既定。最速ランが 4 本、走れる面が 1 面減る
+
+
+# --- 始点の形 (#127) ------------------------------------------------------------
+
+def _board(name: str) -> Maze:
+    from pathlib import Path
+
+    return Maze.from_ascii(Path(name).read_text(encoding="utf-8"))
+
+
+def _start_warnings(maze: Maze) -> list[str]:
+    return [w for w in check_maze(maze).warnings if "始点" in w]
+
+
+def test_every_contest_maze_starts_with_one_opening_to_the_north():
+    """規定 2-3 を決め打ちしてよい根拠: 書き起こした大会迷路 31 面に例外が無い。"""
+    from pathlib import Path
+
+    from krilly.sim.check import start_openings
+
+    paths = sorted(Path("mazes/contest").glob("*.txt"))
+    assert len(paths) == 31
+    for p in paths:
+        assert start_openings(_board(str(p))) == [Direction.N], p.name
+
+
+@pytest.mark.parametrize("name, competition", [
+    ("mazes/practice5.txt", True), ("mazes/white_goal3.txt", True),
+    ("mazes/excerpt8.txt", False), ("mazes/excerpt8_2015.txt", False),
+    ("mazes/twisty8.txt", False),
+])
+def test_boards_whose_start_is_not_competition_shaped_are_warned(name, competition):
+    """誤りではなく注意 (実験用の盤面で maze_sim を落とさない)。"""
+    maze = _board(name)
+    assert check_maze(maze).ok
+    assert bool(_start_warnings(maze)) is not competition
+
+
+def test_competition_start_fixes_an_excerpt_without_stranding_cells():
+    from krilly.sim import competition_start
+    from krilly.sim.check import reachable_cells, start_openings
+
+    for name in ("mazes/excerpt8.txt", "mazes/excerpt8_2015.txt", "mazes/twisty8.txt"):
+        maze = competition_start(_board(name))
+        assert start_openings(maze) == [Direction.N], name
+        assert len(reachable_cells(maze)) == maze.size ** 2, name
+        assert not _start_warnings(maze) and check_maze(maze).ok, name
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_generated_mazes_start_like_a_competition_maze(seed):
+    from krilly.sim.check import start_openings
+
+    for size in (8, 16):
+        maze = random_maze(size, seed=seed)
+        assert start_openings(maze) == [Direction.N]
+        assert check_maze(maze).ok

@@ -24,6 +24,7 @@ from krilly.sim.check import (
 )
 from krilly.sim.generate import (
     comb_maze,
+    competition_start,
     diagonal_goal,
     open_goal_region,
     open_maze,
@@ -38,7 +39,7 @@ from krilly.sim.session import RunRecord, SessionResult, fit_search_overhead, si
 __all__ = [
     "MazeReport", "check_maze", "goal_center_post", "goal_entrances",
     "goal_interior_walls", "map_agrees", "wall_counts",
-    "comb_maze", "diagonal_goal", "open_maze", "open_goal_region", "random_maze", "seal_goal",
+    "comb_maze", "competition_start", "diagonal_goal", "open_maze", "open_goal_region", "random_maze", "seal_goal",
     "serpentine_maze", "walled_maze",
     "sense", "sense_neighbors",
     "RunRecord", "SessionResult", "fit_search_overhead", "simulate_session",

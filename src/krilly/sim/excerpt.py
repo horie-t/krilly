@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from krilly.sim.check import goal_entrances, goal_interior_walls
+from krilly.sim.generate import competition_start
 from krilly.solver.maze import Direction, Maze
 
 def pieces_needed(size: int, goal_2x2: bool = True) -> tuple[int, int]:
@@ -63,6 +64,8 @@ def goal_variants(maze: Maze):
 
     内側の壁を外し、開いている外周の辺を 1 つだけ残して他を閉じる。どれを残すかで
     迷路の難しさが変わるので、**選ぶのは呼び出し側の仕事**にしてある。
+
+    始点も :func:`~krilly.sim.generate.competition_start` で競技の形 (北だけ開く) に直す。
     """
     goals = set(maze.goal_cells())
     base = Maze(maze.size)
@@ -77,6 +80,9 @@ def goal_variants(maze: Maze):
         for d in Direction:
             if base.neighbor(*cell, d) in goals:
                 base.set_wall(*cell, d, False)
+    # 始点も同じ理由で競技の形へ直す (#127): 窓の (0,0) は元の迷路では普通のセルで、
+    # excerpt8 系は東も開いたまま盤面になっていた
+    competition_start(base)
     doors = goal_entrances(base)
     for keep in doors:
         out = Maze(maze.size)

@@ -79,7 +79,8 @@ def open_maze(size: int) -> Maze:
 
 
 def random_maze(
-    size: int, seed: int = 0, loop_ratio: float = 0.10, keep_posts: bool = True
+    size: int, seed: int = 0, loop_ratio: float = 0.10, keep_posts: bool = True,
+    fix_start: bool = True,
 ) -> Maze:
     """全域木を掘ってから壁を抜いてループを作る。
 
@@ -103,6 +104,10 @@ def random_maze(
     0.35 では中央値が 14 = スタートからゴールへの最短手数そのもので、**一度も
     行き止まりに当たらない**。それでは探索の論理を何も試していない。0.10 前後が
     実際の大会迷路の密度 (内壁 180-220 枚程度) に近く、行き止まりも踏む。
+
+    ``fix_start`` は始点を競技の形 (北だけ開く) に直すか (#127)。**同じ種でも迷路が
+    変わる**ので、それ以前の種で固定した迷路 (``mazes/twisty8.txt`` など) を再現する
+    ときは False にすること。
 
     なお乱数で作った迷路は**設計された大会迷路より易しい**。難所を意図的に置いた
     本物は :func:`krilly.solver.maze.Maze.from_ascii` で書き起こして使うこと。
@@ -134,9 +139,44 @@ def random_maze(
         _set_edge(maze, e, False)
         if keep_posts and not all(_post_still_covered(maze, size, p) for p in _posts_of(e)):
             _set_edge(maze, e, True)
-    # ゴールは普通のセルとして掘られるので、最後に競技の形へ直す (#23)。
-    # これを入れるまで、生成した迷路はすべてゴールの内側に壁を抱えていた。
+    # ゴールと始点は普通のセルとして掘られるので、最後に競技の形へ直す (#23 / #127)。
+    # これを入れるまで、生成した迷路はすべてゴールの内側に壁を抱え、始点の開口も
+    # 全域木の次数そのまま (東へ出るものも 2 つ開くものもあった) だった。
+    if fix_start:
+        competition_start(maze, rng)
     return open_goal_region(maze, rng)
+
+
+def competition_start(maze: Maze, rng: random.Random | None = None) -> Maze:
+    """始点の区画を**競技の形**にする (北だけを開け、他を閉じる)。破壊的。
+
+    規定 2-3 と大会迷路 31 面の実測から、始点の開口は北の 1 つだけ (#127)。生成器も
+    切り出しも始点を普通のセルとして扱うので、そのままでは東へ出たり 2 つ開いたりする。
+
+    東を閉じると、そこを通ってしか行けなかったセルが孤立しうる。その場合は**始点以外**
+    の壁を 1 枚ずつ抜いて繋ぎ直す (到達できる側と孤立した側の境目から選ぶ。``rng`` が
+    無ければ決まった順で選ぶので、切り出しの結果が再現する)。
+    """
+    from krilly.sim.check import reachable_cells
+
+    x, y = maze.start
+    maze.set_wall(x, y, Direction.N, False)
+    for d in (Direction.E, Direction.S, Direction.W):
+        if maze.in_bounds(*maze.neighbor(x, y, d)):
+            maze.set_wall(x, y, d)
+    total = maze.size * maze.size
+    while True:
+        reach = reachable_cells(maze)
+        if len(reach) == total:
+            return maze
+        border = sorted(((c, d) for c in reach if c != maze.start for d in Direction
+                         if maze.in_bounds(*maze.neighbor(*c, d))
+                         and maze.neighbor(*c, d) not in reach),
+                        key=lambda e: (e[0], list(Direction).index(e[1])))
+        if rng is not None:
+            rng.shuffle(border)
+        cell, d = border[0]
+        maze.set_wall(cell[0], cell[1], d, False)
 
 
 def open_goal_region(maze: Maze, rng: random.Random | None = None) -> Maze:
