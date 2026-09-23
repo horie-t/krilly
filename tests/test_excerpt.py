@@ -204,7 +204,9 @@ def test_the_exposure_board_is_a_perfect_maze_and_reproducible():
     from krilly.sim.generate import random_maze
 
     maze = Maze.from_ascii(Path("mazes/twisty8.txt").read_text(encoding="utf-8"))
-    assert maze.to_ascii() == random_maze(8, seed=1770, loop_ratio=0.04).to_ascii()
+    # twisty8 は #127 (始点を競技の形に直す) より前に作ったので、直さずに再現する
+    assert maze.to_ascii() == random_maze(8, seed=1770, loop_ratio=0.04,
+                                          fix_start=False).to_ascii()
     # 全域木 + ゴール 2x2 を開ける = 内壁 112 - (64 セルを繋ぐ 63 + ゴールの 1) = 48
     assert wall_counts(maze).inner == 48
 
