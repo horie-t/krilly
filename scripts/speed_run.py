@@ -55,6 +55,7 @@ from krilly.perception.wall_detect import (
     WallDetector,
     add_wall_args,
     calibrated_config,
+    seed_start_enabled,
     path_block_threshold,
     path_check_slots,
 )
@@ -167,6 +168,10 @@ def main() -> None:
                                               white_tops=args.white_tops))
     if args.white_tops:
         log.info("白/黄の壁上面も読む (#125、黒い床専用)")
+    if seed_start_enabled(args):
+        seeded = explorer.seed_start()
+        log.info("始点の壁を規定から書き込んだ: %s (#126、--no-seed-start で無効)",
+                 "".join(d.name for d in seeded))
     pass_cells = args.pass_cells if args.pass_cells else (2 if neighbors else 1)
     yaw_cfg = calibrated_axis_yaw_config()
     gyro_scale = args.gyro_scale if args.gyro_scale is not None else kin.cfg.gyro_scale_z

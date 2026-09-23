@@ -130,3 +130,16 @@ def test_the_white_goal_board_makes_the_search_pass_beside_the_white_wall():
             ex.advance(step)
         cells.append(ex.cell)
     assert (1, 2) in cells and cells[-1] == (2, 2)
+
+
+@pytest.mark.parametrize("module", SCRIPTS, ids=IDS)
+def test_seeding_the_start_follows_white_tops_unless_forced(module):
+    """始点の 3 壁の書き込み (#126) は競技の盤面 (= --white-tops) のときだけ既定で入る。
+    自宅の excerpt8 系は始点の東が開いているので、既定で書くと偽の壁になる。"""
+    from krilly.perception.wall_detect import seed_start_enabled
+
+    parse = module.build_parser().parse_args
+    assert seed_start_enabled(parse([])) is False
+    assert seed_start_enabled(parse(["--white-tops"])) is True
+    assert seed_start_enabled(parse(["--white-tops", "--no-seed-start"])) is False
+    assert seed_start_enabled(parse(["--seed-start"])) is True

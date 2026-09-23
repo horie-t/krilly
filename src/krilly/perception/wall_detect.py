@@ -495,6 +495,15 @@ def add_wall_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--white-tops", action="store_true",
                    help="始点・終点の白/黄の壁上面も壁と読む (競技規定 2-1、#125)。"
                         "**黒い床専用** (--ev -2 と組で使う)。木の床は全面が黄と読まれる")
+    p.add_argument("--seed-start", action=argparse.BooleanOptionalAction, default=None,
+                   help="始点の 3 壁 (向きの前以外) を規定 2-3 から地図に書く (#126)。"
+                        "既定は --white-tops と同じ (競技の盤面なら書く)。始点が規定の形で"
+                        "ない自宅の盤面 (excerpt8 系は東が開、twisty8 は北が壁) では付けない")
+
+
+def seed_start_enabled(args) -> bool:
+    """:func:`add_wall_args` の ``--seed-start`` を解決する (既定は ``--white-tops`` に従う)。"""
+    return args.white_tops if args.seed_start is None else args.seed_start
 
 
 @dataclass
