@@ -26,7 +26,7 @@ from krilly.sim.generate import open_maze
 from krilly.sim.sense import sense, sense_neighbors
 from krilly.solver.maze import Direction, Maze
 from krilly.strategy.explorer import Explorer, Unreachable
-from krilly.strategy.shortest_path import DEFAULT_COST, Leg, MoveCost
+from krilly.strategy.shortest_path import DEFAULT_COST, Leg, MoveCost, walk_legs
 
 
 @dataclass(frozen=True)
@@ -91,13 +91,7 @@ class SessionResult:
         return "\n".join(lines)
 
 
-def _walk(start: tuple[int, int], legs: list[Leg]) -> tuple[int, int]:
-    """``legs`` を実行し終えたときのセル。"""
-    x, y = start
-    for leg in legs:
-        dx, dy = leg.direction.delta
-        x, y = x + dx * leg.cells, y + dy * leg.cells
-    return (x, y)
+_walk = walk_legs
 
 
 def simulate_session(
