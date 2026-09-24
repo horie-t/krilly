@@ -80,18 +80,23 @@ class Buzzer:
         self.pin = pin
         self.passive = passive
         self.tone_hz = tone_hz
+        # lgpio は **PWM が動いていないときに止めると例外** ('bad PWM micros') を出す
+        # (実機で確認: 鳴らす前の off も、2 回続けた off も落ちる)。動いているかを自分で持つ
+        self._pwm_on = False
         self._io = _Pin(gpio, chip)
         self._io.lg.gpio_claim_output(self._io.handle, pin, 0)
 
     def on(self) -> None:
         if self.passive:
             self._io.lg.tx_pwm(self._io.handle, self.pin, self.tone_hz, 50)
+            self._pwm_on = True
         else:
             self._io.lg.gpio_write(self._io.handle, self.pin, 1)
 
     def off(self) -> None:
-        if self.passive:
+        if self._pwm_on:
             self._io.lg.tx_pwm(self._io.handle, self.pin, 0, 0)
+            self._pwm_on = False
         self._io.lg.gpio_write(self._io.handle, self.pin, 0)
 
     def close(self) -> None:

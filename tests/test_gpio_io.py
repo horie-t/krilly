@@ -10,6 +10,7 @@ class FakeLgpio:
     def __init__(self):
         self.calls = []
         self.level = 1
+        self.pwm = False
 
     def gpio_claim_input(self, h, pin, flags):
         self.calls.append(("claim_input", pin, flags))
@@ -24,6 +25,10 @@ class FakeLgpio:
         self.calls.append(("write", pin, level))
 
     def tx_pwm(self, h, pin, freq, duty):
+        # 実機の lgpio と同じく、動いていない PWM を止めると例外
+        if freq == 0 and not self.pwm:
+            raise RuntimeError("'bad PWM micros'")
+        self.pwm = freq != 0
         self.calls.append(("pwm", pin, freq, duty))
 
     def gpio_free(self, h, pin):
@@ -62,3 +67,16 @@ def test_active_buzzer_is_just_high_and_low():
     z.off()
     assert [c for c in lg.calls if c[0] == "pwm"] == []
     assert lg.calls[-2:] == [("write", 18, 1), ("write", 18, 0)]
+
+
+def test_turning_a_silent_buzzer_off_does_not_raise():
+    """鳴らす前の off と、2 回続けた off (パターンの最後と close) で落ちないこと。
+    実機では 1 回目のパターンの後に音のスレッドが死に、以後まったく鳴らなかった。"""
+    lg = FakeLgpio()
+    z = Buzzer(18, gpio=(lg, 0))
+    z.off()
+    z.on()
+    z.off()
+    z.off()
+    z.close()
+    assert [c for c in lg.calls if c[0] == "pwm"] == [("pwm", 18, 2700, 50), ("pwm", 18, 0, 0)]

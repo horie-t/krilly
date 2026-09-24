@@ -98,14 +98,19 @@ class BeepPlayer:
                 if self._stop:
                     return
                 pattern, self._pattern = self._pattern, None
-            for on, off in pattern:
-                self.buzzer.on()
-                if self._sleep(on):
-                    break
+            # 1 回の失敗で音のスレッドを死なせない。当日は音が唯一の表示なので、
+            # 黙って鳴らなくなるのが一番まずい (#79: lgpio の例外で実際にそうなった)
+            try:
+                for on, off in pattern:
+                    self.buzzer.on()
+                    if self._sleep(on):
+                        break
+                    self.buzzer.off()
+                    if self._sleep(off):
+                        break
                 self.buzzer.off()
-                if self._sleep(off):
-                    break
-            self.buzzer.off()
+            except Exception:   # noqa: BLE001
+                log.exception("ブザーを鳴らせなかった")
 
     def _sleep(self, seconds: float) -> bool:
         """``seconds`` 待つ。途中で次の型が来たら True (打ち切り)。"""
