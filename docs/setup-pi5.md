@@ -116,3 +116,81 @@ journalctl -u krilly-launcher -f
 **開発中は止めておく**: SSH から `speed_run` などを走らせるとき、ランチャが動いていると
 ボタンの GPIO を取り合い、ボタンに触れると走行が起動しうる
 (`sudo systemctl stop krilly-launcher`)。
+
+## 8. 会場用のネットワークと、つながらないときの復旧 (シリアルコンソール)
+
+会場ではスマートフォン (Pixel 4a) のテザリングに Pi とノート PC の両方をつなぎ、SSH する。
+Pi がテザリングにつながらなかったときのために、**USB シリアルでログインできる**ようにしておく。
+
+### テザリングの接続設定
+
+```bash
+sudo nmtui      # 「接続の編集」→ 追加 → Wi-Fi。SSID と パスワードを入れる (履歴に残さないため nmtui で)
+sudo nmcli connection modify AndroidAP135XL connection.autoconnect-priority 10
+```
+
+- **SSID は `AndroidAP135XL`** (「AP」が入る)。最初 `Android135XL` で登録して、テザリングが見えているのに
+  つながらなかった。**スマートフォンの画面の表記ではなく、`nmcli device wifi list` に出る名前を使うこと**
+- 優先度 10 は家の Wi-Fi (0) より高いので、**テザリングが見えればそちら、見えなければ家の Wi-Fi** を
+  自動で選ぶ。再起動しても、テザリングを切っても、そのとおりに切り替わることを確認済み
+- Pixel 側: 「アクセスポイントを自動的にオフにする」は無効、セキュリティは WPA2-Personal
+- テザリングの IP は DHCP で、**入れ直すたびに変わりうる** (確認時は 10.208.167.50)。名前 `krilly.local` で
+  つなぐ (下の「ノート PC から」)
+
+### シリアルコンソール (GPIO14/15)
+
+USB-C を USB Ethernet にする方法 (`rpi-usb-gadget`) は**この機体では使わない**。Pi 5 の USB-C は電源の
+入り口でもあり、機体は GPIO / ポゴピンから X-UPS1 の 5V で動いているので、ノート PC をつなぐと 5V が
+二重になる。USB-TTL (3.3V) アダプタで UART につなげば、GND・TX・RX だけなので電源はぶつからず、
+**ネットワークの設定が壊れていてもログインできる**。
+
+```bash
+sudo raspi-config           # Interface Options → Serial Port → ログインシェル: はい / ハードウェア: はい
+echo "dtparam=uart0_console" | sudo tee -a /boot/firmware/config.txt
+sudo reboot
+ls -l /dev/serial0          # -> ttyAMA0 になっていれば OK
+```
+
+**Pi 5 では `raspi-config` だけでは足りない。** コンソールが基板上の 3 ピンのデバッグ用コネクタ
+(`ttyAMA10`) に出るだけで、GPIO14/15 (`ttyAMA0`) にはログイン画面が出ない。`dtparam=uart0_console` が
+コンソールをピン 6 / 8 / 10 に移す (`/boot/firmware/overlays/README`、2712 のみ)。
+
+| USB-TTL アダプタ | Pi (物理ピン) |
+|---|---|
+| GND | 6 (GND) |
+| RX | 8 (GPIO14 = TXD) |
+| TX | 10 (GPIO15 = RXD) |
+
+**VCC はつながない。** Windows では PuTTY を使う (WSL2 から COM ポートは直接扱えない):
+
+| 画面 | 項目 | 値 |
+|---|---|---|
+| Session | Connection type / Serial line / Speed | Serial / デバイス マネージャーの COM 番号 / **115200** |
+| Connection → Serial | Data bits / Stop bits / Parity / **Flow control** | 8 / 1 / None / **None** (既定の XON/XOFF から変える) |
+| Window → Translation | Remote character set | UTF-8 |
+
+Open した直後は真っ黒のことがある。**Enter を 1 回押す**と `krilly login:` が出る。何も出なければ TX/RX の
+入れ違い、文字化けは速度、表示は出るのに入力できなければフロー制御を疑う。
+
+### ノート PC (Windows + WSL2) から
+
+Windows は `krilly.local` を引ける (mDNS) が、WSL2 (NAT) からは引けないので、WSL2 から Windows に
+引かせる。WSL の `~/.bashrc`:
+
+```bash
+krilly() {
+    local ip
+    ip=$(powershell.exe -NoProfile -c "(Resolve-DnsName -Name krilly.local -Type A).IPAddress" \
+         | tr -d '\r' | head -1)
+    ssh tetsuya@"${ip:?krilly.local が引けない (シリアルで hostname -I を確認)}" "$@"
+}
+```
+
+`powershell.exe` が「**実行形式エラー**」で動かないときは、WSL の interop の登録が消えている
+(systemd を有効にした WSL でよく起きる):
+
+```bash
+sudo sh -c 'echo ":WSLInterop:M::MZ::/init:PF" > /usr/lib/binfmt.d/WSLInterop.conf'
+sudo systemctl restart systemd-binfmt       # それでもだめなら PowerShell で wsl --shutdown
+```
+
