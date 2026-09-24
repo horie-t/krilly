@@ -104,6 +104,15 @@ class PressDetector:
         return events
 
 
+_PRESS_TEXT = {
+    Press.DOWN: "押した",
+    Press.HOLD_START: f"{START_HOLD_S:.0f} 秒に達した (離すと発進)",
+    Press.HOLD_POWEROFF: f"{POWEROFF_HOLD_S:.0f} 秒に達した",
+    Press.SHORT: f"離した ({START_HOLD_S:.0f} 秒未満なので何もしない)",
+    Press.LONG: "離した",
+}
+
+
 class Child(Protocol):
     """子プロセス (``subprocess.Popen`` の必要な部分)。"""
 
@@ -164,6 +173,9 @@ class Launcher:
     # -- ボタン -------------------------------------------------------------
     def _on_press(self, now: float, ev: Press) -> None:
         s = self.state
+        # 押下はすべてログに残す。音だけでは「押したのに何も起きない」の原因
+        # (短すぎた / 読めていない) が分からない (#79 の最初の実機確認がそれだった)
+        self.log(f"ボタン: {_PRESS_TEXT[ev]} (状態 {s.value})")
         if ev is Press.DOWN:
             self._press_began_in = s
         elif self._press_began_in is not s:
