@@ -13,6 +13,8 @@
 例:
     # 何が走るかを確かめるだけ (GPIO に触らない)
     python -m scripts.launcher --check
+    # 配線の確認: 全部の音を順に鳴らし、ボタンの状態を 10 秒表示する
+    python -m scripts.launcher --beep-test
     # 手元で実際に待ち受ける (systemd と同じ)
     python -m scripts.launcher
 """
@@ -29,7 +31,8 @@ import threading
 import time
 from pathlib import Path
 
-from krilly.app.launcher import Launcher, Pattern, State
+from krilly.app import launcher as sounds
+from krilly.app.launcher import Launcher, Pattern, State, pattern_seconds
 from krilly.config.loader import RUN_CONFIG_PATH, RunConfig, load_run_config
 from krilly.hal.gpio_io import DEFAULT_BUTTON_GPIO, DEFAULT_BUZZER_GPIO, Button, Buzzer
 from krilly.logging_config import get_logger, setup_logging
@@ -138,7 +141,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", default=str(RUN_CONFIG_PATH), help="走行設定の YAML")
     p.add_argument("--check", action="store_true",
                    help="設定を検証して実行するコマンドを表示するだけ (GPIO に触らない)")
+    p.add_argument("--beep-test", action="store_true",
+                   help="配線の確認: 全部の音を順に鳴らし、ボタンの状態を 10 秒表示する")
     return p
+
+
+def beep_test(button: Button, player: BeepPlayer) -> None:
+    for name in ("BOOT", "TICK", "COUNTDOWN", "CANCEL", "DONE", "STOPPED", "FAILED",
+                 "CONFIG_ERROR", "ALARM", "POWEROFF"):
+        pattern = getattr(sounds, f"BEEP_{name}")
+        log.info("音: %s", name)
+        player.play(pattern)
+        time.sleep(pattern_seconds(pattern) + 0.8)
+    log.info("ボタンを押してみる (10 秒)")
+    last = None
+    end = time.monotonic() + 10.0
+    while time.monotonic() < end:
+        now = button.is_pressed()
+        if now != last:
+            log.info("  ボタン: %s", "押されている" if now else "離れている")
+            last = now
+        time.sleep(TICK_S)
 
 
 def main() -> int:
@@ -154,6 +177,14 @@ def main() -> int:
                     else DEFAULT_BUZZER_GPIO,
                     passive=cfg.buzzer_passive if cfg else True)
     player = BeepPlayer(buzzer)
+    if args.beep_test:
+        try:
+            beep_test(button, player)
+        finally:
+            player.close()
+            button.close()
+            buzzer.close()
+        return 0
     launcher = Launcher(spawn=spawner(command) if command else None,
                         beep=player.play, poweroff=poweroff, log=log.info)
     log.info("ボタン GPIO%d / ブザー GPIO%d で待機中 (1 秒押して離すと発進)",
