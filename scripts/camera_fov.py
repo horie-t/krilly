@@ -18,6 +18,7 @@
     python -m scripts.camera_fov                      # 現状と全画素を比べる
     python -m scripts.camera_fov --size 960x720       # 全画素側の出力を指定
     python -m scripts.camera_fov --out-dir fov        # フレームも保存する
+    python -m scripts.camera_fov --full-only --ev -2  # 黒い床 (EV 0 だと帯が白飛びして読めない)
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from pathlib import Path
 import cv2
 
 from krilly.config import load_maze_config
-from krilly.hal.camera import Camera
+from krilly.hal.camera import Camera, add_camera_args, camera_kwargs
 from krilly.logging_config import get_logger, setup_logging
 from krilly.perception.camera_tilt import measure_tilt
 from krilly.perception.red_wall import red_mask
@@ -215,6 +216,9 @@ def main() -> None:
                    help="CALIBRATED_BANDS に貼る値を出す (定規でセル中央に置いて撮ること)")
     p.add_argument("--camera-height", type=float, default=390.0,
                    help="床からカメラまでの高さ [mm] (既定 390)。傾きの角度はこれに比例する")
+    # 黒い床では EV 0 だとゲインが上がり切って帯が淡くなり、4 辺そろわない (実測: ゲイン 12、
+    # 前の帯が見えない)。他のスクリプトと同じカメラ引数を受ける (#100)
+    add_camera_args(p)
     args = p.parse_args()
     setup_logging()
 
@@ -224,13 +228,13 @@ def main() -> None:
 
     if not args.full_only:
         w, h = parse_size(args.current_size)
-        with Camera(width=w, height=h, full_fov=False) as cam:
+        with Camera(width=w, height=h, full_fov=False, **camera_kwargs(args)) as cam:
             results["現行"] = measure(cam, pitch_mm, "current", out_dir,
                                     camera_height_mm=args.camera_height,
                                     emit=args.emit_bands)
 
     w, h = parse_size(args.size)
-    with Camera(width=w, height=h, full_fov=True) as cam:
+    with Camera(width=w, height=h, full_fov=True, **camera_kwargs(args)) as cam:
         results["全画素"] = measure(cam, pitch_mm, "full_fov", out_dir,
                                  camera_height_mm=args.camera_height,
                                  emit=args.emit_bands)

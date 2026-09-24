@@ -22,14 +22,24 @@ from krilly.perception.lattice import (
 )
 from krilly.perception.wall_detect import (
     CALIBRATED_GEOMETRY,
+    CALIBRATED_RED,
     DEFAULT_FRAME_SIZE,
+    CameraGeometry,
     WallDetector,
+    WallDetectorConfig,
     calibrated_config,
+    calibrated_rois,
 )
 
 RED = (0, 0, 255)          # BGR
 #: 実機が (6,6) の東壁に W2 を当てて止まったときのフレーム (#85)。
 STUCK = Path("tests/data/stuck_against_east_wall.png")
+#: そのフレームを撮ったときのカメラの校正。**フレームは撮ったときの校正で読むこと** —
+#: 2026-09-24 にカメラを付け直して px/mm が 1.70 -> 1.67 に変わり、今の校正で読むと
+#: 手で測った -28mm が -25.9mm になる (フレームは変わっていないのに)。
+JAM_GEOMETRY = CameraGeometry.from_bands(
+    {"front": (199, 220), "back": (504, 526), "left": (310, 333), "right": (618, 639)},
+    960, 720)
 
 
 def lattice_frame(left_mm: float = 0.0, forward_mm: float = 0.0,
@@ -110,27 +120,31 @@ def test_the_real_jam_is_measured_and_the_walls_read_correctly():
     """
     img = cv2.imread(str(STUCK))
     yaw = math.radians(-5.07)
-    off = lattice_offset(img, yaw)
+    off = lattice_offset(img, yaw, geometry=JAM_GEOMETRY)
     assert off.left_m * 1e3 == pytest.approx(-28.0, abs=2.0)
     assert off.forward_m * 1e3 == pytest.approx(-6.0, abs=4.0)
     assert off.left_confidence > 0.9
 
-    det = WallDetector(calibrated_config(neighbors=False))
+    det = WallDetector(WallDetectorConfig(
+        rois=calibrated_rois(JAM_GEOMETRY), red=CALIBRATED_RED, threshold=0.08,
+        frame_size=(JAM_GEOMETRY.width, JAM_GEOMETRY.height)))
     def verdict(shift):
         got = {k: v[0] for k, v in det.measure(img, shift).items()}
         return {n for n, f in got.items() if f >= det.cfg.threshold_for(n)}
 
     assert verdict((0, 0)) == {"front", "right"}          # 幽霊の北壁が生える
-    assert verdict(offset_to_shift_px(off)) == {"right"}  # 真のパターン
+    assert verdict(offset_to_shift_px(off, geometry=JAM_GEOMETRY)) == {"right"}  # 真のパターン
 
 
 @pytest.mark.skipif(not STUCK.exists(), reason="フレームが無い")
 def test_the_real_jam_is_reported_as_contact_not_as_lost():
     """**居るセルが分かっても、壁に食い込んだまま走り出してはいけない。**"""
     img = cv2.imread(str(STUCK))
-    off = lattice_offset(img, math.radians(-5.07))
-    det = WallDetector(calibrated_config(neighbors=False))
-    got = det.measure(img, offset_to_shift_px(off))
+    off = lattice_offset(img, math.radians(-5.07), geometry=JAM_GEOMETRY)
+    det = WallDetector(WallDetectorConfig(
+        rois=calibrated_rois(JAM_GEOMETRY), red=CALIBRATED_RED, threshold=0.08,
+        frame_size=(JAM_GEOMETRY.width, JAM_GEOMETRY.height)))
+    got = det.measure(img, offset_to_shift_px(off, geometry=JAM_GEOMETRY))
     walls = {n: v[0] >= det.cfg.threshold_for(n) for n, v in got.items()}
     said = wall_contact(off, walls, corridor_clearance_m())
     assert said is not None and "接触している" in said

@@ -441,8 +441,12 @@ def test_roi_shape_is_the_same_at_every_calibrated_resolution():
         for _, g in sorted(CALIBRATED_GEOMETRIES.items())
     ]
     assert len(shapes) >= 2
+    # 丸めの 1px は許す: 解像度ごとに別々に実測するので px/mm が 0.2% ほど食い違い
+    # (2026-09-24 の再測定で 1.6722 / 1.6750)、ROI の寸法の丸めが 1px 変わりうる
     for other in shapes[1:]:
-        assert other == shapes[0]
+        for edge, (w, h) in shapes[0].items():
+            ow, oh = other[edge]
+            assert abs(ow - w) <= 1 and abs(oh - h) <= 1, (edge, (w, h), (ow, oh))
 
 
 def test_geometry_keeps_the_roi_shape_when_the_field_of_view_changes():
