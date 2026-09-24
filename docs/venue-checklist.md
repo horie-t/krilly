@@ -76,7 +76,28 @@ LBAT (セル電圧 ≤ 3.0V で High) と PLD (外部電源断) の GPIO だけ�
 - 起動の瞬間に人が機体の上に影を落とすと、1 走行まるごと狂う
 - 照明が変わったら、撮り直しではなく**スクリプトの再起動**が要る
 
-### 4. 当日はボタンで走らせる (#79)
+### 4. ネットワーク (前日の試走会で SSH するとき)
+
+スマートフォンのテザリング `AndroidAP135XL` に Pi とノート PC をつなぐ。設定と理由は
+`docs/setup-pi5.md` の 8 節。
+
+1. Pixel のテザリングをオンにする (「自動的にオフにする」は無効のまま)
+2. Pi の電源を入れる。テザリングが見えれば自動でそちらにつながる (優先度 10、家の Wi-Fi は 0)
+3. ノート PC も `AndroidAP135XL` につなぎ、WSL で `krilly` (`krilly.local` を Windows に引かせて SSH)
+4. **つながらなければシリアル**: USB-TTL をピン 6 / 8 / 10 に挿し、PuTTY (115200、フロー制御 None) で
+   ログインして次を見る
+
+```bash
+nmcli -t -f DEVICE,CONNECTION device        # wlan0:AndroidAP135XL になっているか
+nmcli device wifi list                      # テザリングが見えているか (SSID の綴り)
+sudo nmcli connection up AndroidAP135XL     # 手でつなぐ
+hostname -I                                 # IP を読んで ssh tetsuya@<IP>
+```
+
+**USB-TTL アダプタとジャンパ線は必ず持っていく。** テザリングの IP は入れ直すたびに変わりうるので、
+IP を書き留めて使い回さないこと。
+
+### 5. 当日はボタンで走らせる (#79)
 
 会場ではネットワーク越しに操作できないので、**前日の試走で走らせて良かったコマンドを
 保存しておき、当日はボタンで走らせる**。
