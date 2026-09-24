@@ -1,0 +1,30 @@
+# 機体単体で走らせるランチャ (#79)。電源を入れるとボタン待ちになる。
+#
+# 入れ方 (パスは自分の環境に合わせる):
+#   sudo cp deploy/krilly-launcher.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now krilly-launcher
+# 止める / 無効にする (開発中に SSH から走らせるときは止めておく。GPIO を取り合う):
+#   sudo systemctl disable --now krilly-launcher
+# ログ:
+#   journalctl -u krilly-launcher -f        (ランチャ自身)
+#   ls logs/run_*.log                        (走行ごとの出力)
+
+[Unit]
+Description=Krilly launcher (button + buzzer, #79)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=tetsuya
+WorkingDirectory=/home/tetsuya/repos/krilly
+ExecStart=/home/tetsuya/repos/krilly/.venv/bin/python -m scripts.launcher
+Environment=PYTHONUNBUFFERED=1
+# 止めるときは SIGTERM。ランチャは走行中の子に SIGINT を送って emergency_stop を通す
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

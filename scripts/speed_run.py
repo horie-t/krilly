@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import math
+import sys
 import time
 from pathlib import Path
 
@@ -142,10 +143,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="正解ラベルに使う既知形状の迷路 (既定: 走行後に確定した地図)")
     add_camera_args(p)
     add_wall_args(p)
+    p.add_argument("--save-run-config", action="store_true",
+                   help="**完走したら**このコマンドを当日の走行設定 (config/run.yaml) に保存する "
+                        "(#79)。前日の試走で検証したコマンドをそのまま当日ボタンで走らせるため")
     return p
 
 
-def main() -> None:
+#: 走行が中断で終わったときの終了コード (#79 のランチャが音を変える)。
+EXIT_ABORTED = 2
+
+
+def run_args_to_save(argv: list[str]) -> list[str]:
+    """``--save-run-config`` を除いた引数 (当日はそれ以外をそのまま再現する)。"""
+    return [a for a in argv if a != "--save-run-config"]
+
+
+def main() -> int:
     args = build_parser().parse_args()
 
     setup_logging()
@@ -184,7 +197,7 @@ def main() -> None:
         # 無いより悪い (誤判定を数え間違える)。走る前に止める。
         log.error("--truth-maze は %dx%d だが走るのは %dx%d。中止。",
                   truth.size, truth.size, maze.size, maze.size)
-        return
+        return 1
     if args.save_frames:
         Path(args.save_frames).parent.mkdir(parents=True, exist_ok=True)
     log.info("迷路 %dx%d / ゴール %s / 持ち時間 %.0fs / 最大 %d 走 / 安全率 %.2f",
@@ -640,6 +653,7 @@ def main() -> None:
         log.info("[走行 1] 探索ラン開始")
         pose = search_to_goal()
         log.info("探索ラン %.1fs", time.monotonic() - t_run)
+        aborted = pose is None
         if pose is None:
             manager.abort()
         while manager.phase is not RunPhase.FINISHED:
@@ -650,6 +664,7 @@ def main() -> None:
             log.info("復帰 (%s)", manager.summary(time.monotonic()))
             pose = execute_legs(home, cell, facing, "復帰経路")
             if pose is None:
+                aborted = True
                 manager.abort()
                 break
             legs = manager.home_reached(time.monotonic(), pose[1])
@@ -665,6 +680,7 @@ def main() -> None:
             t_run = time.monotonic()
             pose = execute_legs(legs, maze.start, pose[1], "最速経路")
             if pose is None:
+                aborted = True
                 manager.abort()
                 break
             log.info("[走行 %d] 最速ラン %.1fs", manager.runs_used, time.monotonic() - t_run)
@@ -706,7 +722,40 @@ def main() -> None:
                      "" if not skipped else
                      f" / 迷路の外を見た {skipped} スロットは除外")
             log.info("  解析: python -m scripts.survey_report %s", path)
+        if aborted:
+            log.error("中断で終わった (終了コード %d)", EXIT_ABORTED)
+            return EXIT_ABORTED
+        if args.save_run_config:
+            save_this_run(sys.argv[1:])
+    return 0
+
+
+def save_this_run(argv: list[str]) -> None:
+    """完走したコマンドを当日の走行設定に書く (#79)。ピンの上書きは既存から引き継ぐ。"""
+    import dataclasses
+    import datetime
+
+    from krilly.config.loader import (
+        RUN_CONFIG_PATH,
+        RunConfig,
+        load_run_config,
+        save_run_config,
+    )
+
+    cfg = RunConfig("speed_run", run_args_to_save(argv),
+                    saved_at=datetime.datetime.now().isoformat(timespec="seconds"))
+    if RUN_CONFIG_PATH.exists():
+        try:
+            old = load_run_config()
+            cfg = dataclasses.replace(cfg, button_gpio=old.button_gpio,
+                                      buzzer_gpio=old.buzzer_gpio,
+                                      buzzer_passive=old.buzzer_passive)
+        except (ValueError, KeyError, OSError):
+            pass
+    path = save_run_config(cfg)
+    log.info("当日の走行設定を保存した: %s", path)
+    log.info("  python -m scripts.speed_run %s", " ".join(cfg.args))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

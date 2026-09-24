@@ -143,3 +143,22 @@ def test_seeding_the_start_follows_white_tops_unless_forced(module):
     assert seed_start_enabled(parse(["--white-tops"])) is True
     assert seed_start_enabled(parse(["--white-tops", "--no-seed-start"])) is False
     assert seed_start_enabled(parse(["--seed-start"])) is True
+
+
+# --- ボタンで起動する走行の設定 (#79) ----------------------------------------------
+
+def test_saving_the_run_drops_only_the_save_flag():
+    """当日はこの引数をそのまま再現するので、保存用のフラグ以外は 1 つも落とさない。"""
+    from scripts.speed_run import run_args_to_save
+
+    argv = ["--size", "16", "--ev", "-2", "--white-tops", "--save-run-config",
+            "--save-frames", "survey/venue/run"]
+    assert run_args_to_save(argv) == ["--size", "16", "--ev", "-2", "--white-tops",
+                                      "--save-frames", "survey/venue/run"]
+
+
+def test_an_aborted_session_exits_non_zero():
+    """ランチャは終了コードで「完走」と「中断」の音を分ける。"""
+    from scripts.speed_run import EXIT_ABORTED
+
+    assert EXIT_ABORTED != 0

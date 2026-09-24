@@ -1,10 +1,21 @@
 """設定の読み込み (車体・迷路の寸法、チューニング定数)。"""
 
-from .loader import RobotConfig, MazeConfig, load_robot_config, load_maze_config
+from .loader import (
+    MazeConfig,
+    RobotConfig,
+    RunConfig,
+    load_maze_config,
+    load_robot_config,
+    load_run_config,
+    save_run_config,
+)
 
 __all__ = [
     "RobotConfig",
     "MazeConfig",
     "load_robot_config",
     "load_maze_config",
+    "RunConfig",
+    "load_run_config",
+    "save_run_config",
 ]

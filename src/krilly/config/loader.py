@@ -104,3 +104,79 @@ def load_maze_config(path: str | Path | None = None) -> MazeConfig:
         goal_min=tuple(data["goal_min"]),  # type: ignore[arg-type]
         goal_max=tuple(data["goal_max"]),  # type: ignore[arg-type]
     )
+
+
+# --- 当日の走行設定 (#79) -----------------------------------------------------
+#: ランチャが起動できるスクリプト。
+RUN_SCRIPTS = ("speed_run", "search_run")
+#: 当日の走行設定の置き場所。**git には入れない** (機体ごと・会場ごとの状態なので)。
+RUN_CONFIG_PATH = _CONFIG_DIR / "run.yaml"
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    """ボタンで起動する走行の設定 (#79)。
+
+    **引数を 1 つずつ項目にせず、試走で走らせたコマンドをそのまま持つ。** 項目ごとの
+    スキーマは ``speed_run`` の引数と必ずずれるうえ、手で YAML を書くと試走で検証して
+    いない組み合わせが当日走る。``speed_run --save-run-config`` が完走したときにだけ
+    書く (``saved_at`` はそのときの時刻)。
+
+    ピンとブザーの種類は配線の都合なので、ここで上書きできるようにしてある。
+    """
+
+    script: str
+    args: list[str]
+    saved_at: str = ""
+    button_gpio: int | None = None
+    buzzer_gpio: int | None = None
+    buzzer_passive: bool = True
+
+    def command(self, python: str) -> list[str]:
+        """実行するコマンド全体 (``python -m scripts.<script> <args...>``)。"""
+        return [python, "-m", f"scripts.{self.script}", *self.args]
+
+    def arg_value(self, name: str) -> str | None:
+        """``args`` の中の ``name`` の値 (``--ev -2`` / ``--ev=-2`` のどちらも読む)。"""
+        for i, a in enumerate(self.args):
+            if a == name and i + 1 < len(self.args):
+                return self.args[i + 1]
+            if a.startswith(name + "="):
+                return a.split("=", 1)[1]
+        return None
+
+
+def load_run_config(path: str | Path | None = None) -> RunConfig:
+    data = _load_yaml(path or RUN_CONFIG_PATH)
+    script = str(data["script"])
+    if script not in RUN_SCRIPTS:
+        raise ValueError(f"script は {RUN_SCRIPTS} のどれか (読んだ値: {script!r})")
+    args = data.get("args") or []
+    if not isinstance(args, list):
+        raise ValueError("args はリストで書くこと")
+    return RunConfig(
+        script=script,
+        args=[str(a) for a in args],
+        saved_at=str(data.get("saved_at", "")),
+        button_gpio=(None if data.get("button_gpio") is None
+                     else int(data["button_gpio"])),
+        buzzer_gpio=(None if data.get("buzzer_gpio") is None
+                     else int(data["buzzer_gpio"])),
+        buzzer_passive=bool(data.get("buzzer_passive", True)),
+    )
+
+
+def save_run_config(cfg: RunConfig, path: str | Path | None = None) -> Path:
+    """``RunConfig`` を YAML に書く。ピンの上書きは既存のファイルから引き継ぐ。"""
+    target = Path(path or RUN_CONFIG_PATH)
+    data: dict[str, Any] = {"script": cfg.script, "args": list(cfg.args),
+                            "saved_at": cfg.saved_at}
+    for key in ("button_gpio", "buzzer_gpio"):
+        if getattr(cfg, key) is not None:
+            data[key] = getattr(cfg, key)
+    if not cfg.buzzer_passive:
+        data["buzzer_passive"] = False
+    with open(target, "w", encoding="utf-8") as f:
+        f.write("# ボタンで起動する走行の設定 (#79)。speed_run --save-run-config が完走時に書く。\n")
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    return target
