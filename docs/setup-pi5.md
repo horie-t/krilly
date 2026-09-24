@@ -80,3 +80,34 @@ pytest          # M0 スモークテスト
 
 > 非Pi の開発マシンでは hardware-only 依存(`spidev`/`lgpio`/`picamera2`)は
 > `platform_machine == 'aarch64'` 条件でスキップされ、ロジックの単体テストは実行可能。
+
+## 7. ボタンとブザーで起動する (#79)
+
+会場ではネットワーク越しに操作できないので、電源を入れたらボタン待ちになるようにする。
+
+**配線** (BCM 番号。変えるなら `config/run.yaml` の `button_gpio` / `buzzer_gpio`):
+
+| 部品 | 配線 | 備考 |
+|---|---|---|
+| タクトスイッチ | GPIO17 (物理ピン 11) と GND の間 | 内部プルアップで読むので抵抗は要らない |
+| 圧電ブザー | GPIO18 (物理ピン 12) と GND の間 | 発振回路内蔵 (active) なら `buzzer_passive: false` |
+| 非常停止トグル | **VS (モータ電源) の線を直接切る** | ソフトを通らない。SIGKILL で L6470 が回り続けたときの最後の手段 |
+
+SPI0 (GPIO 7-11) と I2C1 (GPIO 2, 3) は使用中なので避ける。
+
+**入れ方**:
+
+```bash
+sudo cp deploy/krilly-launcher.service /etc/systemd/system/   # パスとユーザは環境に合わせる
+sudo systemctl daemon-reload
+sudo systemctl enable --now krilly-launcher
+journalctl -u krilly-launcher -f
+```
+
+電源断 (5 秒長押し) は `sudo -n systemctl poweroff` を呼ぶ。Raspberry Pi OS の既定ユーザは
+パスワード無しの sudo が通るが、そうでなければ sudoers に
+`<ユーザ> ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff` を足す。
+
+**開発中は止めておく**: SSH から `speed_run` などを走らせるとき、ランチャが動いていると
+ボタンの GPIO を取り合い、ボタンに触れると走行が起動しうる
+(`sudo systemctl stop krilly-launcher`)。
