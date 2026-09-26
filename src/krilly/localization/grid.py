@@ -84,6 +84,7 @@ def apply_axis_heading(
     axis_rad: float,
     weight: float = 1.0,
     max_error: float | None = MAX_HEADING_CORRECTION_RAD,
+    camera_offset_rad: float = 0.0,
 ) -> bool:
     """カメラで測った迷路軸からの方位ずれで、推定方位を補正する。
 
@@ -98,12 +99,17 @@ def apply_axis_heading(
     壁を押した)。位置の絶対補正 (:func:`apply_cell_offset`) と対になる、方位側の
     絶対補正がこれ。
 
+    ``camera_offset_rad`` はカメラが機体に対して回っている角度 (+ = CCW、
+    ``RobotConfig.camera_yaw_offset_deg``)。軸角はカメラの向きなので、機体の向きは
+    それを差し引いたもの。0 でないと、カメラを軸に合わせるたびに機体が傾いて走る。
+
     推定 φ から測定値を引いた値を 90° 格子へスナップし、測定値を足し戻したものを
     目標とする。``max_error`` (既定 :data:`MAX_HEADING_CORRECTION_RAD` = 5°) を超える
     補正は**誤測定として棄却する** — 適用すると機体を物理的にその角度だけ回してしまい、
     以降のカメラ測定も壊れて走行が崩壊する (#76 の実機で経験)。
     """
     quarter = math.pi / 2.0
+    axis_rad = axis_rad - camera_offset_rad
     target = snap_to_grid(est.phi - axis_rad, quarter) + axis_rad
     if max_error is not None and abs(target - est.phi) > max_error:
         return False

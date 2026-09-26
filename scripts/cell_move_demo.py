@@ -455,7 +455,7 @@ def main() -> None:
             # する。デモにはそれが無いので、傾いたまま最後まで流れて壁に当たる。
             # 平行移動は自分の体軸に沿って進むので、傾き θ はそのまま通路に対する
             # 横流れ D·sin(θ) になる (実測: 1° の傾きで 8 セル = 25mm、余裕 21mm を超える)。
-            if apply_axis_heading(est, yaw_before.angle_rad):
+            if apply_axis_heading(est, yaw_before.angle_rad, camera_offset_rad=math.radians(kin.cfg.camera_yaw_offset_deg)):
                 log.info("迷路軸へ整列: 推定方位を %+.3f° 補正 (基準との差を次の動作で詰める)",
                          math.degrees(est.phi - motion.reference[2]))
                 # 傾いて置くと、機体は走りながらその分を回して直す。回っている間は

@@ -337,7 +337,8 @@ def main() -> None:
                     before = est.phi
                     log.debug("  軸角の根拠: 線分 %d 本 / 総長 %.0fpx",
                               yaw.segments, yaw.total_length_px)
-                    if apply_axis_heading(est, yaw.angle_rad, weight=args.correct_weight):
+                    if apply_axis_heading(est, yaw.angle_rad, weight=args.correct_weight,
+                                          camera_offset_rad=math.radians(kin.cfg.camera_yaw_offset_deg)):
                         log.info("  方位補正: 軸から %+.2f° -> φ %+.2f°",
                                  yaw.angle_deg, math.degrees(est.phi - before))
                     else:

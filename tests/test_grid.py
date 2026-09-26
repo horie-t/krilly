@@ -115,3 +115,18 @@ def test_apply_axis_heading_rejects_an_implausible_correction():
     # 数度の補正は通る (これが本来の用途)
     assert apply_axis_heading(est, math.radians(1.5))
     assert est.phi == pytest.approx(math.pi / 2 + math.radians(1.5))
+
+
+def test_camera_yaw_offset_turns_the_body_off_the_camera_axis():
+    """カメラが機体に対して +2.8° (CCW) 回っているなら、カメラが軸に合った (0°) とき
+    機体は -2.8° 傾いている。補正は機体を +2.8° 側へ回す目標を出す (試走会 2026-09-26)。"""
+    import math
+
+    from krilly.localization.estimator import DeadReckoning
+    from krilly.localization.grid import apply_axis_heading
+
+    est = DeadReckoning()
+    est.phi = math.pi / 2
+    off = math.radians(2.8)
+    assert apply_axis_heading(est, 0.0, camera_offset_rad=off)
+    assert est.phi == pytest.approx(math.pi / 2 - off)   # 推定は「機体は -2.8°」になる
