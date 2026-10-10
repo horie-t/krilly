@@ -2,7 +2,7 @@
 
 競技会場で走らせる当日の手順。**練習室と会場で変わるのは照明と床**で、そのどちらも
 カメラの壁判定に直接効く。ここに書いてあることは全部、実機で測った結果に基づく
-(根拠は CLAUDE.md の該当項目を参照)。
+(根拠は [`claude/`](claude/README.md) の該当ページを参照)。
 
 判断に使う数字は 2 つだけ:
 
@@ -59,7 +59,7 @@ LBAT (セル電圧 ≤ 3.0V で High) と PLD (外部電源断) の GPIO だけ�
    — 固ければそれ
 4. **床で切り分ける** — 黒い床で鳴って木の床で鳴らないなら、板の撓み
 
-4 原因の対照表は CLAUDE.md の「An audible rub has had four different causes」。
+4 原因の対照表は [`claude/mechanics-and-faults.md`](claude/mechanics-and-faults.md) の「An audible rub has had four different causes」。
 
 ### 2. 迷路の周囲 1 セルぶんを片付ける
 
@@ -87,7 +87,7 @@ python -m scripts.wall_detect --measure 5 --ev -2     # 向かい合う壁の読
 ```
 
 差が **2mm を超えたら** `python -m scripts.camera_fov --full-only --emit-bands --ev -2` で
-`CALIBRATED_BANDS` を測り直す (手順は CLAUDE.md の該当項)。
+`CALIBRATED_BANDS` を測り直す (手順は [`claude/wall-detection.md`](claude/wall-detection.md) の「Re-mounting the camera」の項)。
 
 **この確認では、カメラが「回った」ことは分からない。** 試走会 (2026-09-26) では天板のねじが
 緩んでカメラが約 2.8° 回っており、向かい合う壁の読みは一致していたのに、**どの向きに進んでも
@@ -373,7 +373,7 @@ python -m scripts.wall_detect --batch survey/venue --h2-lo 120    # 変えたら
 
 ## 参考
 
-- 照明とカメラの実測値、赤マスクの根拠: CLAUDE.md の
-  「Auto-exposure eats the brightness axis」「Wall detection is ROI-based」の項
-- 校正データの取り方と読み方: CLAUDE.md「The search run *is* the survey」の項
+- 照明とカメラの実測値、赤マスクの根拠: [`claude/lighting-and-floors.md`](claude/lighting-and-floors.md)
+  「Auto-exposure eats the brightness axis」、[`claude/wall-detection.md`](claude/wall-detection.md)「Wall detection is ROI-based」の項
+- 校正データの取り方と読み方: [`claude/wall-detection.md`](claude/wall-detection.md)「The search run *is* the survey」の項
 - Pi の初期設定: [`setup-pi5.md`](setup-pi5.md)
