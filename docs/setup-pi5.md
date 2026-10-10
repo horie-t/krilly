@@ -140,7 +140,7 @@ sudo nmcli connection modify AndroidAP135XL connection.autoconnect-priority 10
 ### シリアルコンソール (GPIO14/15)
 
 USB-C を USB Ethernet にする方法 (`rpi-usb-gadget`) は**この機体では使わない**。Pi 5 の USB-C は電源の
-入り口でもあり、機体は GPIO / ポゴピンから X-UPS1 の 5V で動いているので、ノート PC をつなぐと 5V が
+入り口でもあり、機体は 40 ピンヘッダのピン 2 (5V) / 6 (GND) から X-UPS1 の 5V で動いているので、ノート PC をつなぐと 5V が
 二重になる。USB-TTL (3.3V) アダプタで UART につなげば、GND・TX・RX だけなので電源はぶつからず、
 **ネットワークの設定が壊れていてもログインできる**。
 
@@ -153,11 +153,11 @@ ls -l /dev/serial0          # -> ttyAMA0 になっていれば OK
 
 **Pi 5 では `raspi-config` だけでは足りない。** コンソールが基板上の 3 ピンのデバッグ用コネクタ
 (`ttyAMA10`) に出るだけで、GPIO14/15 (`ttyAMA0`) にはログイン画面が出ない。`dtparam=uart0_console` が
-コンソールをピン 6 / 8 / 10 に移す (`/boot/firmware/overlays/README`、2712 のみ)。
+コンソールを GPIO14/15 (ピン 8 / 10) に移す (`/boot/firmware/overlays/README`、2712 のみ)。
 
 | USB-TTL アダプタ | Pi (物理ピン) |
 |---|---|
-| GND | 6 (GND) |
+| GND | 14 (GND)。6 は X-UPS1 の 5V の GND で埋まっている (どの GND ピンでもよい) |
 | RX | 8 (GPIO14 = TXD) |
 | TX | 10 (GPIO15 = RXD) |
 
