@@ -345,7 +345,7 @@ def main() -> int:
             # 方位: ジャイロの基準は走行開始時の向きなので、迷路軸へ引き戻す
             yaw = axis_yaw(frame, yaw_cfg)
             if yaw is not None:
-                apply_axis_heading(est, yaw.angle_rad)
+                apply_axis_heading(est, yaw.angle_rad, camera_offset_rad=math.radians(kin.cfg.camera_yaw_offset_deg))
             off = cell_offset(frame, detector, measured=measured)
             if off.saturated:
                 log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
@@ -492,7 +492,7 @@ def main() -> int:
             # 姿勢を作り直す。**ガードは正常運転より広い** — 姿勢が狂っているのは
             # 既に分かっているので前提が反転する (#113)
             here = verdict.cell
-            if not apply_axis_heading(est, yaw.angle_rad,
+            if not apply_axis_heading(est, yaw.angle_rad, camera_offset_rad=math.radians(kin.cfg.camera_yaw_offset_deg),
                                       max_error=RECOVERY_MAX_HEADING_RAD):
                 log.error("進行中止: 方位補正が回復用のガードにも入らない。")
                 return None

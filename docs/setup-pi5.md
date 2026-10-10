@@ -194,3 +194,29 @@ sudo sh -c 'echo ":WSLInterop:M::MZ::/init:PF" > /usr/lib/binfmt.d/WSLInterop.co
 sudo systemctl restart systemd-binfmt       # それでもだめなら PowerShell で wsl --shutdown
 ```
 
+## 9. 電源とログの設定 (本番 2026-09-27 の起動失敗の後に入れた)
+
+**停止したら Pi の電源も切る** (`POWER_OFF_ON_HALT=1`)。既定 (0) では、停止しても X-UPS1 の 5V が
+かかったまま「停止しているが給電中」で待ち、その間も電池を使う。どちらの設定でも、起動し直すのは
+**Pi 5 の電源ボタン**で、X-UPS1 のスイッチでは起動しない (自宅で再現済み)。
+
+```bash
+rpi-eeprom-config > /tmp/eeprom.txt
+sed -i 's/^POWER_OFF_ON_HALT=0/POWER_OFF_ON_HALT=1/' /tmp/eeprom.txt
+sudo rpi-eeprom-config --apply /tmp/eeprom.txt     # 次の再起動で反映
+```
+
+**OS のログを残す**。Raspberry Pi OS は `/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf` で
+`Storage=volatile` にしてあり、電源を切るたびにログが消える。後から読まれるドロップインで上書きする:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=200M\n' | sudo tee /etc/systemd/journald.conf.d/90-krilly-persistent.conf
+sudo systemctl restart systemd-journald && sudo journalctl --flush
+journalctl --list-boots      # 次の起動から過去の起動が並ぶ
+```
+
+**時刻**: NTP (`systemd-timesyncd`) で合わせる。Pi 5 の RTC は**バックアップ電池がつながっていない**
+(`vcgencmd pmic_read_adc BATT_V` が 0V) ので、電源を完全に切ると時計が止まり、ネットワークの無い起動では
+前回の時刻から再開する。会場でテザリングにつなげば合う。ログの時刻を信用したいなら RTC 用の電池を付ける。
+

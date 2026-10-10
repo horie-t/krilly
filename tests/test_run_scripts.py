@@ -162,3 +162,11 @@ def test_an_aborted_session_exits_non_zero():
     from scripts.speed_run import EXIT_ABORTED
 
     assert EXIT_ABORTED != 0
+
+
+def test_spi_watch_parses_without_hardware():
+    """試走会の切り分けに使った見張り。パーサは実機に触らない。"""
+    from scripts.spi_watch import build_parser
+
+    args = build_parser().parse_args(["--seconds", "5", "--spin"])
+    assert args.seconds == 5 and args.spin

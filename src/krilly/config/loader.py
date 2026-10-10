@@ -36,6 +36,8 @@ class RobotConfig:
     microstep: int                    # マイクロステップ分割数 (1/μ)
     wheel_angles_deg: list[float]     # 各輪の駆動方向角 [deg]
     gyro_scale_z: float = 1.0         # BNO055 gyro z のスケール補正 (#17 で校正)
+    #: カメラが機体に対して回っている角度 [deg] (+ = CCW)。軸角による方位補正で差し引く。
+    camera_yaw_offset_deg: float = 0.0
     #: 車輪ごとの実効径 [m]。None なら全輪 ``wheel_diameter_m``。
     #: 前進はほぼ W1/W2 だけで駆動するので (W0 の vx 係数は +0.026)、前進で校正した
     #: ``wheel_diameter_m`` は実質 W1/W2 の値になる。横移動は逆に W0 が主役 (係数 +1.000)
@@ -87,6 +89,7 @@ def load_robot_config(path: str | Path | None = None) -> RobotConfig:
         microstep=int(data["microstep"]),
         wheel_angles_deg=[float(a) for a in data["wheel_angles_deg"]],
         gyro_scale_z=float(data.get("gyro_scale_z", 1.0)),
+        camera_yaw_offset_deg=float(data.get("camera_yaw_offset_deg", 0.0)),
         wheel_diameters_m=(
             [float(d) for d in data["wheel_diameters_m"]]
             if data.get("wheel_diameters_m") else None
