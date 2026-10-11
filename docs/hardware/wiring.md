@@ -3,6 +3,8 @@
 ジャンパ線で組んである今の配線を、コード・ドキュメント・これまでの記録から書き出したもの。
 **「要確認」の欄は実物を見て埋める。** 基板の回路図はこの表から起こす。
 
+この表から起こした基板 (krilly HAT v1、2026-10-11 発注) は [`hardware/krilly-hat/`](../../hardware/krilly-hat/README.md) にある。
+
 出典: `src/krilly/hal/` (l6470_chain / imu / gpio_io)、`docs/setup-pi5.md`、`docs/venue-checklist.md`、
 `CLAUDE.md` / `docs/claude/`、メモリ (旧 Pi の GPIO 故障、AE-L6470 の JP1)。
 
