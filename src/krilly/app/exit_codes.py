@@ -35,8 +35,10 @@ def run_reporting_spi_lost(body: Callable[[], int | None], log: logging.Logger) 
             log.error("  途中で応答が戻ったので解放 (HardHiZ) を送った。"
                       "それでも回っていたら **VS 遮断のトグルを切ること**")
         else:
-            log.error("  応答が戻らず、解放も届いていない。モータは最後の指令で回り"
-                      "続けている可能性がある。**VS 遮断のトグルを切ること**")
+            # 応答が無いのは「読めない」だけで、送った解放が届いたかは分からない
+            # (#148 の実機確認では MISO 側だけ偽装して、実際には HiZ が立っていた)
+            log.error("  応答が戻らず、解放が届いたか確認できない。モータは最後の指令で"
+                      "回り続けている可能性がある。**VS 遮断のトグルを切ること**")
         log.error("  切り分け: 車輪を浮かせて python -m scripts.spi_watch --seconds 30 "
                   "を回しながら SPI の配線を揺する")
         return EXIT_SPI_LOST
