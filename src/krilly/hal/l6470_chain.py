@@ -32,6 +32,9 @@ best-effort として扱う。
 
 from __future__ import annotations
 
+import time
+from typing import Callable
+
 from krilly.hal.l6470 import (
     FWD,
     REV,
@@ -40,6 +43,7 @@ from krilly.hal.l6470 import (
     Reg,
     _REG_BYTES,
     accel_to_register,
+    dead_devices,
     speed_to_max_speed_register,
     speed_to_run_register,
 )
@@ -183,6 +187,24 @@ class L6470Chain:
 
     def reset_all(self) -> None:
         self.broadcast(Cmd.RESET_DEVICE)
+
+    def release_until_alive(self, tries: int = 20, interval_s: float = 0.05,
+                            sleep: Callable[[float], None] = time.sleep) -> bool:
+        """応答が戻るまで HardHiZ を送り続ける (#148)。戻れば True。
+
+        SPI の接触不良は一瞬途切れては戻る (``spi_watch`` で 2 秒に 3 回など)。
+        途切れている間は何を送っても届かないが、**戻った瞬間に届けば止まる**ので、
+        打ち切る前に少しの間送り続ける。STATUS が読めた = その直前の HardHiZ も
+        通った見込みが高いので、念のためもう 1 回送ってから返す。
+        """
+        for attempt in range(max(1, tries)):
+            self.hard_hiz_all()
+            if not dead_devices(self.get_status_all()):
+                self.hard_hiz_all()
+                return True
+            if attempt + 1 < tries:
+                sleep(interval_s)
+        return False
 
     # -- セットアップ -------------------------------------------------------
     def configure_all(self, profile: L6470Profile | None = None) -> list[int]:

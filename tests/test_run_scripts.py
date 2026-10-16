@@ -170,3 +170,35 @@ def test_spi_watch_parses_without_hardware():
 
     args = build_parser().parse_args(["--seconds", "5", "--spin"])
     assert args.seconds == 5 and args.spin
+
+
+def test_spi_lost_becomes_its_own_exit_code():
+    """通信断は「中断」と別の音にする (VS を切ってもらう、#148)。"""
+    import logging
+
+    from krilly.app.exit_codes import EXIT_ABORTED, EXIT_SPI_LOST, run_reporting_spi_lost
+    from krilly.hal.l6470 import SpiLost
+
+    log = logging.getLogger("test")
+
+    def lost():
+        raise SpiLost([0, 1, 2], "Sへ1->Wへ1")
+
+    assert run_reporting_spi_lost(lost, log) == EXIT_SPI_LOST
+    assert run_reporting_spi_lost(lambda: None, log) == 0
+    assert run_reporting_spi_lost(lambda: EXIT_ABORTED, log) == EXIT_ABORTED
+    assert len({0, EXIT_ABORTED, EXIT_SPI_LOST}) == 3
+
+
+def test_driving_scripts_route_through_the_spi_lost_wrapper():
+    """3 本とも main が包まれていること (片方だけ直すと音が黙って変わる)。"""
+    import inspect
+
+    import scripts.cell_move_demo as cell_move_demo
+    import scripts.search_run as search_run
+    import scripts.speed_run as speed_run
+
+    for mod in (speed_run, search_run, cell_move_demo):
+        assert "run_reporting_spi_lost" in inspect.getsource(mod.main)
+        assert "raise_if_spi_lost" in inspect.getsource(mod._main)
+

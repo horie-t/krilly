@@ -4,6 +4,7 @@ import signal
 
 import pytest
 
+from krilly.app.exit_codes import EXIT_ABORTED, EXIT_SPI_LOST
 from krilly.app.launcher import (
     BEEP_ALARM,
     BEEP_BOOT,
@@ -137,7 +138,8 @@ def test_stopped_by_the_button_beeps_differently_from_a_crash():
     assert r.l.state is State.IDLE and r.beeps[-1] == BEEP_STOPPED
 
 
-@pytest.mark.parametrize("rc, beep", [(0, BEEP_DONE), (2, BEEP_FAILED)])
+@pytest.mark.parametrize("rc, beep", [(0, BEEP_DONE), (EXIT_ABORTED, BEEP_FAILED),
+                                     (EXIT_SPI_LOST, BEEP_ALARM)])
 def test_the_exit_code_decides_the_beep(rc, beep):
     r = Rig()
     r.hold(1.2)
@@ -213,3 +215,15 @@ def test_the_launcher_validates_the_saved_command_with_the_scripts_own_parser(tm
     typo.write_text('script: speed_run\nargs: [--evv, "-2"]\n', encoding="utf-8")
     assert check_config(typo) == (None, None)
     assert check_config(tmp_path / "missing.yaml") == (None, None)
+
+
+def test_spi_lost_sounds_the_alarm_even_after_the_button():
+    """SPI が切れていればボタンの SIGINT からの解放も届いていない (#148)。"""
+    r = Rig(child=FakeChild(dies_on=()))
+    r.hold(1.2)
+    r.run(COUNTDOWN_S)
+    r.hold(0.05)                  # 走行中に押した -> SIGINT
+    r.child.rc = EXIT_SPI_LOST     # ただし子は SPI 断で終わった
+    r.run(0.05)
+    assert r.beeps[-1] == BEEP_ALARM
+

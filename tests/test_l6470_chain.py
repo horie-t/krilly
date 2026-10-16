@@ -114,3 +114,42 @@ def test_context_manager_hiz_all_and_close():
         pass
     assert spi.calls[-1] == [Cmd.HARD_HIZ, Cmd.HARD_HIZ]
     assert getattr(spi, "closed", False) is True
+
+
+# --- SPI が途切れたときの解放 (#148) ----------------------------------------
+class FlakyLink:
+    """``dead_reads`` 回だけ STATUS が 0x0000 (応答なし) になり、その後は戻る。"""
+
+    def __init__(self, chain, dead_reads):
+        self.dead_reads = dead_reads
+        self.hiz = 0
+        self.sleeps = []
+        chain.hard_hiz_all = self.hard_hiz_all
+        chain.get_status_all = self.get_status_all
+
+    def hard_hiz_all(self):
+        self.hiz += 1
+
+    def get_status_all(self):
+        if self.dead_reads > 0:
+            self.dead_reads -= 1
+            return [0x0000, 0x0000, 0x0000]
+        return [0x7E03, 0x7E03, 0x7E03]
+
+
+def test_release_keeps_sending_hiz_until_the_link_comes_back():
+    """途切れては戻る接触不良なので、戻った瞬間に解放が届くよう送り続ける。"""
+    chain = L6470Chain(3, spi=FakeSpi())
+    link = FlakyLink(chain, dead_reads=3)
+    assert chain.release_until_alive(tries=10, sleep=link.sleeps.append) is True
+    # 4 回目の読みで戻る。戻ったら念のためもう 1 回送る
+    assert link.hiz == 5
+    assert len(link.sleeps) == 3
+
+
+def test_release_gives_up_when_the_link_never_comes_back():
+    chain = L6470Chain(3, spi=FakeSpi())
+    link = FlakyLink(chain, dead_reads=100)
+    assert chain.release_until_alive(tries=4, sleep=link.sleeps.append) is False
+    assert link.hiz == 4
+    assert len(link.sleeps) == 3     # 最後の試行の後は待たない

@@ -25,10 +25,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import math
+import sys
 import time
 from pathlib import Path
 
 from krilly.config import load_maze_config
+from krilly.app.exit_codes import EXIT_ABORTED, run_reporting_spi_lost
 from krilly.hal.camera import add_camera_args, camera_kwargs
 from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
@@ -39,7 +41,13 @@ from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.localization.grid import apply_axis_heading, apply_cell_offset
 from krilly.motion.emergency_stop import emergency_stop
-from krilly.motion.tuning import add_tuning_args, build_tuning, check_limits, describe_faults
+from krilly.motion.tuning import (
+    add_tuning_args,
+    build_tuning,
+    check_limits,
+    describe_faults,
+    raise_if_spi_lost,
+)
 from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
@@ -140,7 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> None:
+def main() -> int:
+    return run_reporting_spi_lost(_main, log)
+
+
+def _main() -> int | None:
     args = build_parser().parse_args()
 
     setup_logging()
@@ -206,7 +218,7 @@ def main() -> None:
             if any(s in (0x0000, 0xFFFF) for s in statuses):
                 log.error("SPI 応答異常 (STATUS=%s)。配線/電源を確認。中止。",
                           [f"0x{s:04X}" for s in statuses])
-                return
+                return EXIT_ABORTED
             log.info("停止は Ctrl-C (ESC は効かない)。"
                      "強制終了して回り続けたら python -m scripts.motor_stop")
             if not args.no_imu:
@@ -285,7 +297,10 @@ def main() -> None:
                                 label, args.timeout, motion.remaining)
                     motion.abort()
                     break
-            faults = describe_faults(chain.get_status_all(), ignore=("UVLO",))
+            statuses = chain.get_status_all()
+            # 応答なしはフォールトではなく通信断。続けても指令が届かない (#148)
+            raise_if_spi_lost(chain, statuses, label)
+            faults = describe_faults(statuses, ignore=("UVLO",))
             if faults:
                 log.warning("  %s: L6470 フォールト %s (トルク不足の疑い)", label, faults)
             along, cross, dphi = motion.residual()
@@ -540,4 +555,4 @@ def report_shortest_path(explorer: Explorer, cost: MoveCost) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -47,9 +47,11 @@ import contextlib
 import math
 import re
 import statistics
+import sys
 import time
 from dataclasses import dataclass
 
+from krilly.app.exit_codes import EXIT_ABORTED, run_reporting_spi_lost
 from krilly.hal.camera import add_camera_args, camera_kwargs
 from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
@@ -60,7 +62,13 @@ from krilly.localization.grid import apply_axis_heading
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
-from krilly.motion.tuning import add_tuning_args, build_tuning, check_limits, describe_faults
+from krilly.motion.tuning import (
+    add_tuning_args,
+    build_tuning,
+    check_limits,
+    describe_faults,
+    raise_if_spi_lost,
+)
 from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.axis_yaw import (
     AxisYaw,
@@ -216,7 +224,11 @@ def parse_seq(text: str) -> list[Move]:
     return moves
 
 
-def main() -> None:
+def main() -> int:
+    return run_reporting_spi_lost(_main, log)
+
+
+def _main() -> int | None:
     p = argparse.ArgumentParser(description="1セル前進・90°ターンの位置連動デモ")
     p.add_argument("--devices", type=int, default=3, help="連結台数")
     p.add_argument("--bus", type=int, default=0, help="SPI バス (既定 0)")
@@ -276,7 +288,7 @@ def main() -> None:
         if any(s in (0x0000, 0xFFFF) for s in statuses):
             log.error("SPI 応答異常 (STATUS=%s)。配線/電源を確認。中止。",
                       [f"0x{s:04X}" for s in statuses])
-            return
+            return EXIT_ABORTED
 
         imu = None
         bias_z = 0.0
@@ -402,7 +414,9 @@ def main() -> None:
                                 label, timeout, motion.remaining)
                     motion.abort()
                     break
-            faults = describe_faults(chain.get_status_all(), ignore=("UVLO",))
+            statuses = chain.get_status_all()
+            raise_if_spi_lost(chain, statuses, label)   # 通信断は打ち切る (#148)
+            faults = describe_faults(statuses, ignore=("UVLO",))
             if faults:
                 log.warning("%s: L6470 フォールト %s "
                             "(STEP_LOSS/OCD なら速度・加速度に対してトルクが不足)",
@@ -539,4 +553,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
