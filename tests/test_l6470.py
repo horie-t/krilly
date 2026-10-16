@@ -126,3 +126,16 @@ def test_context_manager_puts_bridges_hiz_and_closes():
         drv.run(FWD, 200)
     assert spi.sent[-1] == 0xA8  # 終了時に HARD_HIZ
     assert getattr(spi, "closed", False) is True
+
+
+# --- 応答なしの判定 (#148) --------------------------------------------------
+def test_dead_devices_are_the_all_zero_or_all_one_statuses():
+    assert l6470.dead_devices([0x7E03, 0x0000, 0xFFFF]) == [1, 2]
+    assert l6470.dead_devices([0x7E03, 0x7C03, 0x7E50]) == []
+
+
+def test_spi_lost_names_the_devices_and_the_motion():
+    e = l6470.SpiLost([0, 1, 2], "Sへ2->Wへ1", released=False)
+    assert "Sへ2->Wへ1" in str(e) and "M0, M1, M2" in str(e)
+    assert e.devices == [0, 1, 2] and e.released is False
+

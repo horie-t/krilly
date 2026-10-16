@@ -7,7 +7,7 @@ import math
 
 import pytest
 
-from krilly.hal.l6470 import NO_SPI, fault_flags
+from krilly.hal.l6470 import NO_SPI, SpiLost, fault_flags
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.hal.l6470 import L6470Profile
 from krilly.motion.cell_motion import CellMotionConfig
@@ -18,6 +18,7 @@ from krilly.motion.tuning import (
     check_limits,
     describe_faults,
     peak_wheel_value,
+    raise_if_spi_lost,
 )
 
 
@@ -141,3 +142,32 @@ def test_lateral_peak_is_checked_too():
     between = (kin.wheel_speed_to_step_hz(forward) + kin.wheel_speed_to_step_hz(lateral)) / 2
     warnings = check_limits(build_tuning(parse(["--max-speed", str(between)])))
     assert any("MAX_SPEED" in w and "横移動" in w for w in warnings)
+
+
+# --- 応答なしは打ち切る (#148) ----------------------------------------------
+class FakeChain:
+    def __init__(self, comes_back: bool):
+        self.comes_back = comes_back
+        self.released = 0
+
+    def release_until_alive(self):
+        self.released += 1
+        return self.comes_back
+
+
+def test_a_faulty_but_answering_chain_is_left_to_the_warning():
+    """STEP_LOSS などは「苦しかった」証拠なので警告で済む。解放もしない。"""
+    chain = FakeChain(comes_back=True)
+    raise_if_spi_lost(chain, [0x7E03, 0x3E03, 0x7E03], "Nへ1")
+    assert chain.released == 0
+
+
+@pytest.mark.parametrize("comes_back", [True, False])
+def test_no_answer_releases_then_aborts(comes_back):
+    """2026-10-16: 応答なしを回復に回したら、届かない指令のまま 16° 回った。"""
+    chain = FakeChain(comes_back=comes_back)
+    with pytest.raises(SpiLost) as e:
+        raise_if_spi_lost(chain, [0x0000, 0x0000, 0x7E03], "Sへ1->Wへ1")
+    assert chain.released == 1
+    assert e.value.devices == [0, 1] and e.value.released is comes_back
+

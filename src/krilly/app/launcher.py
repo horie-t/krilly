@@ -22,6 +22,11 @@ SIGINT で 2 秒たっても終わらなければ SIGTERM (同じハンドラが
 L6470 は最後の Run 指令を保持したまま回り続ける (実績あり)。その場合に止めるのは
 **ソフトを通らない VS 遮断のトグル**の役目。
 
+鳴らし分けは子プロセスの終了コード (:mod:`krilly.app.exit_codes`) で決める。
+**SPI が途切れて打ち切った** (``EXIT_SPI_LOST``、#148) ときは中断の音ではなく
+警報を鳴らす。止める指令も SPI を通るので、モータは最後の指令のまま回り続けて
+いる可能性があり、止めるのは VS 遮断のトグルだから。
+
 このモジュールは純粋なロジックで、時刻・ボタンの状態・子プロセス・ブザーをすべて
 外から渡す。実機への配線は ``scripts/launcher.py``。
 """
@@ -32,6 +37,8 @@ import signal
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Protocol
+
+from krilly.app.exit_codes import EXIT_SPI_LOST
 
 #: 鳴らし方: (鳴らす秒, 休む秒) の列。
 Pattern = tuple[tuple[float, float], ...]
@@ -256,6 +263,11 @@ class Launcher:
         if rc == 0:
             self.beep(BEEP_DONE)
             self.log("走行が終わった (終了コード 0)")
+        elif rc == EXIT_SPI_LOST:
+            # ボタンで止めた後でも、SPI が切れていれば止める指令は届いていない
+            self.beep(BEEP_ALARM)
+            self.log(f"SPI が途切れて打ち切った (終了コード {rc})。モータが回り続けて"
+                     "いたら **VS 遮断のトグルを切ること**")
         elif stopped:
             self.beep(BEEP_STOPPED)
             self.log(f"ボタンで止めた (終了コード {rc})")

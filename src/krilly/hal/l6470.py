@@ -188,6 +188,36 @@ def fault_flags(status: int) -> set[str]:
     return {name for bit, name in FAULT_BITS if not (status >> bit) & 1}
 
 
+def dead_devices(statuses: list[int]) -> list[int]:
+    """STATUS が読めなかった (SPI の応答が無い) デバイスの番号 (#148)。
+
+    0x0000 / 0xFFFF はどちらも実際の STATUS としてはありえない (フォールトが全部
+    立つか、予約ビットまで 1 になる) ので、**通信が無い**ことを意味する。
+    """
+    return [i for i, s in enumerate(statuses) if s in (0x0000, 0xFFFF)]
+
+
+class SpiLost(RuntimeError):
+    """走行中に SPI の応答が途切れた (#148)。
+
+    **通信が途切れている間、L6470 は最後の Run 指令のまま回り続ける。** 止める
+    指令 (``motor_stop`` も、走行スクリプトの解放も) も SPI を通るので届かない。
+    2026-10-16 の 8x8 では、これを「原因不明の回転」として回復 (#113) し、届かない
+    次の指令を出したまま機体がさらに 16° 回った。だから**回復を試みずに打ち切る**。
+
+    ``released`` は、打ち切る前に解放 (HardHiZ) を送り続けて、途中で応答が
+    戻った (= 解放が届いた見込みがある) かどうか。
+    """
+
+    def __init__(self, devices: list[int], label: str = "", released: bool = False):
+        self.devices = list(devices)
+        self.label = label
+        self.released = released
+        names = ", ".join(f"M{i}" for i in self.devices)
+        where = f"{label}: " if label else ""
+        super().__init__(f"{where}SPI の応答が無い ({names})")
+
+
 def decode_status(status: int, first_read: bool = False) -> str:
     """16-bit の STATUS register を人間が読める形に要約する。
 

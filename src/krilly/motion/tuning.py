@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
-from krilly.hal.l6470 import L6470Profile, fault_flags
+from krilly.hal.l6470 import L6470Profile, SpiLost, dead_devices, fault_flags
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.motion.corner import (
     blend_distance_m,
@@ -258,3 +258,16 @@ def describe_faults(statuses: list[int], ignore: tuple[str, ...] = ()) -> str | 
         if flags:
             parts.append("M%d:%s" % (index, "/".join(flags)))
     return " ".join(parts) if parts else None
+
+
+def raise_if_spi_lost(chain, statuses: list[int], label: str = "") -> None:
+    """動作後の STATUS で 1 台でも応答が無ければ、解放を送ってから打ち切る (#148)。
+
+    フォールト (STEP_LOSS/OCD など) は「その動作が苦しかった」証拠なので警告で
+    済むが、**応答なしは「この先の指令が届かない」**ことを意味する。回復 (#113) も
+    次の動作も指令を前提にしているので、続ける意味が無く危険。呼び出し側は
+    :class:`~krilly.hal.l6470.SpiLost` を最上位で受け、専用の終了コードで終わる。
+    """
+    dead = dead_devices(statuses)
+    if dead:
+        raise SpiLost(dead, label, released=chain.release_until_alive())

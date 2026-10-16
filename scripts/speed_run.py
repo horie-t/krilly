@@ -23,6 +23,7 @@ import sys
 import time
 from pathlib import Path
 
+from krilly.app.exit_codes import EXIT_ABORTED, run_reporting_spi_lost
 from krilly.app.run_manager import RunManager, RunPhase
 from krilly.config import load_maze_config
 from krilly.hal.camera import add_camera_args, camera_kwargs
@@ -44,7 +45,13 @@ from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
 from krilly.motion.corner import corridor_clearance_m
-from krilly.motion.tuning import add_tuning_args, build_tuning, check_limits, describe_faults
+from krilly.motion.tuning import (
+    add_tuning_args,
+    build_tuning,
+    check_limits,
+    describe_faults,
+    raise_if_spi_lost,
+)
 from krilly.motion.velocity_driver import VelocityDriver
 from krilly.perception.axis_yaw import axis_yaw, calibrated_axis_yaw_config
 from krilly.perception.cell_pose import cell_offset
@@ -149,8 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-#: 走行が中断で終わったときの終了コード (#79 のランチャが音を変える)。
-EXIT_ABORTED = 2
+# 走行が中断で終わったときの終了コード EXIT_ABORTED (#79 のランチャが音を変える) は
+# krilly.app.exit_codes にある (ランチャと共有するため)。
 
 
 def run_args_to_save(argv: list[str]) -> list[str]:
@@ -159,6 +166,10 @@ def run_args_to_save(argv: list[str]) -> list[str]:
 
 
 def main() -> int:
+    return run_reporting_spi_lost(_main, log)
+
+
+def _main() -> int:
     args = build_parser().parse_args()
 
     setup_logging()
@@ -229,7 +240,7 @@ def main() -> int:
         statuses = chain.configure_all(tuning.profile)
         if any(s in (0x0000, 0xFFFF) for s in statuses):
             log.error("SPI 応答異常 (STATUS=%s)。中止。", [f"0x{s:04X}" for s in statuses])
-            return
+            return EXIT_ABORTED     # 0 を返すとランチャが完走の音を鳴らす (#148)
         log.info("停止は Ctrl-C (ESC は効かない)。"
                  "強制終了して回り続けたら python -m scripts.motor_stop")
         imu = None
@@ -310,7 +321,10 @@ def main() -> int:
             elapsed = time.monotonic() - t0
             if kind:
                 timings.setdefault(kind, []).append(elapsed)
-            faults = describe_faults(chain.get_status_all(), ignore=("UVLO",))
+            statuses = chain.get_status_all()
+            # 応答なしはフォールトではなく通信断。回復 (#113) に渡さず打ち切る (#148)
+            raise_if_spi_lost(chain, statuses, label)
+            faults = describe_faults(statuses, ignore=("UVLO",))
             if faults:
                 log.warning("    %s: L6470 フォールト %s (トルク不足の疑い)", label, faults)
             along, cross, dphi = motion.residual()
