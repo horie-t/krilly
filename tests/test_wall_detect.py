@@ -725,3 +725,26 @@ def test_band_shift_threshold_matches_the_position_fix_threshold():
     from krilly.perception.wall_detect import BAND_SHIFT_MIN_FRACTION
 
     assert BAND_SHIFT_MIN_FRACTION == OFFSET_MIN_FRACTION
+
+
+# --- ROI がフレームの外 (2026-10-17 の会場で回復中に例外) -------------------
+def test_an_roi_off_the_left_edge_does_not_wrap_around_or_crash():
+    """x が負の横帯は、Python のスライスで反対側の端を読んでいた (空の平均 -> 例外)。"""
+    from krilly.perception.wall_detect import Roi, best_roi_red_fraction
+
+    mask = np.zeros((720, 960), dtype=np.uint8)
+    mask[:, 900:] = 255                   # 右端だけ赤 (折り返して読めば壁に見える)
+    value, _offset, _sat = best_roi_red_fraction(mask, Roi(-58, 258, 178, 44),
+                                                 vertical=False, search_px=40)
+    assert value == 0.0
+    value, _offset, saturated = best_roi_red_fraction(mask, Roi(-300, 258, 178, 44),
+                                                      vertical=False, search_px=40)
+    assert value == 0.0 and saturated     # 完全に外 = 見えていない
+
+
+def test_shift_fits_looks_only_at_the_named_rois():
+    det = WallDetector(calibrated_config(neighbors=True))
+    shift = (-147, 57)                     # 会場で回復が出した移動量
+    assert det.shift_fits(shift, names=("front", "back", "left", "right"))
+    assert not det.shift_fits(shift)       # 左隣のセルの ROI はフレームの外
+    assert not det.shift_fits((-400, 0), names=("front", "back", "left", "right"))
