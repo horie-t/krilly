@@ -784,3 +784,73 @@ def test_the_lead_only_touches_turns(motion):
     m.start_move_cells(1, 0)
     m.update(DT, gyro_rate=2.0)
     assert m.remaining == pytest.approx(m._axis_remaining())
+
+
+# --- コーナーで速度を落とす (2026-10-17) ------------------------------------
+def make_motion(**cfg):
+    kin = KiwiKinematics(config=ROBOT)
+    driver = VelocityDriver(FakeChain(), kinematics=kin)
+    return CellMotion(driver, DeadReckoning(kin), config=CellMotionConfig(**cfg), maze=MAZE)
+
+
+def corner_accels(m: CellMotion):
+    """ブレンド中 (前後 3 tick を含む) のボディ加速度の大きさの列。"""
+    accels, blending, prev = [], [], (0.0, 0.0)
+    for _ in range(MAX_TICKS):
+        done = m.update(DT)
+        vx, vy = m.driver.current_velocity[:2]
+        accels.append(math.hypot(vx - prev[0], vy - prev[1]) / DT)
+        blending.append(m._blending)
+        prev = (vx, vy)
+        if done:
+            break
+    idx = [i for i, b in enumerate(blending) if b]
+    return sorted(accels[idx[0] - 3: idx[-1] + 4])
+
+
+def test_corner_off_keeps_the_original_blend():
+    """0 なら #80 / #107 のまま (v_max で入って v_max で出る、ブレンド 75mm)。"""
+    m = make_motion(corner_v_max=0.0)
+    assert not m.corner_slowdown
+    assert m.blend_distance == pytest.approx(0.30 ** 2 / (2 * 0.6))
+
+
+def test_the_corner_is_entered_at_the_corner_speed():
+    m = make_motion(corner_v_max=0.20, corner_accel_mps2=0.4)
+    assert m.blend_distance == pytest.approx(0.20 ** 2 / (2 * 0.4))
+    m.start_path_cells([(3, 0), (1, 1)])
+    entry = None
+    while not m.update(DT):
+        if m._blending and entry is None:
+            entry = math.hypot(*m.driver.current_velocity[:2])
+    # 3 セルの直線では v_max まで出ているが、ブレンドに入るときは corner_speed
+    assert entry == pytest.approx(0.20, abs=0.02)
+
+
+def test_slowing_down_lowers_the_corner_acceleration():
+    """会場で崩れたのはコーナーの最中。中央値で下がっていること (端の 2-3 tick は除く)。"""
+    fast = make_motion(corner_v_max=0.0)
+    fast.start_path_cells([(3, 0), (1, 1)])
+    slow = make_motion(corner_v_max=0.20, corner_accel_mps2=0.4)
+    slow.start_path_cells([(3, 0), (1, 1)])
+    a_fast, a_slow = corner_accels(fast), corner_accels(slow)
+    assert a_slow[len(a_slow) // 2] < 0.7 * a_fast[len(a_fast) // 2]
+
+
+def test_a_slowed_corner_still_lands_on_the_lattice():
+    m = make_motion(corner_v_max=0.15, corner_accel_mps2=0.3)
+    m.start_path_cells([(1, 0), (1, 1), (1, 0)])
+    drive(m)
+    assert m.corners == 2
+    along, cross, dphi = m.residual()
+    assert abs(along) <= m.cfg.pos_tol_m and abs(cross) <= m.cfg.pos_tol_m
+
+
+def test_a_straight_queue_does_not_slow_down():
+    """同じ向きの予約はコーナーではないので、落とさない。"""
+    m = make_motion(corner_v_max=0.15, corner_accel_mps2=0.3)
+    m.start_path_cells([(2, 0), (2, 0)])
+    _t, _p, speeds = drive(m)
+    assert max(speeds) == pytest.approx(m.cfg.v_max, abs=0.005)
+    i_mid = len(speeds) // 2
+    assert speeds[i_mid] == pytest.approx(m.cfg.v_max, abs=0.005)

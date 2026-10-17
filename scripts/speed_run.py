@@ -474,6 +474,15 @@ def _main() -> int:
             shift = offset_to_shift_px(lattice)
             log.warning("  格子から測ったセル内位置: %s -> ROI を (%+d, %+d)px 動かす",
                         lattice.describe(), *shift)
+            if not detector.shift_fits(shift, frames[-1].shape[1::-1], names=BODY_DIRS):
+                # 動かした ROI がフレームの外へ出る = その辺は見えていない。見えない辺を
+                # 「壁なし」として照合すると、居るセルを取り違えたまま走り出す。
+                # (2026-10-17 の会場: 27.7° 回った後、隣セルの ROI がフレーム外に出て
+                # 例外で落ちた。隣セルは照合に使わないので、見るのは自セルの 4 辺だけ)
+                log.error("進行中止: セル内のずれが大きすぎて壁が視野に入らない "
+                          "(ROI を %+d, %+d px 動かすとフレームの外)。**機体を持ち上げて"
+                          "置き直すこと**。", *shift)
+                return None
             measured = detector.measure(frames[-1], shift)
             body_walls = {d: measured[d][0] >= detector.cfg.threshold_for(d)
                           for d in BODY_DIRS}
