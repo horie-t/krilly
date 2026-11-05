@@ -48,12 +48,14 @@ class TuningProfile:
     def describe(self) -> str:
         """ログ 1 行用の要約 (走行のたびに記録して実測値と結び付けるため)。"""
         return (
-            "v=%.3fm/s omega=%.2frad/s accel=%.2f/%.1f decel=%.2f/%.1f dwell=%.2fs "
+            "v=%.3fm/s omega=%.2frad/s accel=%.2f/%.1f decel=%.2f/%.1f corner=%s dwell=%.2fs "
             "gyro_delay=%.0fms KVAL run=0x%02X hold=0x%02X MAX_SPEED=%.0fstep/s"
             % (
                 self.motion.v_max, self.motion.omega_max,
                 self.limits.max_linear_accel_mps2, self.limits.max_angular_accel_radps2,
                 self.motion.decel_mps2, self.motion.angular_decel_radps2,
+                ("%.2fm/s@%.2f" % (self.motion.corner_v_max, self.motion.corner_accel_mps2)
+                 if 0.0 < self.motion.corner_v_max < self.motion.v_max else "off"),
                 self.motion.settle_dwell_s, self.motion.gyro_delay_s * 1000.0,
                 self.profile.kval_run, self.profile.kval_hold,
                 self.profile.max_speed_steps_s,
@@ -85,6 +87,12 @@ def add_tuning_args(parser, *, v: float | None = None, omega: float | None = Non
     parser.add_argument("--angular-decel", type=float,
                         default=d_motion.angular_decel_radps2,
                         help="旋回の減速エンベロープ [rad/s^2] (--angular-accel 以下に丸められる)")
+    parser.add_argument("--corner-speed", type=float, default=d_motion.corner_v_max,
+                        help="止まらずに曲がるコーナーの速度 [m/s]。手前でここまで落として"
+                             "から曲がる。0 = 落とさない (従来の v のまま)")
+    parser.add_argument("--corner-accel", type=float, default=d_motion.corner_accel_mps2,
+                        help="コーナー中に 2 軸を入れ替える加減速度 [m/s^2] "
+                             "(機体が受けるのはこの √2 倍)。0 = --decel と同じ")
     parser.add_argument("--settle-dwell", type=float, default=d_motion.settle_dwell_s,
                         help="動作を止めてから残差を判定するまでの待ち [s]")
     parser.add_argument("--gyro-delay", type=float, default=d_motion.gyro_delay_s,
@@ -132,6 +140,8 @@ def build_tuning(args, motion: CellMotionConfig | None = None) -> TuningProfile:
             omega_max=args.omega,
             decel_mps2=args.decel,
             angular_decel_radps2=args.angular_decel,
+            corner_v_max=args.corner_speed,
+            corner_accel_mps2=args.corner_accel,
             settle_dwell_s=args.settle_dwell,
             gyro_delay_s=args.gyro_delay,
             retry_angle_tol_rad=math.radians(args.retry_angle_tol),
@@ -226,8 +236,12 @@ def check_limits(tuning: TuningProfile, kin: KiwiKinematics | None = None,
     #    ブレンド距離は v^2/(2a) なので、**速度を上げるか減速度を下げると二乗で伸びる**。
     #    半セルを超えると機体が前のセルの廊下に居るうちに横へ動き出すことになり、
     #    「膨らむ先は開いている象限」という前提そのものが崩れる。
-    blend = blend_distance_m(m_cfg.v_max, min(m_cfg.decel_mps2,
-                                              tuning.limits.max_linear_accel_mps2))
+    decel = min(m_cfg.decel_mps2, tuning.limits.max_linear_accel_mps2)
+    if 0.0 < m_cfg.corner_v_max < m_cfg.v_max:      # コーナーで落とす設定
+        corner_a = min(m_cfg.corner_accel_mps2, decel) if m_cfg.corner_accel_mps2 > 0 else decel
+        blend = blend_distance_m(m_cfg.corner_v_max, corner_a)
+    else:
+        blend = blend_distance_m(m_cfg.v_max, decel)
     half_cell = maze_pitch_m / 2.0
     if blend > half_cell:
         warnings.append(

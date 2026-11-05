@@ -103,6 +103,27 @@ class CellMotionConfig:
     decel_mps2: float = 0.6                # 前進の減速度 [m/s^2] (driver ランプ以下に丸める、#107)
     angular_decel_radps2: float = 7.0      # 旋回の角減速度 [rad/s^2] (同上)
 
+    # **コーナーで速度を落とす** (止まらずに曲がる #80 の続き)。#80 / #107 のコーナーは
+    # **v_max のまま入って v_max のまま出て**いて、意図して減速する仕組みは無かった
+    # (速度ベクトルが中央で 0.71 倍に落ちるのは両軸が入れ替わるからにすぎない)。
+    # 2026-10-17 の会場 (16x16、黒い床) で、0.30 m/s のコーナーの最中に車輪が滑らかに
+    # 回らず姿勢が崩れ、次のコーナーで 27.7° 回った。
+    #
+    # 0 なら従来どおり (落とさない)。正の値なら:
+    # - 直交する次の区間が予約されているとき、古い軸は通常の減速度で ``corner_v_max``
+    #   まで落としてからブレンドに入る
+    # - ブレンド中は**両軸とも** ``corner_accel_mps2`` で入れ替える (古い軸は 0 へ、
+    #   新しい軸は 0 から ``corner_v_max`` へ)。抜けたら通常のランプで v_max へ戻る
+    # ブレンド距離は ``corner_v_max^2 / (2 * corner_accel_mps2)``、軌跡は
+    # :func:`~krilly.motion.corner.corner_path` と同じ放物線 (曲率半径は端で 2d、
+    # 中央で d/√2)、機体が受ける加速度は ``√2 * corner_accel_mps2``。
+    #
+    # 既定 0.20 / 0.4 はシミュレーションで選んだ値で、**実機ではまだ測っていない**。
+    # 3 セル + 1 セルのコーナー (S3->W1 と同じ形) で、コーナー中の加速度の中央値
+    # 0.93 -> 0.58 m/s^2、最小曲率半径 57 -> 34mm、1 コーナーあたり +0.24s。
+    corner_v_max: float = 0.20             # コーナーの速度 [m/s] (0 = 落とさない)
+    corner_accel_mps2: float = 0.4         # コーナー中の加減速度 [m/s^2] (0 = decel_mps2)
+
     # 主軸以外の保持ゲイン (P 制御)
     k_cross: float = 3.0                   # 横ずれ[m] -> vy [1/s]
     v_cross_max: float = 0.04              # 横ずれ補正の速度上限 [m/s]
@@ -218,6 +239,7 @@ class CellMotion:
         self._blending = False        # 直前の区間の残りをエンベロープで詰めている最中
         self._corners = 0             # 止まらずに曲がった回数 (ログ・検証用)
         self._gyro_rate = 0.0         # 直近に渡された角速度 [rad/s] (旋回の先読み用)
+        self._blend_t = 0.0           # ブレンドに入ってからの経過 [s] (コーナー減速用)
 
     @property
     def retries(self) -> int:
@@ -334,9 +356,33 @@ class CellMotion:
         self._begin(Kind.FORWARD)
 
     @property
+    def corner_slowdown(self) -> bool:
+        """コーナーで速度を落とす設定か (``corner_v_max`` が v_max 未満の正の値)。"""
+        return 0.0 < self.cfg.corner_v_max < self.cfg.v_max
+
+    @property
+    def corner_speed(self) -> float:
+        """コーナー (ブレンド) に入る速度 [m/s]。落とさない設定なら v_max。"""
+        return self.cfg.corner_v_max if self.corner_slowdown else self.cfg.v_max
+
+    @property
+    def corner_accel(self) -> float:
+        """ブレンド中に両軸を入れ替える加減速度 [m/s^2]。"""
+        a = self.cfg.corner_accel_mps2
+        if self.corner_slowdown and a > 0.0:
+            return min(a, self._decel)
+        return self._decel
+
+    @property
     def blend_distance(self) -> float:
         """コーナーを丸め始める残量 [m] (:func:`~krilly.motion.corner.blend_distance_m`)。"""
-        return blend_distance_m(self.cfg.v_max, self._decel)
+        return blend_distance_m(self.corner_speed, self.corner_accel)
+
+    def _corner_ahead(self) -> bool:
+        """次の予約が直交する向き = この区間の終わりで丸めるコーナーがある。"""
+        if not self._queue or self._retries:
+            return False
+        return (self._queue[0][1] - self._axis_k) % 2 == 1
 
     @property
     def queued(self) -> int:
@@ -369,6 +415,7 @@ class CellMotion:
         if axis != self._axis_k:
             self._axis_k = axis
             self._blending = True
+            self._blend_t = 0.0
             self._corners += 1
 
     def start_turn(self, delta_rad: float) -> None:
@@ -524,12 +571,27 @@ class CellMotion:
             v_max = cfg.retry_v_max if retry else cfg.v_max
             remaining = self._axis_remaining()
             v_along = _envelope(remaining, v_max, self._decel, dt)
+            slow = self.corner_slowdown and not retry
+            if slow and self._corner_ahead():
+                # 終わりにコーナーがある: ブレンド距離で corner_speed になるよう、
+                # その手前は通常の減速度で落とす (r = d でちょうど corner_speed)
+                d = self.blend_distance
+                v_in = math.sqrt(self.corner_speed ** 2
+                                 + 2.0 * self._decel * max(0.0, abs(remaining) - d))
+                v_along = math.copysign(min(abs(v_along), v_in), v_along)
             v_along = self._with_floor(v_along, cfg.min_v, remaining)
             cross = self._axis_cross()
             if self._blending and abs(cross) > cfg.pos_tol_m:
                 # コーナー中: 直交成分は「保持すべきずれ」ではなく「詰めるべき残量」。
                 # 下限速度は掛けない (詰め切れなかった分は下の P 保持が引き取る)。
-                v_cross = _envelope(cross, v_max, self._decel, dt)
+                if slow:
+                    # 両軸を同じ加減速度で入れ替える (古い軸 v_c -> 0、新しい軸 0 -> v_c)
+                    self._blend_t += dt
+                    v_cross = _envelope(cross, self.corner_speed, self.corner_accel, dt)
+                    v_new = min(self.corner_speed, self.corner_accel * self._blend_t)
+                    v_along = math.copysign(min(abs(v_along), v_new), v_along)
+                else:
+                    v_cross = _envelope(cross, v_max, self._decel, dt)
             else:
                 self._blending = False
                 v_cross = _clamp(cfg.k_cross * cross, cfg.v_cross_max)

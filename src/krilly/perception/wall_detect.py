@@ -565,10 +565,16 @@ def _band_profile(mask: np.ndarray, roi: Roi, vertical: bool) -> np.ndarray:
 
     ``vertical`` は帯が縦 (LEFT/RIGHT) かどうか。縦帯なら列方向、横帯なら行方向。
     """
+    # 負の座標を Python のスライスに渡すと**反対側の端から**切り出してしまう
+    # (x=-58 なら列 902 から)。フレームの外は見えていないので、内側へ切り詰める
     if vertical:
-        strip = mask[roi.y : roi.y + roi.h, :]
+        strip = mask[max(0, roi.y) : max(0, roi.y + roi.h), :]
+        if strip.shape[0] == 0:
+            return np.empty(0)
         return (strip > 0).mean(axis=0)
-    strip = mask[:, roi.x : roi.x + roi.w]
+    strip = mask[:, max(0, roi.x) : max(0, roi.x + roi.w)]
+    if strip.shape[1] == 0:
+        return np.empty(0)
     return (strip > 0).mean(axis=1)
 
 
@@ -590,6 +596,12 @@ def best_roi_red_fraction(
     このフラグが立った辺を捨てること。壁の有無判定には引き続き使ってよい。
     """
     prof = _band_profile(mask, roi, vertical)
+    if prof.size == 0 or not np.isfinite(prof).all():
+        # ROI の長手方向がフレームの外 = この帯は**見えていない**。0 を「壁なし」と
+        # 読ませないよう飽和 (= 信用するな) を立てる。2026-10-17 の会場で、回復
+        # (#113) が ROI を -147px 動かした先がフレーム外で、ここが空の平均 (NaN) を
+        # 比較して例外で落ちた
+        return (0.0, 0, True)
     start, length = (roi.x, roi.w) if vertical else (roi.y, roi.h)
     limit = len(prof) - length
     if limit < 0:
@@ -663,6 +675,25 @@ class WallDetector:
             return (roi_red_fraction(mask, roi), 0, False)
         return best_roi_red_fraction(mask, roi, vertical, self.cfg.search_px,
                                      self.cfg.search_step)
+
+    def shift_fits(self, shift_px: tuple[int, int],
+                   frame_size: tuple[int, int] | None = None,
+                   names=None) -> bool:
+        """``shift_px`` だけ動かしても、ROI (``names``、既定は全部) がフレームに収まるか。
+
+        :meth:`measure` に ``shift_px`` を渡す前に確かめる。収まらない辺は**見えて
+        いない**ので、その辺を「壁なし」と読んだ照合 (:func:`verify_cell`) は根拠が
+        無い。回復の側はこれが False なら回復をあきらめる。
+        """
+        w, h = frame_size or self.cfg.frame_size or (0, 0)
+        if not w or not h:
+            return True
+        dx, dy = shift_px
+        rois = (self.cfg.rois.values() if names is None
+                else [self.cfg.rois[n] for n in names if n in self.cfg.rois])
+        return all(0 <= r.x + dx and r.x + dx + r.w <= w
+                   and 0 <= r.y + dy and r.y + dy + r.h <= h
+                   for r in rois)
 
     def measure(self, bgr: np.ndarray, shift_px: tuple[int, int] = (0, 0)
                 ) -> dict[str, BandReading]:

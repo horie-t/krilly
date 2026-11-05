@@ -371,10 +371,22 @@ def _main() -> int:
                          "補正できる" if off.measured else
                          "補正できない (白/黄の壁か壁なし) -> ここに出入りするまとまりは 1 区間")
             manager.mark_fix(cell, off.measured)
-            if not off.measured:
-                return off
-            apply_cell_offset(est, cell_center(cell, maze_cfg.cell_pitch_m),
-                              off.forward_m, off.left_m, phi=heading_rad(facing))
+
+            def mm(value):
+                return "-" if value is None else f"{value * 1000:+.1f}mm"
+
+            # **停止ごとに測った値と当てた補正を必ず残す** (2026-10-17 の会場: 最速走行で
+            # 壁に寄ったまま次へ進んでいるように見えたが、ログに値が無く切り分けられなかった)
+            before = est.pose[:2]
+            applied = off.measured and apply_cell_offset(
+                est, cell_center(cell, maze_cfg.cell_pitch_m),
+                off.forward_m, off.left_m, phi=heading_rad(facing))
+            log.info("  停止 %s: 軸角 %s / 位置ずれ 実測 前後=%s 左右=%s (壁 %d/%d 枚%s) -> %s",
+                     cell, "-" if yaw is None else f"{math.degrees(yaw.angle_rad):+.2f}°",
+                     mm(off.forward_m), mm(off.left_m), off.walls_y, off.walls_x,
+                     f"、飽和 {'/'.join(off.saturated)}" if off.saturated else "",
+                     f"補正 X{est.pose[0] - before[0]:+.4f} Y{est.pose[1] - before[1]:+.4f}"
+                     if applied else ("補正なし (ガードで棄却)" if off.measured else "補正なし"))
             return off
 
         def path_is_clear(direction: Direction, facing: Direction,
@@ -474,6 +486,15 @@ def _main() -> int:
             shift = offset_to_shift_px(lattice)
             log.warning("  格子から測ったセル内位置: %s -> ROI を (%+d, %+d)px 動かす",
                         lattice.describe(), *shift)
+            if not detector.shift_fits(shift, frames[-1].shape[1::-1], names=BODY_DIRS):
+                # 動かした ROI がフレームの外へ出る = その辺は見えていない。見えない辺を
+                # 「壁なし」として照合すると、居るセルを取り違えたまま走り出す。
+                # (2026-10-17 の会場: 27.7° 回った後、隣セルの ROI がフレーム外に出て
+                # 例外で落ちた。隣セルは照合に使わないので、見るのは自セルの 4 辺だけ)
+                log.error("進行中止: セル内のずれが大きすぎて壁が視野に入らない "
+                          "(ROI を %+d, %+d px 動かすとフレームの外)。**機体を持ち上げて"
+                          "置き直すこと**。", *shift)
+                return None
             measured = detector.measure(frames[-1], shift)
             body_walls = {d: measured[d][0] >= detector.cfg.threshold_for(d)
                           for d in BODY_DIRS}
