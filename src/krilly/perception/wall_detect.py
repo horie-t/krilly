@@ -346,9 +346,14 @@ CALIBRATED_GEOMETRY = CALIBRATED_GEOMETRIES[DEFAULT_FRAME_SIZE]
 #: 値は #16 / #56 / #65 で手で追い込んだ画素値を mm に直したもの。
 CALIBRATED_ROI_SPECS = {
     FRONT: RoiSpec(thickness_mm=29.5, length_mm=106.2, along_offset_mm=+13.6),
-    # BACK だけ短く、少しずらしてある。リボンケーブルが赤く写るのを避けるため (#65)。
-    # ケーブルは柔軟なので完全には避けられず、辺別しきい値 (BACK=0.25) と併用する。
-    BACK: RoiSpec(thickness_mm=22.4, length_mm=53.1, along_offset_mm=+5.9),
+    # BACK は #65 でリボンケーブルの赤い線を避けるため 53mm に短くしていた (しきい値は
+    # #88 で他の辺と同じ 0.08 に戻してある)。2026-11-07 に中継基板 (#140) へ組み直して
+    # 柱とケーブルの位置が変わり、後ろの壁の帯の上で邪魔になるのは両端の角にかかる
+    # ロッド (緑のテープ) だけになったので、その内側いっぱいの 114mm (x=390-580) に広げた。
+    # 機体を中央・前後左右に 15mm ずらした 5 枚で赤割合 0.60-0.66 (旧 ROI と同等)、
+    # 後ろに壁の無いセルで 0.000、探索範囲 (y 465-583, x 380-590) に赤画素 0。
+    # **柱やケーブルを動かしたら、この範囲に赤が入らないか撮り直して確かめること。**
+    BACK: RoiSpec(thickness_mm=22.4, length_mm=113.6, along_offset_mm=+3.4),
     LEFT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
     RIGHT: RoiSpec(thickness_mm=27.1, length_mm=126.7, along_offset_mm=-2.2),
 }
