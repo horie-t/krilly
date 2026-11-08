@@ -514,10 +514,12 @@ def _main() -> int | None:
             if stopped == "contact":
                 log.error("進行中止: 動作を途中で止めた (動作中の最大の回転 %.2f°)。"
                           "壁との接触の疑い。", math.degrees(watch.peak_rad))
+                coast(args.pause)          # 減速しきってから撮る (ぶれを減らす)
                 snapshot("contact")
                 return False
             if stopped == "timeout":
                 log.error("進行中止: 動作が時間内に終わらなかった。進めていない疑い。")
+                coast(args.pause)          # 減速しきってから撮る (ぶれを減らす)
                 snapshot("timeout")
                 return False
             # 平行移動では回転を一切指令しないので、**測れた回転は異常の証拠**。
