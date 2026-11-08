@@ -145,8 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="1 セッションで姿勢を作り直す回数の上限 (#113、既定 1)。"
                         "原因不明の異常が繰り返す機体を走らせ続ける方が危険なので、"
                         "既定では 1 回だけ試して 2 回目は諦める")
-    p.add_argument("--max-leg-cells", type=int, default=4, metavar="セル",
-                   help="1 区間の長さの上限 (既定 4、0 で無制限)。長い直進の間は"
+    p.add_argument("--max-leg-cells", type=int, default=3, metavar="セル",
+                   help="1 区間の長さの上限 (既定 3、0 で無制限)。長い直進の間は"
                         "位置補正も進路確認も入らないので横ずれが育つ (#85)")
     p.add_argument("--chain-legs", type=int, default=2,
                    help="最速・復帰で止まらずに繋ぐ区間の本数の上限 (#80、既定 2)。"

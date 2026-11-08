@@ -78,7 +78,7 @@ python -m scripts.speed_run --size 5 --turn-in-place  # legacy turning mode (for
 python -m scripts.speed_run --size 5 --no-neighbors   # search without the E/W neighbours (#89)
 python -m scripts.speed_run --size 5 --chain-legs 1   # stop at every leg instead of rounding corners (#80)
 python -m scripts.speed_run --size 5 --time-margin 1.5  # be conservative about starting a run (#87)
-python -m scripts.speed_run --size 8 --max-leg-cells 0  # no cap on a leg's length (#85; default 4)
+python -m scripts.speed_run --size 8 --max-leg-cells 0  # no cap on a leg's length (#85; default 3 since #164)
 python -m scripts.speed_run --size 16 --ev -2 --white-tops  # competition floor: start/goal tops may be white/yellow (rule 2-1, #125); also seeds the start's 3 walls (#126)
 python -m scripts.speed_run --size 3 --goal 2,2 --ev -2 --white-tops  # the 3×3 white-goal board (mazes/white_goal3.txt)
 python -m scripts.speed_run --size 8                 # the 8×8 cut from a real maze (#23/#85; the board on the floor is mazes/excerpt8_2015.txt)
