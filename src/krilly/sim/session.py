@@ -109,6 +109,7 @@ def simulate_session(
     neighbor_sensing: bool = True,
     pass_cells: int = 2,
     max_leg_cells: int = 3,
+    max_unfixed_stops: int = 2,
     chain_legs: int = 2,
     times: dict[str, float] | None = None,
 ) -> SessionResult:
@@ -152,12 +153,14 @@ def simulate_session(
                      max_runs=max_runs, time_margin=time_margin,
                      chain_legs=1 if not holonomic else chain_legs,
                      max_leg_cells=max_leg_cells,
+                     max_unfixed_stops=max_unfixed_stops,
                      **(times or {}))
     result = SessionResult(truth=truth, explorer=ex)
     result.limit_s = time_limit_s
 
-    def leg_time(legs: list[Leg], facing: Direction) -> float:
-        return mgr.estimate_s(legs, facing) * actual_scale
+    def leg_time(legs: list[Leg], facing: Direction, origin: tuple[int, int]) -> float:
+        # 出発セルを渡して、実機と同じ切り方 (補正のための停止 #168 を含む) で数える
+        return mgr.estimate_s(legs, facing, origin=origin) * actual_scale
 
     now = 0.0
     mgr.start_search(now)
@@ -199,7 +202,7 @@ def simulate_session(
         home = mgr.goal_reached(now, cell, facing)
         if home is None:
             break
-        started, dt = now, leg_time(home, facing)
+        started, dt = now, leg_time(home, facing, cell)
         now += dt
         result.records.append(RunRecord(
             RunPhase.RETURN_HOME, started, dt, sum(g.cells for g in home), len(home)))
@@ -209,7 +212,7 @@ def simulate_session(
         if legs is None:
             break
         now += mgr.restart_dwell_s      # 競技規定 3-4: 始点で 2 秒以上停止してから再出発
-        started, dt = now, leg_time(legs, facing)
+        started, dt = now, leg_time(legs, facing, truth.start)
         now += dt
         result.records.append(RunRecord(
             RunPhase.SPEED, started, dt, sum(g.cells for g in legs), len(legs)))

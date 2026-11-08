@@ -96,6 +96,9 @@ def build_args() -> argparse.ArgumentParser:
                      help="探索で左右の隣セルを読まない (#89 を切る)")
     cfg.add_argument("--max-leg-cells", type=int, default=3, metavar="セル",
                      help="最速・復帰の 1 区間の上限 (既定 3、0 で無制限、#85)")
+    cfg.add_argument("--max-unfixed-stops", type=int, default=2, metavar="回",
+                     help="進行方向を補正できない停止がこの回数続いたら、補正できるセルで"
+                          "止まる (#168、既定 2、0 で切る)")
     cfg.add_argument("--pass-cells", type=int, default=None,
                      help="止まらずに通過してよいセル数の上限 (既定 2、隣を読まないなら 1)")
 
@@ -164,7 +167,8 @@ def budget_sweep(args, mazes: list[tuple[str, Maze, bool]], cost) -> int:
                       chain_legs=args.chain_legs,
                       neighbor_sensing=not args.no_neighbors,
                       pass_cells=args.pass_cells or (1 if args.no_neighbors else 2),
-                      max_leg_cells=max(0, args.max_leg_cells))
+                      max_leg_cells=max(0, args.max_leg_cells),
+                      max_unfixed_stops=max(0, args.max_unfixed_stops))
                   for _, m in runnable]
             zero = sum(1 for r in rs if not r.speed_runs)
             total = sum(len(r.speed_runs) for r in rs)
@@ -216,6 +220,7 @@ def main() -> int:
             neighbor_sensing=not args.no_neighbors,
             pass_cells=args.pass_cells or (1 if args.no_neighbors else 2),
             max_leg_cells=max(0, args.max_leg_cells),
+            max_unfixed_stops=max(0, args.max_unfixed_stops),
         )
         sessions.append(result)
         good = result.ok is expect_ok
