@@ -202,3 +202,17 @@ def test_driving_scripts_route_through_the_spi_lost_wrapper():
         assert "run_reporting_spi_lost" in inspect.getsource(mod.main)
         assert "raise_if_spi_lost" in inspect.getsource(mod._main)
 
+
+
+def test_driving_scripts_watch_mid_move_and_keep_a_snapshot():
+    """speed_run / search_run は動作の途中も見張り、止まったら画像を残す (#153)。"""
+    import inspect
+
+    import scripts.search_run as search_run
+    import scripts.speed_run as speed_run
+
+    for mod in (speed_run, search_run):
+        src = inspect.getsource(mod._main)
+        assert "watch.update(motion.heading_error)" in src
+        assert "save_snapshot" in src and 'snapshot("spi_lost")' in src
+        assert "motion_timeout_s" in src

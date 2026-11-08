@@ -534,6 +534,16 @@ class CellMotion:
     def _heading_error(self) -> float:
         return _wrap_angle(self.phi_ref - self.est.phi)
 
+    @property
+    def translating(self) -> bool:
+        """平行移動のプリミティブを実行中か (回転を指令していない区間、#153)。"""
+        return self._kind is Kind.FORWARD
+
+    @property
+    def heading_error(self) -> float:
+        """基準方位 - 推定方位 [rad]。平行移動中は「指令していない回転」の量 (#153)。"""
+        return self._heading_error()
+
     def _position_error_body(self) -> tuple[float, float]:
         """基準位置への誤差を **推定方位の車体フレーム** で見た (前後, 左右)。"""
         dx, dy = self.x_ref - self.est.x, self.y_ref - self.est.y

@@ -31,9 +31,11 @@ from pathlib import Path
 
 from krilly.config import load_maze_config
 from krilly.app.exit_codes import EXIT_ABORTED, run_reporting_spi_lost
+from krilly.app.snapshot import save_snapshot
 from krilly.hal.camera import add_camera_args, camera_kwargs
 from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
+from krilly.hal.l6470 import SpiLost
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
@@ -46,6 +48,7 @@ from krilly.localization.grid import (
     apply_cell_offset,
 )
 from krilly.motion.emergency_stop import emergency_stop
+from krilly.motion.watch import DEFAULT_IN_MOTION_DEG, RotationWatch, motion_timeout_s
 from krilly.motion.tuning import (
     add_tuning_args,
     build_tuning,
@@ -136,6 +139,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="機体を旋回させて走る従来モード (既定は旋回レス走行 #76)")
     p.add_argument("--max-heading-residual", type=float, default=2.5,
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
+    p.add_argument("--max-heading-in-motion", type=float, default=DEFAULT_IN_MOTION_DEG,
+                   help="動作の**最中**に許す指令外の回転 [deg] (#153)。3 tick 続けて超えたら"
+                        "その場で止める。終わった後の --max-heading-residual より広い: 正常でも"
+                        "コーナーの最中に 2.2° まで振れる (8x8 実測)")
     p.add_argument("--no-front-check", action="store_true",
                    help="前進直前の前方壁チェックを無効にする (既定は有効)")
     p.add_argument("--no-neighbors", action="store_true",
@@ -287,9 +294,31 @@ def _main() -> int | None:
             if sampler is not None:
                 sampler.take()
 
-        def run_primitive(label: str) -> None:
-            """1 動作を完了 (または timeout) まで回す。update は純計算なので寝るのはここ。"""
+        watch = RotationWatch(math.radians(args.max_heading_in_motion))
+
+        def snapshot(reason: str) -> None:
+            """止まった状態を 1 枚残す (#153)。止める処理が済んでから呼ぶこと。"""
+            if args.dry_run:
+                return
+            try:
+                path = save_snapshot(camera.capture(), reason)
+            except Exception as e:      # カメラの不調で停止処理を止めない
+                log.warning("  停止時の画像を撮れなかった: %s", e)
+                return
+            if path is not None:
+                log.warning("  停止時の画像: %s", path)
+
+        def run_primitive(label: str, cells: int = 0) -> str | None:
+            """1 動作を完了 (または timeout) まで回す。update は純計算なので寝るのはここ。
+
+            平行移動の途中で指令外の回転が上限を超え続けたら、その場で止めて
+            ``"contact"`` を返す (#153)。時間切れは ``"timeout"``、正常なら None。
+            ``cells`` を渡すと制限時間をセル数から決める (0 なら ``--timeout``)。
+            """
             drain_gyro()
+            watch.reset()
+            stopped = None
+            timeout = min(args.timeout, motion_timeout_s(cells)) if cells else args.timeout
             t0 = last = time.monotonic()
             while True:
                 time.sleep(args.dt)
@@ -298,22 +327,38 @@ def _main() -> int | None:
                 last = now
                 if motion.update(dt, gyro_rate=gyro_rate()):
                     break
-                if now - t0 > args.timeout:
-                    log.warning("%s: %.1fs で終わらず打ち切り (残量 %.4f)",
-                                label, args.timeout, motion.remaining)
+                if (not args.turn_in_place and motion.translating
+                        and watch.update(motion.heading_error)):
+                    log.error("%s: 動作の途中で指令外の回転 %.2f° (上限 %.2f°)。接触の疑い、"
+                              "その場で止める (#153)",
+                              label, math.degrees(motion.heading_error),
+                              args.max_heading_in_motion)
                     motion.abort()
+                    stopped = "contact"
+                    break
+                if now - t0 > timeout:
+                    log.warning("%s: %.1fs で終わらず打ち切り (残量 %.4f)",
+                                label, timeout, motion.remaining)
+                    motion.abort()
+                    stopped = "timeout"
                     break
             statuses = chain.get_status_all()
             # 応答なしはフォールトではなく通信断。続けても指令が届かない (#148)
-            raise_if_spi_lost(chain, statuses, label)
+            try:
+                raise_if_spi_lost(chain, statuses, label)
+            except SpiLost:
+                snapshot("spi_lost")
+                raise
             faults = describe_faults(statuses, ignore=("UVLO",))
             if faults:
                 log.warning("  %s: L6470 フォールト %s (トルク不足の疑い)", label, faults)
             along, cross, dphi = motion.residual()
-            log.info("  %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°%s",
+            log.info("  %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f° (動作中の最大 %.2f°)%s",
                      label, time.monotonic() - t0, along, cross, math.degrees(dphi),
+                     math.degrees(watch.peak_rad),
                      "" if motion.retries == 0 else " / やり直し %d 回 (判定時の残量 %+.4f)"
                      % (motion.retries, motion.retry_remaining))
+            return stopped
 
         def coast(seconds: float) -> None:
             """停止指令のまま update を回して減速しきる (推定も継続)。"""
@@ -435,6 +480,7 @@ def _main() -> int | None:
                     log.error("進行中止: %s 方向 %d セル目 (%s) に壁が見える "
                               "(赤割合 %.2f >= %.2f)。姿勢がずれている可能性が高い。",
                               direction.name, i + 1, slot, fraction, threshold)
+                    snapshot("path_blocked")
                     return False
             if len(slots) < cells:
                 log.info("  進路確認: %d セル目までしか見えない (残りは観測済みの地図で担保)",
@@ -461,10 +507,21 @@ def _main() -> int | None:
                 return False
             if args.turn_in_place:
                 motion.start_move_cells(cells, 0)      # 旋回済みなので前へ
-                run_primitive(f"{cells}セル前進")
+                stopped = run_primitive(f"{cells}セル前進", cells)
             else:
                 motion.start_move_cells(cells, axis)   # 向きは変えずにその方角へ
-                run_primitive(f"{direction.name}へ{cells}セル")
+                stopped = run_primitive(f"{direction.name}へ{cells}セル", cells)
+            if stopped == "contact":
+                log.error("進行中止: 動作を途中で止めた (動作中の最大の回転 %.2f°)。"
+                          "壁との接触の疑い。", math.degrees(watch.peak_rad))
+                coast(args.pause)          # 減速しきってから撮る (ぶれを減らす)
+                snapshot("contact")
+                return False
+            if stopped == "timeout":
+                log.error("進行中止: 動作が時間内に終わらなかった。進めていない疑い。")
+                coast(args.pause)          # 減速しきってから撮る (ぶれを減らす)
+                snapshot("timeout")
+                return False
             # 平行移動では回転を一切指令しないので、**測れた回転は異常の証拠**。
             # 実機 (#76) では壁に接触した移動が -3.01° を残し、その後カメラの軸角測定が
             # 壊れて走行が崩壊した。通常の移動の残差は 0.9° 以下なので、ここで止める。
@@ -473,6 +530,7 @@ def _main() -> int | None:
                 log.error("進行中止: 回転を指令していないのに %.2f° 回った "
                           "(上限 %.2f°)。壁との接触かスリップの可能性が高い。",
                           heading_residual, args.max_heading_residual)
+                snapshot("rotation")
                 return False
             coast(args.pause)
             return True
