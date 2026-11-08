@@ -14,8 +14,11 @@
 2. マスクの Canny エッジを取り、**画像の縁とマスク境界に沿う人工エッジを削る**。
    これを省くと、画像端で切れた赤帯のエッジが画像軸に張り付き、推定角が 0° 側へ
    引っ張られる (実機で最大 6° の誤差を出した)。
-3. HoughLinesP で線分を取り、長さで重み付けした **4θ 領域の円周平均** で
-   90° 周期の平均角を求める。
+3. HoughLinesP で線分を取り、**迷路の軸から外れた線分を捨ててから**、長さで重み付けした
+   **4θ 領域の円周平均** で 90° 周期の平均角を求める (#152)。捨てる基準は「最も多くの線分
+   (長さの合計) が集まる角度」から ``inlier_deg`` 以上離れていること。2026-10-17 の会場で、
+   閉じたマスに斜めに立てかけた余りの壁 (35-43° の線分、総長の 1/3) が平均を +5.76° /
+   +4.39° へ引っ張り、+4.39° の方は補正のガードをすり抜けて機体を 4.4° 傾けた。
 
 純粋に OpenCV/NumPy のみなので、合成画像でカメラなしにテストできる。
 """
@@ -32,9 +35,13 @@ import numpy as np
 from krilly.perception.red_wall import RedDetectorConfig, red_mask
 from krilly.perception.wall_detect import CALIBRATED_RED, Roi
 
-# 実機 (640x480, カメラ中央・高さ約39cm) で機体自身が写る固定領域。
-# Pi 基板・配線・オレンジのリボンケーブルを含む (ケーブルは赤として拾われる)。
-CALIBRATED_ROBOT_RECT = Roi(190, 135, 285, 345)
+# 機体自身が写る固定領域 (基板・配線・リボンケーブル。ケーブルは赤として拾われうる)。
+# 元は 640x480 (2026-08) で測った Roi(190, 135, 285, 345)。#88 で 960x720 の全画素モードへ
+# 移ったとき (px/mm 据え置き・画像中心が (320, 240) -> (480, 360)) に動かし忘れ、機体ではなく
+# 左上の迷路 (左の壁と前の壁の左半分) を消していた。中心を合わせて (+160, +120) ずらす。
+# 会場の 3 セッション (498 枚) で読みの RMS は 0.60-1.12° -> 0.60-1.08° と変わらず、害は
+# 出ていなかったが、機体を除外できていないので戻す (#152)。
+CALIBRATED_ROBOT_RECT = Roi(350, 255, 285, 345)
 
 
 @dataclass(frozen=True)
@@ -48,6 +55,10 @@ class AxisYawConfig:
     max_gap_px: int = 6             # HoughLinesP の maxLineGap
     hough_threshold: int = 40       # HoughLinesP の投票しきい値
     min_total_length_px: float = 150.0   # 総線分長がこれ未満なら証拠不足
+    # 迷路の軸として採用する線分の幅 [deg]。最も線分が集まる角度からこれ以上離れた線分は
+    # 迷路の外の物 (倒れた壁・斜めに置いた物) として捨てる (#152)。端の画素で透視と
+    # レンズの歪みのため実機の壁でも ±3.4° まで振れるので 5°。0 で捨てない (従来の挙動)
+    inlier_deg: float = 5.0
 
 
 def calibrated_axis_yaw_config() -> AxisYawConfig:
@@ -62,6 +73,7 @@ class AxisYaw:
     angle_rad: float          # (-45°, 45°] に折り返した軸角 (+ = 機体 CCW)
     segments: int             # 使った線分の本数
     total_length_px: float    # 線分の総長 (信頼度の目安)
+    rejected_length_px: float = 0.0   # 迷路の軸から外れて捨てた線分の総長 (#152)
 
     @property
     def angle_deg(self) -> float:
@@ -124,19 +136,43 @@ def axis_yaw(bgr: np.ndarray, config: AxisYawConfig | None = None) -> AxisYaw | 
     )
     if lines is None:
         return None
+    segments = [(fold_rad(math.atan2(float(y2 - y1), float(x2 - x1))),
+                 math.hypot(float(x2 - x1), float(y2 - y1)))
+                for x1, y1, x2, y2 in lines[:, 0]]
+    inliers = maze_axis_inliers(segments, math.radians(cfg.inlier_deg))
+    rejected = sum(length for _a, length in segments) - sum(length for _a, length in inliers)
     sin_sum = cos_sum = total = 0.0
-    count = 0
-    for x1, y1, x2, y2 in lines[:, 0]:
-        length = math.hypot(float(x2 - x1), float(y2 - y1))
-        folded = fold_rad(math.atan2(float(y2 - y1), float(x2 - x1)))
+    for folded, length in inliers:
         # 4θ 領域で平均すると 90° 周期の角度を正しく平均できる
         sin_sum += length * math.sin(4.0 * folded)
         cos_sum += length * math.cos(4.0 * folded)
         total += length
-        count += 1
     if total < cfg.min_total_length_px:
         return None
-    return AxisYaw(math.atan2(sin_sum, cos_sum) / 4.0, count, total)
+    return AxisYaw(math.atan2(sin_sum, cos_sum) / 4.0, len(inliers), total, rejected)
+
+
+def maze_axis_inliers(segments: list[tuple[float, float]], tol_rad: float
+                      ) -> list[tuple[float, float]]:
+    """``(折り返した角度[rad], 長さ)`` の列から、迷路の軸に乗っている線分だけを返す。
+
+    「その角度の ±tol に入る線分の長さの合計」が最大になる線分の角度を軸とみなし
+    (平均ではなく**最頻**なので、外れた線分に引っ張られない)、そこから ±tol の線分を残す。
+    ``tol_rad`` が 0 以下なら全部返す。角度は 90° 周期なので差も折り返して比べる。
+
+    **迷路の外の物の線分が迷路の線分より多ければ、そちらを軸と取り違える。** 会場の画像
+    では迷路が総長の 2/3 だったので効いたが、限界はある。それを止めるのは推定方位との差で
+    見る補正のガード (:data:`krilly.localization.grid.MAX_HEADING_CORRECTION_RUNNING_RAD`)。
+    """
+    if tol_rad <= 0.0 or not segments:
+        return list(segments)
+
+    def near(a: float, b: float) -> bool:
+        return abs(fold_rad(a - b)) <= tol_rad
+
+    axis = max(segments,
+               key=lambda s: sum(length for a, length in segments if near(a, s[0])))[0]
+    return [s for s in segments if near(s[0], axis)]
 
 
 def median_axis_yaw(

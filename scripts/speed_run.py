@@ -32,7 +32,12 @@ from krilly.hal.imu import Bno055Imu
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
-from krilly.localization.grid import apply_axis_heading, apply_cell_offset
+from krilly.localization.grid import (
+    MAX_HEADING_CORRECTION_RAD,
+    MAX_HEADING_CORRECTION_RUNNING_RAD,
+    apply_axis_heading,
+    apply_cell_offset,
+)
 from krilly.localization.recovery import (
     CELL_SLIP_MAX_M,
     RECOVERY_MAX_HEADING_RAD,
@@ -260,6 +265,7 @@ def _main() -> int:
         frame_no = [0]
         saved_name = [""]
         recovered = [0]                 # 姿勢を作り直した回数 (#113)
+        heading_anchored = [False]      # 方位補正が 1 回でも通ったか (以降はガードを狭める、#152)
         recovered_cell: list = [None]   # 回復でセルが訂正されたら入る
 
         # 最初の駆動指令でロータが谷へスナップし車体が最大 0.5° 跳ねる。
@@ -359,7 +365,18 @@ def _main() -> int:
             # 方位: ジャイロの基準は走行開始時の向きなので、迷路軸へ引き戻す
             yaw = axis_yaw(frame, yaw_cfg)
             if yaw is not None:
-                apply_axis_heading(est, yaw.angle_rad, camera_offset_rad=math.radians(kin.cfg.camera_yaw_offset_deg))
+                # 走り出しの 1 回目は置き方の傾きを吸収するので広く、以降は推定方位
+                # (ジャイロ) との差で狭く判定する (#152: 迷路の中の斜めの壁で +4.39°)
+                limit = (MAX_HEADING_CORRECTION_RUNNING_RAD if heading_anchored[0]
+                         else MAX_HEADING_CORRECTION_RAD)
+                if apply_axis_heading(est, yaw.angle_rad, max_error=limit,
+                                      camera_offset_rad=math.radians(kin.cfg.camera_yaw_offset_deg)):
+                    heading_anchored[0] = True
+                else:
+                    log.warning("  方位補正: 軸角 %+.2f° は推定方位から %.0f° を超えて離れるので棄却 "
+                                "(線分 %d 本 / 総長 %.0fpx / 軸外で捨てた %.0fpx)。誤測定の疑い。",
+                                yaw.angle_deg, math.degrees(limit), yaw.segments,
+                                yaw.total_length_px, yaw.rejected_length_px)
             off = cell_offset(frame, detector, measured=measured)
             if off.saturated:
                 log.info("  位置補正: %s は帯がフレーム端で飽和したので不採用",
