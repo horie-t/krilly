@@ -748,3 +748,43 @@ def test_shift_fits_looks_only_at_the_named_rois():
     assert det.shift_fits(shift, names=("front", "back", "left", "right"))
     assert not det.shift_fits(shift)       # 左隣のセルの ROI はフレームの外
     assert not det.shift_fits((-400, 0), names=("front", "back", "left", "right"))
+
+
+# --- 帯の位置は半値幅の中点で読む (#156) -----------------------------------
+def _hat_frame(name):
+    from pathlib import Path
+
+    import cv2
+
+    img = cv2.imread(str(Path(__file__).parent / "data" / name))
+    assert img is not None
+    return img
+
+
+@pytest.mark.parametrize("name", ["hat_centred_20261108.png", "hat_fwd15_20261108.png"])
+def test_opposite_walls_agree_on_the_relay_board_frames(name):
+    """中継基板に組み直した後の実画像 (2026-11-08、定規で中央 / 前へ 15mm)。
+
+    旧い読み方 (赤割合が最大の ROI 位置) では、帯の薄い裾に引っ張られて向かい合う壁が
+    前後で 7-8mm、左右で最大 4.8mm 食い違った。半値幅の中点なら 2.5mm 以内。
+    """
+    det = WallDetector(calibrated_config())
+    m = det.measure(_hat_frame(name))
+    g = CALIBRATED_GEOMETRY
+    fb = (m[FRONT][1] - m[BACK][1]) / g.px_per_mm_y
+    lr = (m[LEFT][1] - m[RIGHT][1]) / g.px_per_mm_x
+    assert abs(fb) <= 2.5 and abs(lr) <= 2.5
+
+
+def test_a_faint_tail_does_not_pull_the_band_position():
+    """帯 (割合 1.0、幅 20px) の片側に薄い裾 (0.2) があっても、位置は帯の中心のまま。"""
+    from krilly.perception.wall_detect import Roi, best_roi_red_fraction
+
+    roi = Roi(100, 0, 45, 200)
+    mask = np.zeros((200, 400), dtype=np.uint8)
+    mask[:, 112:132] = 255                       # 帯 (中心 121.5 = ROI 中心 122 から -0.5px)
+    rng = np.random.default_rng(0)
+    tail = rng.random((200, 25)) < 0.2           # セル内側へ 25px の薄い裾
+    mask[:, 132:157][tail] = 255
+    _v, off, sat = best_roi_red_fraction(mask, roi, vertical=True, search_px=40)
+    assert abs(off) <= 1 and not sat

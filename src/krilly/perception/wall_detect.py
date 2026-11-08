@@ -628,7 +628,45 @@ def best_roi_red_fraction(
     # 端が最良で、かつその端が「フレームに切られた端」なら飽和 (もっと先を見たかった)
     saturated = ((chosen == offsets[-1] and offsets[-1] < search_px)
                  or (chosen == offsets[0] and offsets[0] > -search_px))
-    return (best_value, chosen, saturated)
+    # **位置は帯の半値幅の中点で読む** (#156)。赤割合が最大の ROI 位置 (平坦部の中心) は、
+    # 帯がセル内側へ薄い裾 (割合 0.1-0.4、壁の側面の写り込み) を引くとその側へ引っ張られ、
+    # 左右の壁で逆向きにずれた (2026-11-07: 帯の中心は +2 / -1px なのに読みは +10 / -4px、
+    # 向かい合う壁の食い違い 4.3mm)。割合 (壁の有無の判定) は従来どおり ROI の最大値。
+    band = _half_max_band(prof, start + chosen, length) if search_px > 0 else None
+    if band is None:
+        return (best_value, chosen, saturated)
+    mid, left, right = band
+    # ROI を置ける範囲 (探索で評価した位置) に収める。外へ出るときは下で飽和になる
+    offset = min(offsets[-1], max(offsets[0],
+                                  int(round(mid - (start + (length - 1) / 2.0)))))
+    # 帯が探索窓の端まで続いている = 窓に収まっていない。端で切られた読みは信用しない
+    lo = max(0, start - search_px)
+    hi = min(len(prof), start + length + search_px)
+    if left <= lo or right >= hi - 1:
+        saturated = True
+    return (best_value, offset, saturated)
+
+
+def _half_max_band(prof: np.ndarray, roi_start: int, length: int
+                   ) -> tuple[float, int, int] | None:
+    """``roi_start`` に置いた ROI の中の最大値を含む帯の ``(中点, 左端, 右端)`` (#156)。
+
+    最大値の半分以上が続く範囲を左右へ広げて求める (半値幅)。帯が無ければ None。
+    """
+    window = prof[roi_start: roi_start + length]
+    if window.size == 0:
+        return None
+    peak_i = roi_start + int(np.argmax(window))
+    half = float(prof[peak_i]) / 2.0
+    if half <= 0.0:
+        return None
+    left = peak_i
+    while left > 0 and prof[left - 1] >= half:
+        left -= 1
+    right = peak_i
+    while right < len(prof) - 1 and prof[right + 1] >= half:
+        right += 1
+    return ((left + right) / 2.0, left, right)
 
 
 class BandReading(tuple):
