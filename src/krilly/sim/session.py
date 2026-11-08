@@ -108,7 +108,7 @@ def simulate_session(
     max_steps: int = 5000,
     neighbor_sensing: bool = True,
     pass_cells: int = 2,
-    max_leg_cells: int = 4,
+    max_leg_cells: int = 3,
     chain_legs: int = 2,
     times: dict[str, float] | None = None,
 ) -> SessionResult:

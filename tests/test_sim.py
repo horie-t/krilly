@@ -331,7 +331,9 @@ def test_past_that_the_last_run_can_overrun_and_that_is_the_deal_we_took():
     # この種の迷路で取引を固定している。#127 で生成器が始点を直すようになり迷路が
     # 変わった (直すと探索が短くなりはみ出さない) ので、直さない迷路で固定し続ける
     truth = random_maze(16, seed=5, fix_start=False)
-    kw = dict(actual_scale=1.4, times=TIMES_V024, cost=COST_V024)
+    # 区間の上限も当時の 4 で固定する (#164 で既定が 3 になると最速ランの区間が増えて
+    # 1 本が長くなり、この seed では 1.2 でもはみ出さなくなる — 取引の例として成り立たない)
+    kw = dict(actual_scale=1.4, times=TIMES_V024, cost=COST_V024, max_leg_cells=4)
     bold = simulate_session(truth, time_margin=1.2, **kw)
     safe = simulate_session(truth, time_margin=1.5, **kw)
 

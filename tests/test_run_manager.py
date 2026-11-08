@@ -67,7 +67,7 @@ def test_full_cycle_search_return_speed(manager):
     # 最速経路は shortest_path (known=visited) と一致する
     path = shortest_path(ex.maze, ex.maze.start, known=ex.visited,
                          start_facing=facing_home)
-    assert speed == path_to_legs(path)
+    assert speed == path_to_legs(path, manager.max_leg_cells)
 
 
 def test_repeats_until_max_runs(manager):
