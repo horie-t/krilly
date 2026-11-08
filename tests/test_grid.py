@@ -130,3 +130,25 @@ def test_camera_yaw_offset_turns_the_body_off_the_camera_axis():
     off = math.radians(2.8)
     assert apply_axis_heading(est, 0.0, camera_offset_rad=off)
     assert est.phi == pytest.approx(math.pi / 2 - off)   # 推定は「機体は -2.8°」になる
+
+
+def test_the_running_guard_rejects_the_venue_misread():
+    """走行中は推定方位との差 3° を超える補正を捨てる (#152)。
+
+    2026-10-17 の会場: ジャイロでは +0.55° しか回っていないのに、斜めの壁のせいで
+    軸角が +4.39° と読まれ、5° のガードを通って機体を傾けた。
+    """
+    from krilly.localization.grid import (
+        MAX_HEADING_CORRECTION_RAD,
+        MAX_HEADING_CORRECTION_RUNNING_RAD,
+    )
+
+    assert MAX_HEADING_CORRECTION_RUNNING_RAD < MAX_HEADING_CORRECTION_RAD
+    est = DeadReckoning(KiwiKinematics(config=CFG), phi=math.pi / 2 + math.radians(0.55))
+    before = est.phi
+    assert not apply_axis_heading(est, math.radians(4.39),
+                                  max_error=MAX_HEADING_CORRECTION_RUNNING_RAD)
+    assert est.phi == before
+    # 自宅の 8x8 で出た最大の軸角 (2.24°) は通る
+    assert apply_axis_heading(est, math.radians(2.24),
+                              max_error=MAX_HEADING_CORRECTION_RUNNING_RAD)

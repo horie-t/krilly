@@ -100,8 +100,9 @@ def test_exclude_region_is_ignored():
     """除外矩形の中に傾いた赤があっても、外の赤帯だけで角度が決まる。"""
     img = frame_with_bands(0.0)
     cv2.line(img, (250, 200), (420, 320), RED, thickness=20)   # 中央に斜めの偽赤
-    without = axis_yaw(img, AxisYawConfig())
-    with_mask = axis_yaw(img, AxisYawConfig(exclude=[Roi(200, 150, 260, 220)]))
+    # 除外矩形そのものの効果を見るので、軸外の線分を捨てる処理 (#152) は切る
+    without = axis_yaw(img, AxisYawConfig(inlier_deg=0.0))
+    with_mask = axis_yaw(img, AxisYawConfig(exclude=[Roi(200, 150, 260, 220)], inlier_deg=0.0))
     assert without is not None and with_mask is not None
     assert with_mask.angle_deg == pytest.approx(0.0, abs=0.5)     # 偽赤の影響なし
     assert abs(without.angle_deg) > abs(with_mask.angle_deg)      # 除外しないと引っ張られる
@@ -125,3 +126,52 @@ def test_median_axis_yaw_picks_the_middle_frame():
 def test_median_axis_yaw_returns_none_if_all_frames_fail():
     black = np.zeros((480, 640, 3), dtype=np.uint8)
     assert median_axis_yaw([black, black], AxisYawConfig()) is None
+
+
+# --- 迷路の軸から外れた線分を捨てる (#152) ---------------------------------
+def test_inliers_take_the_densest_angle_not_the_mean():
+    from krilly.perception.axis_yaw import maze_axis_inliers
+
+    r = math.radians
+    # 会場の画像と同じく、迷路の線分の方が多い (総長 2/3) 場合
+    segs = [(r(0.2), 100.0), (r(-0.3), 120.0), (r(0.5), 90.0), (r(38.0), 110.0), (r(40.0), 90.0)]
+    kept = maze_axis_inliers(segs, r(5.0))
+    assert [a for a, _ in kept] == [r(0.2), r(-0.3), r(0.5)]
+    assert maze_axis_inliers(segs, 0.0) == segs        # 0 なら捨てない
+
+
+def test_inliers_wrap_around_the_45_degree_fold():
+    """軸が ±45° の折り返しの近くにあっても、+44° と -44° は同じ向き (差は 2°)。"""
+    from krilly.perception.axis_yaw import maze_axis_inliers
+
+    r = math.radians
+    segs = [(r(44.0), 100.0), (r(-44.5), 100.0), (r(10.0), 50.0)]
+    assert len(maze_axis_inliers(segs, r(5.0))) == 2
+
+
+def test_a_tilted_bar_does_not_pull_the_axis():
+    """迷路の帯 (0°) に、斜め 40° の赤い棒 (倒れた壁) を描き足しても 0° のまま。"""
+    img = frame_with_bands(0.0)
+    cv2.line(img, (380, 400), (600, 215), RED, thickness=14)   # 約 40° の棒
+    cfg = AxisYawConfig()
+    assert axis_yaw(img, cfg).angle_deg == pytest.approx(0.0, abs=0.3)
+    unfiltered = axis_yaw(img, AxisYawConfig(inlier_deg=0.0))
+    assert abs(unfiltered.angle_deg) > 1.0                       # 捨てないと引っ張られる
+
+
+def test_the_venue_frame_with_spare_walls_reads_near_zero():
+    """2026-10-17 の会場で +5.76° と読んだ実画像 (閉じたマスに斜めの余りの壁)。"""
+    from pathlib import Path
+
+    img = cv2.imread(str(Path(__file__).parent / "data" / "fallen_walls_venue_20261017.png"))
+    assert img is not None
+    yaw = axis_yaw(img, calibrated_axis_yaw_config())
+    assert abs(yaw.angle_deg) < 1.0
+    assert yaw.rejected_length_px > 500        # 斜めの壁の線分を捨てている
+
+
+def test_the_robot_rect_is_centred_for_the_full_fov_frame():
+    """機体の矩形は 960x720 の画像中心付近 (#88 で動かし忘れていた、#152)。"""
+    r = calibrated_axis_yaw_config().exclude[0]
+    cx, cy = r.x + r.w / 2, r.y + r.h / 2
+    assert abs(cx - 480) < 40 and abs(cy - 360) < 100

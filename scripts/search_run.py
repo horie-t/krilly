@@ -39,7 +39,12 @@ from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
-from krilly.localization.grid import apply_axis_heading, apply_cell_offset
+from krilly.localization.grid import (
+    MAX_HEADING_CORRECTION_RAD,
+    MAX_HEADING_CORRECTION_RUNNING_RAD,
+    apply_axis_heading,
+    apply_cell_offset,
+)
 from krilly.motion.emergency_stop import emergency_stop
 from krilly.motion.tuning import (
     add_tuning_args,
@@ -163,6 +168,7 @@ def _main() -> int | None:
     maze.set_outer_walls()
     maze.set_goal_arg(args.goal)
     explorer = Explorer(maze, holonomic=not args.turn_in_place)
+    heading_anchored = [False]   # 方位補正が 1 回でも通ったか (以降はガードを狭める、#152)
     neighbors = not args.no_neighbors
     detector = WallDetector(calibrated_config(neighbors=neighbors,
                                               white_tops=args.white_tops))
@@ -352,14 +358,22 @@ def _main() -> int | None:
                     before = est.phi
                     log.debug("  軸角の根拠: 線分 %d 本 / 総長 %.0fpx",
                               yaw.segments, yaw.total_length_px)
+                    # 走り出しの 1 回目は置き方の傾きを吸収するので広く、以降は推定方位
+                    # (ジャイロ) との差で狭く判定する (#152)
+                    limit = (MAX_HEADING_CORRECTION_RUNNING_RAD if heading_anchored[0]
+                             else MAX_HEADING_CORRECTION_RAD)
                     if apply_axis_heading(est, yaw.angle_rad, weight=args.correct_weight,
+                                          max_error=limit,
                                           camera_offset_rad=math.radians(kin.cfg.camera_yaw_offset_deg)):
+                        heading_anchored[0] = True
                         log.info("  方位補正: 軸から %+.2f° -> φ %+.2f°",
                                  yaw.angle_deg, math.degrees(est.phi - before))
                     else:
-                        log.warning("  方位補正: 軸から %+.2f° は大きすぎるので棄却 "
-                                    "(線分 %d 本 / 総長 %.0fpx)。誤測定の疑い。",
-                                    yaw.angle_deg, yaw.segments, yaw.total_length_px)
+                        log.warning("  方位補正: 軸から %+.2f° は推定方位から %.0f° を超えて離れる"
+                                    "ので棄却 (線分 %d 本 / 総長 %.0fpx / 軸外で捨てた %.0fpx)。"
+                                    "誤測定の疑い。",
+                                    yaw.angle_deg, math.degrees(limit), yaw.segments,
+                                    yaw.total_length_px, yaw.rejected_length_px)
             # 帯のずれからセル内の位置ずれを測り、推定位置を絶対補正する
             off = cell_offset(frame, detector, measured=measured)
             if saved:
