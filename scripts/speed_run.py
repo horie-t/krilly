@@ -148,6 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-leg-cells", type=int, default=3, metavar="セル",
                    help="1 区間の長さの上限 (既定 3、0 で無制限)。長い直進の間は"
                         "位置補正も進路確認も入らないので横ずれが育つ (#85)")
+    p.add_argument("--max-unfixed-stops", type=int, default=2, metavar="回",
+                   help="進行方向の位置を補正できない停止がこの回数続いた軸は、次に補正"
+                        "できるセル (その軸に直交する壁があるセル) で必ず止まる (#168、"
+                        "既定 2、0 で切る)。長い廊下の後の角を補正なしで曲がらないため")
     p.add_argument("--chain-legs", type=int, default=2,
                    help="最速・復帰で止まらずに繋ぐ区間の本数の上限 (#80、既定 2)。"
                         "1 = 区間ごとに停止 (従来)。繋ぐと位置補正の間隔も伸びる")
@@ -198,6 +202,7 @@ def _main() -> int:
                             else {"time_margin": args.time_margin}),
                          chain_legs=1 if args.turn_in_place else max(1, args.chain_legs),
                          max_leg_cells=max(0, args.max_leg_cells),
+                         max_unfixed_stops=max(0, args.max_unfixed_stops),
                          cost=LEGACY_COST if args.turn_in_place else DEFAULT_COST)
     neighbors = not args.no_neighbors
     detector = WallDetector(calibrated_config(neighbors=neighbors,
@@ -710,7 +715,10 @@ def _main() -> int:
             legs: list[Leg], cell: tuple[int, int], facing: Direction, label: str
         ) -> tuple[tuple[int, int], Direction] | None:
             log.info("%s: %s", label, describe_legs(legs))
-            for chunk in leg_chunks(legs, cell):
+            chunks = leg_chunks(legs, cell)
+            for stop, axis in ([] if args.turn_in_place else manager.forced_stops):
+                log.info("  補正のため停止 (#168): %s で%sを補正してから進む", stop, axis)
+            for chunk in chunks:
                 head = chunk[0]
                 if args.turn_in_place:
                     facing = turn_to(facing, head.direction)
@@ -779,7 +787,7 @@ def _main() -> int:
                      manager.runs_used, manager.restart_dwell_s)
             time.sleep(manager.restart_dwell_s)
             log.info("[走行 %d] 最速ラン開始 (見積 %.1fs)",
-                     manager.runs_used, manager.estimate_s(legs))
+                     manager.runs_used, manager.estimate_s(legs, origin=maze.start))
             t_run = time.monotonic()
             pose = execute_legs(legs, maze.start, pose[1], "最速経路")
             if pose is None:

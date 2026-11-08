@@ -453,6 +453,76 @@ def test_stopping_at_every_leg_is_unaffected(explorer):
     assert mgr.chunks([N1, E2], explorer.maze.start) == [[N1], [E2]]
 
 
+# --- 進行方向を補正できない停止が続いたら、補正できるセルで止まる (#168) ------
+from krilly.sim import open_maze  # noqa: E402
+from krilly.strategy.explorer import Explorer  # noqa: E402
+
+E1, E2, E3, S3, N3 = (Leg(Direction.E, 1), Leg(Direction.E, 2), Leg(Direction.E, 3),
+                      Leg(Direction.S, 3), Leg(Direction.N, 3))
+
+
+def corridor_manager(**kw) -> RunManager:
+    """8x8 の外周だけの迷路。北端の行 (y=7) が試走会の「北側の廊下」の縮小版になる:
+    途中のセルには北の壁しか無いので、止まっても南北しか補正できない。"""
+    return RunManager(Explorer(open_maze(8)), chain_legs=2, **kw)
+
+
+def test_fixable_follows_the_walls_across_the_axis():
+    mgr = corridor_manager()
+    assert mgr.fixable((3, 7), north_south=True)          # 北の外壁
+    assert not mgr.fixable((3, 7), north_south=False)     # 東西の壁は無い
+    assert mgr.fixable((7, 7), north_south=False)         # 角のセルには東の外壁
+    mgr.mark_fix((7, 7), False)                           # 白・黄の壁で補正できなかった
+    assert not mgr.fixable((7, 7), north_south=False)
+    assert not mgr.fixable((7, 7), north_south=True)
+
+
+def test_a_long_corridor_stops_at_the_corner_before_turning():
+    """東へ 7 セル走ってから南へ曲がる。途中の 2 回の停止 (3,7)・(6,7) では東西を
+    補正できないので、角の (7,7) で止まって東西を補正してから曲がる。"""
+    mgr = corridor_manager()
+    legs = [E3, E3, E1, S3]
+    assert mgr.chunks(legs, (0, 7)) == [[E3], [E3], [E1], [S3]]
+    assert mgr.forced_stops == [((7, 7), "東西")]
+    # 切らなければ、角を補正なしで曲がる (試走会で柱に当たった形)
+    assert corridor_manager(max_unfixed_stops=0).chunks(legs, (0, 7)) == [
+        [E3], [E3], [E1, S3]]
+
+
+def test_below_the_limit_the_chunks_are_unchanged():
+    mgr = corridor_manager()
+    legs = [E3, E1, S3]                    # 補正できない停止は (3,7) の 1 回だけ
+    assert mgr.chunks(legs, (0, 7)) == [[E3], [E1, S3]]
+    assert mgr.forced_stops == []
+
+
+def test_the_north_south_axis_is_counted_the_same_way():
+    """東端の列 (x=7) を南へ 7 セル。途中のセルには東の壁しか無く南北を補正できないので、
+    南端の (7,0) で止まって南北を補正してから西へ曲がる。"""
+    mgr = corridor_manager()
+    legs = [S3, S3, Leg(Direction.S, 1), Leg(Direction.W, 3)]
+    assert mgr.chunks(legs, (7, 7)) == [[S3], [S3], [Leg(Direction.S, 1)],
+                                        [Leg(Direction.W, 3)]]
+    assert mgr.forced_stops == [((7, 0), "南北")]
+
+
+def test_no_fixable_cell_means_no_extra_stop():
+    """曲がる先にも東西の壁が無ければ、止めても補正できないので切らない。"""
+    mgr = corridor_manager()
+    legs = [E2, E2, Leg(Direction.E, 2), N3]               # (6,4) で北へ。(6,5)-(6,7) にも東西の壁は無い
+    assert mgr.chunks(legs, (0, 4)) == [[E2], [E2], [Leg(Direction.E, 2), N3]]
+    assert mgr.forced_stops == []
+
+
+def test_the_estimate_pays_for_the_stop_at_the_corner():
+    legs = [E3, E3, E1, S3]
+    on, off = corridor_manager(), corridor_manager(max_unfixed_stops=0)
+    assert on.estimate_s(legs, origin=(0, 7)) == pytest.approx(
+        off.estimate_s(legs, origin=(0, 7)) + on.straight_time_s - on.corner_time_s)
+    # 出発点を渡さない見積もりは従来どおり
+    assert on.estimate_s(legs) == pytest.approx(off.estimate_s(legs))
+
+
 # --- コーナー減速の追加時間 (#154) -----------------------------------------
 #: 2026-11-08 の自宅 8x8 の最速経路 (20 セル / 15 区間)。chain-legs 2 で 8 動作 = コーナー 7 回
 MEASURED_8X8_20261108 = [

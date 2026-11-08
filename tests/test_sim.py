@@ -333,7 +333,9 @@ def test_past_that_the_last_run_can_overrun_and_that_is_the_deal_we_took():
     truth = random_maze(16, seed=5, fix_start=False)
     # 区間の上限も当時の 4 で固定する (#164 で既定が 3 になると最速ランの区間が増えて
     # 1 本が長くなり、この seed では 1.2 でもはみ出さなくなる — 取引の例として成り立たない)
-    kw = dict(actual_scale=1.4, times=TIMES_V024, cost=COST_V024, max_leg_cells=4)
+    # 補正のための停止 (#168) も当時は無かったので切る
+    kw = dict(actual_scale=1.4, times=TIMES_V024, cost=COST_V024, max_leg_cells=4,
+              max_unfixed_stops=0)
     bold = simulate_session(truth, time_margin=1.2, **kw)
     safe = simulate_session(truth, time_margin=1.5, **kw)
 
@@ -682,7 +684,9 @@ def test_the_leg_cap_costs_races_on_real_16x16_mazes():
         ``corner_time_s=0`` で #85 の時点 (コーナー減速 #150 より前) の数字になる。
         """
         times = {} if corner_time_s is None else {"corner_time_s": corner_time_s}
-        runs = [simulate_session(m, max_leg_cells=cap, times=times) for m in mazes]
+        # 補正のための停止 (#168) より前の数字なので、それも切って固定する
+        runs = [simulate_session(m, max_leg_cells=cap, times=times, max_unfixed_stops=0)
+                for m in mazes]
         return (sum(1 for r in runs if not r.speed_runs),
                 sum(len(r.speed_runs) for r in runs))
 
@@ -703,7 +707,7 @@ def test_the_leg_cap_costs_races_on_real_16x16_mazes():
     # コーナー減速 (#150) の後の既定 (コーナー 1 回 +0.24s、#154)。最速ランの中央値は
     # 上限なしで 58.8 -> 62.1s、上限 4 で 62.0 -> 65.4s。上限の値段は 4 本のまま
     assert sweep(0) == (2, 43)
-    assert sweep(4) == (3, 39)                          # 既定
+    assert sweep(4) == (3, 39)                          # #166 までの既定
 
 
 # --- 始点の形 (#127) ------------------------------------------------------------

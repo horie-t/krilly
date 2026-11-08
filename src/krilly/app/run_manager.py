@@ -180,6 +180,17 @@ class RunManager:
     #: ``chain_legs`` = 2 だと 4 × 2 = 8 セル補正なしで、比例計算で 17-29mm = 余裕を超えうる。
     #: 較正で打ち消すまでの措置 (3 × 2 = 6 セルでも余裕の 6-8 割は使う)。
     max_leg_cells: int = 3
+    #: 位置補正は**軸ごと**にしか入らない (南北はセルの北か南の壁、東西は東か西の壁)。
+    #: 東西に続く廊下の途中のセルには北と南の壁しか無いので、そこで止まっても
+    #: **進行方向 (東西) は補正されず**、デッドレコニングだけで積み上がる (#168)。
+    #: 試走会では北側の 16 セルの廊下を走った後、角で曲がりきれず柱に当たった。前進は
+    #: 1 動作で約 10mm 行き過ぎる (#164、物差しで確認) ので、補正の無い停止が続くほど
+    #: 角に着いたときの進行方向のずれが育つ。
+    #:
+    #: そこで、**その軸の方向に動いたのに補正できなかった停止**を軸ごとに数え、
+    #: この回数に達した軸は、経路の先で最初にその軸を補正できるセルで必ず止まる
+    #: (:meth:`chunks`)。0 で切る (従来の切り方)。
+    max_unfixed_stops: int = 2
     cost: MoveCost = DEFAULT_COST
 
     #: 止まっても**位置補正ができなかった**セル (#126)。始点・終点の壁の上面は白・黄で
@@ -188,6 +199,10 @@ class RunManager:
     #: そちら側のまとまりを 1 区間にして、補正の無い区間が ``chain_legs`` を超えない
     #: ようにする (:meth:`chunks`)。:meth:`mark_fix` で更新する。
     unfixable: set[tuple[int, int]] = field(default_factory=set, init=False)
+    #: 直前の :meth:`chunks` が :attr:`max_unfixed_stops` のために足した停止
+    #: ``(セル, 補正したい軸 "南北"/"東西")``。ログ用 (#168)。
+    forced_stops: list[tuple[tuple[int, int], str]] = field(default_factory=list,
+                                                           init=False)
     phase: RunPhase = field(default=RunPhase.WAIT, init=False)
     runs_used: int = field(default=0, init=False)
     started_at: float | None = field(default=None, init=False)
@@ -262,7 +277,81 @@ class RunManager:
                 head = 1
             if walk_legs(origin, legs) in self.unfixable:
                 tail = 1
-        return chunk_legs(legs, self.chain_legs, head, tail)
+        chunks = chunk_legs(legs, self.chain_legs, head, tail)
+        self.forced_stops = []
+        if origin is not None and self.max_unfixed_stops > 0:
+            chunks = self._stop_where_fixable(chunks, origin)
+        return chunks
+
+    def fixable(self, cell: tuple[int, int], north_south: bool) -> bool:
+        """``cell`` で止まれば、その軸 (南北 / 東西) の位置を補正できるか (地図から予測)。
+
+        南北の位置はセルの北か南の壁、東西の位置は東か西の壁の帯で測る
+        (:func:`~krilly.perception.cell_pose.cell_offset`)。白・黄の壁で止まって補正
+        できなかったセル (:attr:`unfixable`) は、どちらの軸も補正できないとみなす。
+        """
+        if cell in self.unfixable:
+            return False
+        maze = self.explorer.maze
+        sides = (Direction.N, Direction.S) if north_south else (Direction.E, Direction.W)
+        return any(maze.has_wall(*cell, d) for d in sides)
+
+    def _stop_where_fixable(self, chunks: list[list[Leg]], origin: tuple[int, int]
+                            ) -> list[list[Leg]]:
+        """補正の無い停止が続いた軸を、次に補正できるセルで止めて補正させる (#168)。
+
+        軸ごとに「その軸の方向に動いたのに、着いたセルでその軸を補正できなかった停止」
+        を数える。:attr:`max_unfixed_stops` に達した軸があれば、次のまとまりの中で
+        最初にその軸を補正できるセルでまとまりを切る。切った残りは別のまとまりになる
+        (切った点で方角が同じなら区間も 2 つに分かれる)。まとまりの中に補正できる
+        セルが無ければそのまま走る (数は増え続け、次のまとまりでまた探す)。
+        """
+        axes = (True, False)                    # True = 南北、False = 東西
+        # 出発点で補正できない軸は、すでに 1 回補正し損ねたものとして数える
+        blind = {ns: 0 if self.fixable(origin, ns) else 1 for ns in axes}
+        out: list[list[Leg]] = []
+        queue = [list(chunk) for chunk in chunks]
+        cell = origin
+        while queue:
+            chunk = queue.pop(0)
+            due = [ns for ns in axes if blind[ns] >= self.max_unfixed_stops]
+            if due:
+                cut = self._first_fixable(chunk, cell, due)
+                if cut is not None:
+                    i, k = cut
+                    leg = chunk[i]
+                    first = chunk[:i] + [Leg(leg.direction, k)]
+                    rest = ([Leg(leg.direction, leg.cells - k)] if leg.cells > k else []) \
+                        + chunk[i + 1:]
+                    if rest:
+                        queue.insert(0, rest)
+                        stop = walk_legs(cell, first)
+                        self.forced_stops.append(
+                            (stop, "/".join("南北" if ns else "東西" for ns in due
+                                            if self.fixable(stop, ns))))
+                    chunk = first
+            moved = {ns: any((leg.direction in (Direction.N, Direction.S)) == ns
+                             for leg in chunk) for ns in axes}
+            cell = walk_legs(cell, chunk)
+            for ns in axes:
+                if self.fixable(cell, ns):
+                    blind[ns] = 0
+                elif moved[ns]:
+                    blind[ns] += 1
+            out.append(chunk)
+        return out
+
+    def _first_fixable(self, chunk: list[Leg], start: tuple[int, int],
+                       due: list[bool]) -> tuple[int, int] | None:
+        """``chunk`` の中で ``due`` の軸のどれかを最初に補正できる点 ``(区間, セル数)``。"""
+        x, y = start
+        for i, leg in enumerate(chunk):
+            dx, dy = leg.direction.delta
+            for k in range(1, leg.cells + 1):
+                if any(self.fixable((x + dx * k, y + dy * k), ns) for ns in due):
+                    return (i, k)
+            x, y = x + dx * leg.cells, y + dy * leg.cells
+        return None
 
     def mark_fix(self, cell: tuple[int, int], fixed: bool) -> None:
         """``cell`` で止まって位置補正ができたかを記録する (:attr:`unfixable`)。"""
