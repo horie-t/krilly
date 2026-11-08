@@ -20,6 +20,14 @@ def test_a_single_spike_does_not_stop_the_machine():
     assert w.peak_rad == pytest.approx(math.radians(3.0))
 
 
+def test_the_in_motion_limit_sits_between_clean_corners_and_real_contacts():
+    """正常な動作の最中の最大 2.19° (8x8) と、実際の接触の最小 5.0° の間 (#153)。"""
+    from krilly.motion.watch import DEFAULT_IN_MOTION_DEG
+
+    assert DEFAULT_IN_MOTION_DEG >= 1.5 * 2.19
+    assert DEFAULT_IN_MOTION_DEG < 5.0
+
+
 def test_reset_clears_the_peak_and_the_count():
     w = RotationWatch(math.radians(2.5), persist_ticks=2)
     w.update(math.radians(3.0))

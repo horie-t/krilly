@@ -51,7 +51,7 @@ from krilly.localization.recovery import (
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
-from krilly.motion.watch import RotationWatch, motion_timeout_s
+from krilly.motion.watch import DEFAULT_IN_MOTION_DEG, RotationWatch, motion_timeout_s
 from krilly.motion.corner import corridor_clearance_m
 from krilly.motion.tuning import (
     add_tuning_args,
@@ -131,6 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="機体を旋回させて走る従来モード (既定は旋回レス走行 #76)")
     p.add_argument("--max-heading-residual", type=float, default=2.5,
                    help="平行移動で許す方位残差 [deg]。超えたら接触とみなして中止する")
+    p.add_argument("--max-heading-in-motion", type=float, default=DEFAULT_IN_MOTION_DEG,
+                   help="動作の**最中**に許す指令外の回転 [deg] (#153)。3 tick 続けて超えたら"
+                        "その場で止める。終わった後の --max-heading-residual より広い: 正常でも"
+                        "コーナーの最中に 2.2° まで振れる (8x8 実測)")
     p.add_argument("--no-front-check", action="store_true", help="前進前の前方確認を無効化")
     p.add_argument("--no-recover", action="store_true",
                    help="中断したらその場で終わる (#113 の姿勢作り直しを切る)")
@@ -314,7 +318,7 @@ def _main() -> int:
             if sampler is not None:
                 sampler.take()
 
-        watch = RotationWatch(math.radians(args.max_heading_residual))
+        watch = RotationWatch(math.radians(args.max_heading_in_motion))
 
         def snapshot(reason: str) -> None:
             """止まった状態を 1 枚残す (#153)。止める処理が済んでから呼ぶこと。"""
@@ -348,7 +352,7 @@ def _main() -> int:
                     log.error("%s: 動作の途中で指令外の回転 %.2f° (上限 %.2f°)。接触の疑い、"
                               "その場で止める (#153)",
                               label, math.degrees(motion.heading_error),
-                              args.max_heading_residual)
+                              args.max_heading_in_motion)
                     motion.abort()
                     stopped = "contact"
                     break

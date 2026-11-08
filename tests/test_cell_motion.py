@@ -859,9 +859,9 @@ def test_a_straight_queue_does_not_slow_down():
 # --- 動作の途中の見張り (#153) ---------------------------------------------
 def test_a_contact_mid_move_trips_the_watch_before_the_move_ends(motion):
     """平行移動中に機体が回されると (ジャイロが回転を読む)、動作の途中で見張りが止める。"""
-    from krilly.motion.watch import RotationWatch
+    from krilly.motion.watch import DEFAULT_IN_MOTION_DEG, RotationWatch
 
-    watch = RotationWatch(math.radians(2.5))
+    watch = RotationWatch(math.radians(DEFAULT_IN_MOTION_DEG))
     motion.start_move_cells(4, 0)
     assert motion.translating
     tripped_at = None
