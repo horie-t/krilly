@@ -24,11 +24,13 @@ import time
 from pathlib import Path
 
 from krilly.app.exit_codes import EXIT_ABORTED, run_reporting_spi_lost
+from krilly.app.snapshot import save_snapshot
 from krilly.app.run_manager import RunManager, RunPhase
 from krilly.config import load_maze_config
 from krilly.hal.camera import add_camera_args, camera_kwargs
 from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
+from krilly.hal.l6470 import SpiLost
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
@@ -49,6 +51,7 @@ from krilly.localization.recovery import (
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
+from krilly.motion.watch import RotationWatch, motion_timeout_s
 from krilly.motion.corner import corridor_clearance_m
 from krilly.motion.tuning import (
     add_tuning_args,
@@ -311,31 +314,66 @@ def _main() -> int:
             if sampler is not None:
                 sampler.take()
 
-        def run_primitive(label: str, timeout: float, kind: str = "") -> None:
-            """1 動作を回し、所要時間を記録する (RunManager の見積もり定数の実測用)。"""
+        watch = RotationWatch(math.radians(args.max_heading_residual))
+
+        def snapshot(reason: str) -> None:
+            """止まった状態を 1 枚残す (#153)。止める処理が済んでから呼ぶこと。"""
+            try:
+                path = save_snapshot(capture(), reason)
+            except Exception as e:      # カメラの不調で停止処理を止めない
+                log.warning("  停止時の画像を撮れなかった: %s", e)
+                return
+            if path is not None:
+                log.warning("  停止時の画像: %s", path)
+
+        def run_primitive(label: str, timeout: float, kind: str = "") -> str | None:
+            """1 動作を回し、所要時間を記録する (RunManager の見積もり定数の実測用)。
+
+            **平行移動の途中で指令外の回転が上限を超え続けたら、その場で止めて
+            ``"contact"`` を返す** (#153)。それまでは動作が終わるまで (最長 ``timeout``)
+            指令を出し続けていたので、壁に当たって回った機体がそのまま押し続けた。
+            時間切れなら ``"timeout"``、正常に終われば None。
+            """
             drain_gyro()
+            watch.reset()
+            stopped = None
             t0 = last = time.monotonic()
             while True:
                 time.sleep(args.dt)
                 now = time.monotonic(); dt = now - last; last = now
                 if motion.update(dt, gyro_rate=gyro_rate()):
                     break
+                if (not args.turn_in_place and motion.translating
+                        and watch.update(motion.heading_error)):
+                    log.error("%s: 動作の途中で指令外の回転 %.2f° (上限 %.2f°)。接触の疑い、"
+                              "その場で止める (#153)",
+                              label, math.degrees(motion.heading_error),
+                              args.max_heading_residual)
+                    motion.abort()
+                    stopped = "contact"
+                    break
                 if now - t0 > timeout:
                     log.warning("%s: %.1fs で打ち切り (残量 %.4f)", label, timeout, motion.remaining)
                     motion.abort()
+                    stopped = "timeout"
                     break
             elapsed = time.monotonic() - t0
             if kind:
                 timings.setdefault(kind, []).append(elapsed)
             statuses = chain.get_status_all()
             # 応答なしはフォールトではなく通信断。回復 (#113) に渡さず打ち切る (#148)
-            raise_if_spi_lost(chain, statuses, label)
+            try:
+                raise_if_spi_lost(chain, statuses, label)
+            except SpiLost:
+                snapshot("spi_lost")
+                raise
             faults = describe_faults(statuses, ignore=("UVLO",))
             if faults:
                 log.warning("    %s: L6470 フォールト %s (トルク不足の疑い)", label, faults)
             along, cross, dphi = motion.residual()
-            log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f°%s",
+            log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f° (動作中の最大 %.2f°)%s",
                      label, elapsed, along, cross, math.degrees(dphi),
+                     math.degrees(watch.peak_rad),
                      "" if motion.retries == 0 else " / やり直し %d 回 (判定時の残量 %+.4f)"
                      % (motion.retries, motion.retry_remaining))
             deadline = time.monotonic() + args.pause
@@ -343,6 +381,7 @@ def _main() -> int:
                 time.sleep(args.dt)
                 now = time.monotonic(); dt = now - last; last = now
                 motion.update(dt, gyro_rate=gyro_rate())
+            return stopped
 
         def capture():
             frame = camera.capture()
@@ -439,17 +478,25 @@ def _main() -> int:
             (実機 #76: 壁に接触した移動が -3.01° を残し、その後カメラの軸角測定が
             壊れて走行が崩壊した)。旋回する走り方では旋回を指令するので判定しない。
             """
-            run_primitive(label, timeout if timeout is not None else args.timeout,
-                          kind=kind)
+            stopped = run_primitive(label, timeout if timeout is not None else args.timeout,
+                                    kind=kind)
             if args.turn_in_place:
                 return True
             residual_rad = motion.residual()[2]
             residual = abs(math.degrees(residual_rad))
-            if residual <= args.max_heading_residual:
+            if residual <= args.max_heading_residual and not stopped:
                 return True
-            log.error("回転を指令していないのに %.2f° 回った (上限 %.2f°)。"
-                      "壁との接触かスリップの可能性が高い。",
-                      residual, args.max_heading_residual)
+            if stopped == "contact":
+                log.error("動作を途中で止めた (動作中の最大の回転 %.2f°)。壁との接触の疑い。",
+                          math.degrees(watch.peak_rad))
+            elif stopped == "timeout":
+                log.error("動作が時間内に終わらなかった (残量 %.4f)。進めていない疑い。",
+                          motion.remaining)
+            else:
+                log.error("回転を指令していないのに %.2f° 回った (上限 %.2f°)。"
+                          "壁との接触かスリップの可能性が高い。",
+                          residual, args.max_heading_residual)
+            snapshot(stopped or "rotation")
             if args.no_recover or cell is None or travel is None:
                 log.error("進行中止。")
                 return False
@@ -625,7 +672,7 @@ def _main() -> int:
                 motion.start_move_cells(cells, axis)
                 recovered_cell[0] = None
                 if not move_was_clean(f"{direction.name}へ{cells}セル",
-                                      timeout=max(args.timeout, cells * 3.0),
+                                      timeout=min(args.timeout, motion_timeout_s(cells)),
                                       cell=steps[-1].to_cell, travel=direction):
                     return None
                 stops += 1
@@ -690,7 +737,7 @@ def _main() -> int:
                 recovered_cell[0] = None
                 if not move_was_clean(
                         "->".join(f"{leg.direction.name}へ{leg.cells}" for leg in chunk),
-                        timeout=max(args.timeout, cells * 3.0), kind=kind,
+                        timeout=motion_timeout_s(cells, corners=len(chunk) - 1), kind=kind,
                         cell=dest, travel=chunk[-1].direction):
                     return None
                 if len(chunk) > 1:
@@ -737,6 +784,8 @@ def _main() -> int:
                 break
             log.info("[走行 %d] 最速ラン %.1fs", manager.runs_used, time.monotonic() - t_run)
 
+        if aborted:
+            snapshot("aborted")        # 中断で終わった最後の状態 (#153)
         log.info("終了: %s", manager.summary(time.monotonic()))
         if timings:
             log.info("動作あたりの実測時間 (RunManager の見積もり定数の校正用):")

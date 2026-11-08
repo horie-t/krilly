@@ -854,3 +854,38 @@ def test_a_straight_queue_does_not_slow_down():
     assert max(speeds) == pytest.approx(m.cfg.v_max, abs=0.005)
     i_mid = len(speeds) // 2
     assert speeds[i_mid] == pytest.approx(m.cfg.v_max, abs=0.005)
+
+
+# --- 動作の途中の見張り (#153) ---------------------------------------------
+def test_a_contact_mid_move_trips_the_watch_before_the_move_ends(motion):
+    """平行移動中に機体が回されると (ジャイロが回転を読む)、動作の途中で見張りが止める。"""
+    from krilly.motion.watch import RotationWatch
+
+    watch = RotationWatch(math.radians(2.5))
+    motion.start_move_cells(4, 0)
+    assert motion.translating
+    tripped_at = None
+    for i in range(MAX_TICKS):
+        # 0.5s 後から壁に押されて 40°/s で回される (P 保持では戻しきれない)
+        rate = math.radians(40.0) if i * DT > 0.5 else 0.0
+        done = motion.update(DT, gyro_rate=rate)
+        if motion.translating and watch.update(motion.heading_error):
+            tripped_at = i * DT
+            motion.abort()
+            break
+        if done:
+            break
+    assert tripped_at is not None and tripped_at < 1.0   # 4 セル (約 3.7s) の途中で止まる
+    assert not motion.translating
+
+
+def test_a_clean_move_never_comes_near_the_limit(motion):
+    from krilly.motion.watch import RotationWatch
+
+    watch = RotationWatch(math.radians(2.5))
+    motion.start_path_cells([(3, 0), (1, 1)])
+    for _ in range(MAX_TICKS):
+        if motion.update(DT, gyro_rate=0.0):
+            break
+        assert not watch.update(motion.heading_error)
+    assert watch.peak_rad < math.radians(0.5)
