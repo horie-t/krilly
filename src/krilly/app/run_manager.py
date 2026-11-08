@@ -149,6 +149,14 @@ class RunManager:
     restart_dwell_s: float = 2.0
     #: 東西 (旋回レスでは機体の左右軸) へ 1 セル進む時間。
     lateral_cell_time_s: float = 0.60
+    #: 止まらずに曲がるコーナー 1 回あたりの追加時間 [s] (#154)。コーナーで速度を落とす
+    #: ようにした (#150、``corner_v_max`` 0.20 m/s / ``corner_accel_mps2`` 0.4) ぶん。
+    #: **同じ 8x8・同じ経路の対で測った**: 繋いだ動作 (chain2 = コーナー 1 回) が 56 本で
+    #: 平均 2.13s (2026-10-16、減速なし) -> 2.37s (2026-11-08、減速あり) = **+0.24s**
+    #: (シミュレーションの予測 +0.24s と一致)。最速ランは 20 セル / 15 区間 / 8 動作 =
+    #: コーナー 7 回で 20.00 -> 21.55s (2 セッション 8 本の平均)、見積もりは 20.00 + 7 x 0.24
+    #: = 21.68s (+0.6%)。**コーナーの速度・加減速度を変えたら測り直すこと。** 0 なら従来。
+    corner_time_s: float = 0.24
     #: True なら機体を旋回させない (#76)。旋回の時間は見積もりに入らない。
     holonomic: bool = True
     #: 止まらずに繋ぐ区間の本数の上限 (#80)。**固定費は区間ではなく「動作」に付く**
@@ -208,8 +216,11 @@ class RunManager:
         # 旋回レスでは東西が機体の左右軸 (横移動) になる。旋回するなら常に前を向いて
         # 進むので、東西も南北も同じ時間。
         ew_time = self.lateral_cell_time_s if self.holonomic else self.cell_time_s
+        chunks = self.chunks(legs, origin)
+        # 繋いだまとまりの中の継ぎ目がコーナー (同じ向きは繋がないので必ず曲がる)
+        corners = sum(len(chunk) - 1 for chunk in chunks)
         total = (ns * self.cell_time_s + ew * ew_time
-                 + self.motions(legs, origin) * self.straight_time_s)
+                 + len(chunks) * self.straight_time_s + corners * self.corner_time_s)
         if not self.holonomic:
             total += turns_in(legs, facing) * self.turn_time_s
         return total
@@ -219,8 +230,10 @@ class RunManager:
 
         固定費 (ランプ + 整定 + 撮影 + 停止) は区間ではなく動作に付く。コーナーを
         丸めて繋げば、区間の本数はそのままでも動作は減る。実測でも繋いだ動作の
-        所要は「セル数 × 1 セルの時間 + 固定費 1 回分」で、コーナーの有無で変わらない
-        (コーナーのブレンドは、どのみち必要な減速を次の区間の加速と重ねただけだから)。
+        所要は「セル数 × 1 セルの時間 + 固定費 1 回分」だった (コーナーのブレンドは、
+        どのみち必要な減速を次の区間の加速と重ねただけだから)。**コーナーで速度を落とす
+        ようにしてからは 1 回あたり** :attr:`corner_time_s` **が乗る** (#154、
+        :meth:`estimate_s` が足す)。動作の回数そのものは変わらない。
         """
         # 同じ方角が続くところでは繋げない (:func:`chunk_legs`) ので、単純な切り上げでは
         # 数が合わない。**区間を分割すると動作が増える**のを見積もりに乗せるため、
