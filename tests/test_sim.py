@@ -283,7 +283,9 @@ def test_a_sealed_goal_aborts_instead_of_looping():
 # #87 (安全率 1.5 -> 1.2) の判断は **v=0.24 m/s の機体**で測った。既定は #103 で
 # 0.30 m/s 用に更新したので、当時の結論を再現するテストには当時の定数を明示的に渡す。
 # 機体が速くなれば予算はどこも楽になる方へ動くだけで、1.2 という選択は変わらない。
-TIMES_V024 = {"cell_time_s": 0.74, "lateral_cell_time_s": 0.76, "straight_time_s": 0.83}
+# コーナー減速 (#150) より前の機体なので、コーナーの追加時間 (#154) は 0
+TIMES_V024 = {"cell_time_s": 0.74, "lateral_cell_time_s": 0.76, "straight_time_s": 0.83,
+              "corner_time_s": 0.0}
 COST_V024 = MoveCost(cell_ns=1.0, cell_ew=1.03, leg=1.10)
 
 
@@ -632,10 +634,13 @@ def test_a_faster_machine_closes_the_mazes_the_margin_could_not():
              for p in contest_mazes() if p.stem not in KNOWN_BAD_TRANSCRIPTIONS]
     #: v -> (時間定数, コスト比) の実測 (#103)。
     MEASURED = {
+        # #103 の時点 (コーナー減速 #150 より前) なのでコーナーの追加時間は 0
         0.24: ({"cell_time_s": 0.77, "lateral_cell_time_s": 0.75,
-                "straight_time_s": 0.825}, MoveCost(cell_ew=0.75 / 0.77, leg=0.825 / 0.77)),
+                "straight_time_s": 0.825, "corner_time_s": 0.0},
+               MoveCost(cell_ew=0.75 / 0.77, leg=0.825 / 0.77)),
         0.30: ({"cell_time_s": 0.61, "lateral_cell_time_s": 0.60,
-                "straight_time_s": 0.900}, MoveCost(cell_ew=0.60 / 0.61, leg=0.900 / 0.61)),
+                "straight_time_s": 0.900, "corner_time_s": 0.0},
+               MoveCost(cell_ew=0.60 / 0.61, leg=0.900 / 0.61)),
     }
 
     def shut_out(v: float, cap: int) -> int:
@@ -669,9 +674,13 @@ def test_the_leg_cap_costs_races_on_real_16x16_mazes():
     mazes = [Maze.from_ascii(p.read_text(encoding="utf-8"))
              for p in contest_mazes() if p.stem not in KNOWN_BAD_TRANSCRIPTIONS]
 
-    def sweep(cap: int) -> tuple[int, int]:
-        """現行の既定定数 (#107 のランプ) で回す。``maze_sim`` の既定と同じ。"""
-        runs = [simulate_session(m, max_leg_cells=cap) for m in mazes]
+    def sweep(cap: int, corner_time_s: float | None = None) -> tuple[int, int]:
+        """既定定数 (#107 のランプ) で回す。``maze_sim`` の既定と同じ。
+
+        ``corner_time_s=0`` で #85 の時点 (コーナー減速 #150 より前) の数字になる。
+        """
+        times = {} if corner_time_s is None else {"corner_time_s": corner_time_s}
+        runs = [simulate_session(m, max_leg_cells=cap, times=times) for m in mazes]
         return (sum(1 for r in runs if not r.speed_runs),
                 sum(len(r.speed_runs) for r in runs))
 
@@ -684,10 +693,15 @@ def test_the_leg_cap_costs_races_on_real_16x16_mazes():
     assert statistics.median(longest) == 11.5        # 長い廊下だらけ
     assert sum(1 for v in longest if v > 4) == 29    # 30 面中 29 面
 
-    assert sweep(0) == (2, 48)      # 上限なし
-    assert sweep(6) == (2, 46)
-    assert sweep(5) == (2, 45)
-    assert sweep(4) == (3, 44)      # 既定。最速ランが 4 本、走れる面が 1 面減る
+    # #85 の時点 (コーナーで減速しない)
+    assert sweep(0, corner_time_s=0.0) == (2, 48)      # 上限なし
+    assert sweep(6, corner_time_s=0.0) == (2, 46)
+    assert sweep(5, corner_time_s=0.0) == (2, 45)
+    assert sweep(4, corner_time_s=0.0) == (3, 44)      # 最速ランが 4 本、走れる面が 1 面減る
+    # コーナー減速 (#150) の後の既定 (コーナー 1 回 +0.24s、#154)。最速ランの中央値は
+    # 上限なしで 58.8 -> 62.1s、上限 4 で 62.0 -> 65.4s。上限の値段は 4 本のまま
+    assert sweep(0) == (2, 43)
+    assert sweep(4) == (3, 39)                          # 既定
 
 
 # --- 始点の形 (#127) ------------------------------------------------------------

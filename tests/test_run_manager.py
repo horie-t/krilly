@@ -294,7 +294,7 @@ def test_the_estimate_matches_the_measured_chained_speed_run(explorer):
     (:func:`test_estimate_matches_the_measured_speed_run` が M5 の定数でやるのと同じ)。
     """
     m = RunManager(explorer, cell_time_s=0.74, lateral_cell_time_s=0.76,
-                   straight_time_s=0.83)
+                   straight_time_s=0.83, corner_time_s=0.0)   # コーナー減速 (#150) の前
     assert m.estimate_s(MEASURED_5X5) == pytest.approx(25.0, abs=0.3)
     m.chain_legs = 2
     assert m.estimate_s(MEASURED_5X5) == pytest.approx(20.0, abs=0.3)
@@ -440,7 +440,9 @@ def test_the_estimate_pays_for_the_extra_stops(explorer):
     before = mgr.estimate_s(legs, origin=start)
     mgr.mark_fix(start, False)
     assert mgr.motions(legs, start) == 3
-    assert mgr.estimate_s(legs, origin=start) == pytest.approx(before + mgr.straight_time_s)
+    # コーナー 1 回が停止 1 回に置き換わる (#154: コーナーにも追加時間がある)
+    assert mgr.estimate_s(legs, origin=start) == pytest.approx(
+        before + mgr.straight_time_s - mgr.corner_time_s)
     # 出発点を渡さない見積もりは従来どおり (端点を気にしない)
     assert mgr.motions(legs) == 2
 
@@ -449,3 +451,31 @@ def test_stopping_at_every_leg_is_unaffected(explorer):
     mgr = RunManager(explorer, chain_legs=1)
     mgr.mark_fix(explorer.maze.start, False)
     assert mgr.chunks([N1, E2], explorer.maze.start) == [[N1], [E2]]
+
+
+# --- コーナー減速の追加時間 (#154) -----------------------------------------
+#: 2026-11-08 の自宅 8x8 の最速経路 (20 セル / 15 区間)。chain-legs 2 で 8 動作 = コーナー 7 回
+MEASURED_8X8_20261108 = [
+    Leg(Direction[d], c) for d, c in (
+        ("N", 1), ("E", 2), ("N", 1), ("E", 1), ("S", 1), ("E", 1), ("N", 1), ("E", 1),
+        ("N", 2), ("E", 1), ("N", 2), ("W", 3), ("S", 1), ("E", 1), ("S", 1))]
+
+
+def test_each_corner_adds_the_measured_slowdown(explorer):
+    """コーナーで減速するようにしてから、繋いだ動作は 1 回 +0.24s (#154)。
+
+    同じ 8x8・同じ経路の 2 セッション 8 本の最速ランが平均 21.55s。減速前の定数のまま
+    (20.0s) だと 7% 楽観的で、「終われない走行を始める」側に外れる。
+    """
+    mgr = RunManager(explorer, chain_legs=2)
+    assert len(mgr.chunks(MEASURED_8X8_20261108)) == 8
+    assert mgr.estimate_s(MEASURED_8X8_20261108) == pytest.approx(21.55, rel=0.01)
+    old = RunManager(explorer, chain_legs=2, corner_time_s=0.0)
+    assert old.estimate_s(MEASURED_8X8_20261108) == pytest.approx(20.0, abs=0.1)
+
+
+def test_stopping_at_every_leg_has_no_corners(explorer):
+    """chain-legs 1 では曲がるたびに止まるので、コーナーの追加時間は乗らない。"""
+    mgr = RunManager(explorer, chain_legs=1)
+    zero = RunManager(explorer, chain_legs=1, corner_time_s=0.0)
+    assert mgr.estimate_s(MEASURED_8X8_20261108) == zero.estimate_s(MEASURED_8X8_20261108)
