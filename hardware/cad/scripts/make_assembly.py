@@ -1,10 +1,12 @@
 """シャーシに SS2421-5041・六角ハブ・φ48 オムニホイールを 3 組取り付け、天板の上に
-UPS 基板 X-UPS1 を載せたアセンブリを作る。
+UPS 基板 X-UPS1 を載せ、全ネジでミドルプレートと L6470 ドライバ基板 3 枚を吊った
+アセンブリを作る。
 
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_ss2421.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_omni.py </dev/null
-    hardware/cad/scripts/fcrun hardware/cad/scripts/make_spacer.py </dev/null
+    hardware/cad/scripts/fcrun hardware/cad/scripts/make_fasteners.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_xups1.py </dev/null
+    hardware/cad/scripts/fcrun hardware/cad/scripts/make_l6470.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_assembly.py </dev/null
 
 出力: hardware/cad/krilly-assembly.FCStd
@@ -32,6 +34,18 @@ X-UPS1 は天板（Pad001、z 47..49）の上に高さ 10 の六角スペーサ�
 基板は表（電池側）が上。
 天板中央の出っ張り（Pad002、z 49..52）の上は基板の裏面まで 7 しかない。そこにある裏面の
 部品は 7 以下であることを実物で確認済み（裏面で一番高い GPIO ヘッダー 9 は出っ張りの外）。
+
+ミドルプレートは M3 × 350 の全ネジ 4 本（シャーシ天板の ø3.2 穴 (±42, ±42)）で支え、
+シャーシの上端（z 52）からミドルプレートの下面までを MID_GAP にする。全ネジは天板の
+下に 4 突き出し、天板とミドルプレートをそれぞれ上下からナットで留める（ミドルプレートの
+全ネジの穴のまわりは厚さ 2 で、リブには ø7 の逃げがある）。プレートはリブが上、x の
+向きはシャーシと同じ。
+L6470 ドライバ基板（AE-L6470DRV）3 枚はミドルプレートの裏に高さ 15 のスペーサーで吊る。
+プレートの ø3.4 穴は 42 間隔のペアが 3 組 = 各基板の片側の 2 穴（基板座標 x=4 の列）で、
+もう片側（x=36 の列、ピンヘッダー CN4 の側）がプレートの外側を向く。基板の**部品面は
+プレート側（上）**: 下に向けると C5 の下端（z ≈ 79）が X-UPS1 の電池の上端（z 80.6）に
+ぶつかるため。部品面を上にすると基板の向きが一意に決まり、L と R は鏡像にならない
+（CN1 が L は後ろ、R は前を向く）。
 """
 
 import math
@@ -55,6 +69,26 @@ UPS_Z = TOP_PLATE_Z + SPACER_LEN   # X-UPS1 の裏面
 # X-UPS1 の取付穴（基板座標）。make_xups1.py の出力と同じ
 UPS_HOLES = [(3.5, 12.0), (73.6, 12.0), (3.5, 101.5), (58.5, 101.5)]
 UPS_PARTS = ("Board", "Holders", "Cells", "GpioHeader")
+
+CHASSIS_TOP_Z = 52.0               # シャーシの上端（Pad002 の上面）
+MID_GAP = 56.0                     # シャーシの上端 ↔ ミドルプレートの下面
+MID_Z = CHASSIS_TOP_Z + MID_GAP    # ミドルプレートの下面
+TOP_PLATE_BOTTOM_Z = 47.0          # 天板（Pad001）の下面
+ROD_XY = [(sx * 42.0, sy * 42.0) for sx in (1, -1) for sy in (1, -1)]
+ROD_BELOW = 4.0                    # 全ネジが天板の下に突き出す長さ（実物）
+MID_T_AT_ROD = 2.0                 # ミドルプレートの全ネジの穴のまわりの厚さ
+NUT_T = 2.4
+DRV_SPACER = 15.0                  # ドライバ基板のスペーサーの高さ
+DRV_BOARD_T = 1.6
+DRV_PARTS = ("Board", "C5", "CN1", "CN2", "CN3", "CN4", "JP1", "U1", "PinTails")
+# ドライバ基板の基板座標 (bx, by) → プレート座標: z 軸まわりに rot 回して (tx, ty) 足す。
+# 基板の x=4 の列の 2 穴 (4, 4) / (4, 46) がプレートの ø3.4 穴に来る
+DRIVERS = {
+    "L": (90.0, 10.5, 5.5),      # +y 側。穴 (6.5, 9.5) / (−35.5, 9.5)
+    "R": (-90.0, -39.5, -5.5),   # −y 側。穴 (−35.5, −9.5) / (6.5, −9.5)
+    "F": (0.0, 12.5, -25.0),     # +x 側。穴 (16.5, −21) / (16.5, 21)。プレートから 7 はみ出す
+}
+DRV_HOLES = [(4.0, 4.0), (4.0, 46.0)]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CAD_DIR = os.path.dirname(HERE)
@@ -92,6 +126,12 @@ def ups_placement():
     ))
 
 
+def driver_placement(rot, tx, ty):
+    """ドライバ基板の座標（左下の角が原点、裏面 Z=0）→ 車体座標。部品面が上。"""
+    z = MID_Z - DRV_SPACER - DRV_BOARD_T
+    return App.Placement(App.Vector(tx, ty, z), App.Rotation(App.Vector(0, 0, 1), rot))
+
+
 HUB_Z = WALL_T + HUB_GAP                          # モータ座標でのハブ端面
 WHEEL_Z = HUB_Z + HUB_LEN - WHEEL_HEX_DEPTH       # モータ座標でのホイール内側面
 
@@ -114,6 +154,11 @@ def main():
     ups_doc = App.openDocument(os.path.join(CAD_DIR, "x-ups1.FCStd"))
     spacer = spacer_doc.getObject("Part")
     ups = ups_doc.getObject("Part")
+    mid_doc = App.openDocument(os.path.join(CAD_DIR, "krilly-middle-plate.FCStd"))
+    sp15_doc = App.openDocument(os.path.join(CAD_DIR, "m3-hex-spacer-15.FCStd"))
+    nut_doc = App.openDocument(os.path.join(CAD_DIR, "m3-nut.FCStd"))
+    rod_doc = App.openDocument(os.path.join(CAD_DIR, "m3-rod-350.FCStd"))
+    drv_doc = App.openDocument(os.path.join(CAD_DIR, "ae-l6470.FCStd"))
 
     # 別ファイルへの App::Link は相対パスで保存されるので、先に保存先を決めておく
     out = os.path.join(CAD_DIR, "krilly-assembly.FCStd")
@@ -160,6 +205,46 @@ def main():
         asm.addObject(sp)
         spacers.append(sp)
 
+    # 上の段: 全ネジ・ナット・ミドルプレート・ドライバ基板。干渉チェック用に形状も控える
+    upper = {}
+
+    def add(name, label, part_doc, part_obj, placement, shape_objs):
+        lk = doc.addObject("App::Link", name)
+        lk.Label = label
+        lk.LinkedObject = part_doc.getObject(part_obj)
+        lk.Placement = placement
+        asm.addObject(lk)
+        upper[name] = Part.makeCompound([
+            part_doc.getObject(k).Shape.transformGeometry(placement.toMatrix())
+            for k in shape_objs])
+        return lk
+
+    def at(x, y, z, rot=0.0):
+        return App.Placement(App.Vector(x, y, z), App.Rotation(App.Vector(0, 0, 1), rot))
+
+    for i, (x, y) in enumerate(ROD_XY):
+        add(f"Rod{i}", f"Rod{i}_M3x350", rod_doc, "Part",
+            at(x, y, TOP_PLATE_BOTTOM_Z - ROD_BELOW), ["Rod"])
+        add(f"NutLo{i}", f"Rod{i}_nut_below", nut_doc, "Part",
+            at(x, y, TOP_PLATE_BOTTOM_Z - NUT_T), ["Nut"])
+        add(f"NutHi{i}", f"Rod{i}_nut_above", nut_doc, "Part",
+            at(x, y, TOP_PLATE_Z), ["Nut"])
+        add(f"MidNutLo{i}", f"Rod{i}_mid_nut_below", nut_doc, "Part",
+            at(x, y, MID_Z - NUT_T), ["Nut"])
+        add(f"MidNutHi{i}", f"Rod{i}_mid_nut_above", nut_doc, "Part",
+            at(x, y, MID_Z + MID_T_AT_ROD), ["Nut"])
+    mid_body = mid_doc.getObject("Body")
+    add("MiddlePlate", "MiddlePlate", mid_doc, "Body", at(0, 0, MID_Z), ["Body"])
+    drv_holes = []
+    for key, (rot, tx, ty) in DRIVERS.items():
+        pl = driver_placement(rot, tx, ty)
+        add(f"Driver{key}", f"Driver{key}_AE-L6470", drv_doc, "Part", pl, DRV_PARTS)
+        for j, (hx, hy) in enumerate(DRV_HOLES):
+            p = pl.multVec(App.Vector(hx, hy, 0))
+            add(f"DrvSpacer{key}{j}", f"Driver{key}_spacer{j}_M3x15", sp15_doc, "Part",
+                at(p.x, p.y, MID_Z - DRV_SPACER), ["Spacer"])
+            drv_holes.append((key, p))
+
     # シャーシを固定（Assembly ワークベンチの Grounded joint）
     try:
         import JointObject  # noqa: F401  (FreeCAD 1.x の Assembly モジュール)
@@ -200,6 +285,7 @@ def main():
             sp.Placement.toMatrix())
     shapes["UPS"] = Part.makeCompound([
         ups_doc.getObject(k).Shape.transformGeometry(upl.toMatrix()) for k in UPS_PARTS])
+    shapes.update(upper)
     names = list(shapes)
     worst = 0.0
     for i, a in enumerate(names):
@@ -227,6 +313,27 @@ def main():
     # 裏面の部品が占めうる範囲（外形 × 9）とシャーシの重なり。出っ張りの上の部品は 7 以下と
     # 実物で確認済みなので、ここが 0 でなくても干渉ではない（天板やシャーシを変えたときの目安）
     benv = ups_doc.getObject("BottomEnvelope").Shape.transformGeometry(upl.toMatrix())
+    # ドライバ基板の穴がミドルプレートの ø3.4 穴の中心に来ているか
+    mid_holes = [(f.Surface.Center.x, f.Surface.Center.y) for f in mid_body.Shape.Faces
+                 if type(f.Surface).__name__ == "Cylinder" and abs(f.Surface.Radius - 1.7) < 1e-3]
+    for key, p in drv_holes:
+        d = min(math.hypot(p.x - x, p.y - y) for x, y in mid_holes)
+        print(f"Driver{key} hole ({p.x:.2f},{p.y:.2f}) -> nearest plate ø3.4 hole {d:.3f} mm")
+    for key in DRIVERS:
+        db = upper[f"Driver{key}"].optimalBoundingBox()  # BoundBox は曲面の変換後に緩くなる
+        gap = upper[f"Driver{key}"].distToShape(shapes["UPS"])[0]
+        print(f"Driver{key} x {db.XMin:.2f}..{db.XMax:.2f} y {db.YMin:.2f}..{db.YMax:.2f} "
+              f"z {db.ZMin:.2f}..{db.ZMax:.2f}  gap to UPS {gap:.2f}")
+    mb = upper["MiddlePlate"].BoundBox
+    print(f"MiddlePlate z {mb.ZMin:.2f}..{mb.ZMax:.2f}  rods z "
+          f"{TOP_PLATE_BOTTOM_Z - ROD_BELOW:.1f}..{TOP_PLATE_BOTTOM_Z - ROD_BELOW + 350:.1f}")
+    # 全ネジの下端と天板の下のナットは、後ろの 2 輪（M1 / M2）の上をかすめる
+    for i in range(len(ROD_XY)):
+        for part in ("Rod", "NutLo"):
+            for n in ("0", "1", "2"):
+                g = upper[f"{part}{i}"].distToShape(shapes[f"Wheel{n}"])[0]
+                if g < 5:
+                    print(f"  {part}{i} {ROD_XY[i]} - Wheel{n} gap {g:.2f} mm")
     print(f"UPS bottom envelope x chassis: {benv.common(body).Volume:.1f} mm^3  "
           f"(chassis top z={body.BoundBox.ZMax:.2f}, envelope bottom z={benv.BoundBox.ZMin:.2f})")
 

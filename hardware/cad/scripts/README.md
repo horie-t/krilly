@@ -34,9 +34,11 @@ hardware/cad/scripts/fcrun hardware/cad/scripts/three_view.py
   **DXF は再配布の許諾が無いのでリポジトリに入れていない。**
   [wiki.geekworm.com/File:X-UPS1-PCB.dxf](https://wiki.geekworm.com/File:X-UPS1-PCB.dxf) から
   ダウンロードして `../vendor/X-UPS1-PCB.dxf` に置く（`vendor/` は `.gitignore` 済み）。
-- [`make_spacer.py`](make_spacer.py) — M3 六角スペーサー（高さ 10）`../m3-hex-spacer-10.FCStd`。
-  X-UPS1 を天板に載せるのに使う。
-- [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付け、天板に X-UPS1 を載せた
+- [`make_l6470.py`](make_l6470.py) — 秋月 AE-L6470DRV（ステッピングモータドライバ）の外形モデル
+  `../ae-l6470.FCStd`。寸法は秋月の基板寸法図、部品の高さは実測。
+- [`make_fasteners.py`](make_fasteners.py) — M3 の締結部品: 六角スペーサー 10 / 15
+  （`../m3-hex-spacer-*.FCStd`）、ナット（`../m3-nut.FCStd`）、全ネジ 350（`../m3-rod-350.FCStd`）。
+- [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付け、天板に X-UPS1、全ネジでミドルプレートとドライバ基板 3 枚を載せた
   `../krilly-assembly.FCStd` を作る。部品は App::Link 参照なので、元の FCStd を直せば
   そのまま反映される。実行時に穴位置の一致と干渉体積を表示する。
 
