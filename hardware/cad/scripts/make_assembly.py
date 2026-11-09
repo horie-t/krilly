@@ -1,12 +1,13 @@
 """シャーシに SS2421-5041・六角ハブ・φ48 オムニホイールを 3 組取り付け、天板の上に
-UPS 基板 X-UPS1 を載せ、全ネジでミドルプレートと L6470 ドライバ基板 3 枚を吊った
-アセンブリを作る。
+UPS 基板 X-UPS1 を載せ、全ネジでミドルプレートと L6470 ドライバ基板 3 枚を吊り、
+ミドルプレートの上に Raspberry Pi 5 を載せたアセンブリを作る。
 
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_ss2421.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_omni.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_fasteners.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_xups1.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_l6470.py </dev/null
+    hardware/cad/scripts/fcrun hardware/cad/scripts/make_rpi5.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_assembly.py </dev/null
 
 出力: hardware/cad/krilly-assembly.FCStd
@@ -46,10 +47,16 @@ L6470 ドライバ基板（AE-L6470DRV）3 枚はミドルプレートの裏に�
 プレート側（上）**: 下に向けると C5 の下端（z ≈ 79）が X-UPS1 の電池の上端（z 80.6）に
 ぶつかるため。部品面を上にすると基板の向きが一意に決まり、L と R は鏡像にならない
 （CN1 が L は後ろ、R は前を向く）。
+
+Raspberry Pi 5 はミドルプレートの上に高さ 5 の M2.5 六角スペーサー 4 本で載せる。プレートの
+ø2.7 穴 (−36, ±24.5) / (22, ±24.5) が Pi 5 の取付穴（58 × 49）で、穴のまわりのプレートは
+厚さ 2。Pi 5 の長辺を車体 x にし、USB / Ethernet の端（基板 X=85）を前（+x）に向けると、
+基板の端がプレートの前の縁 x = 45.5 にちょうど揃う（この向きは実物で確認済み）。
 """
 
 import math
 import os
+import sys
 
 import FreeCAD as App
 import Part
@@ -89,6 +96,12 @@ DRIVERS = {
     "F": (0.0, 12.5, -25.0),     # +x 側。穴 (16.5, −21) / (16.5, 21)。プレートから 7 はみ出す
 }
 DRV_HOLES = [(4.0, 4.0), (4.0, 46.0)]
+
+PI_SPACER = 5.0                    # Raspberry Pi 5 のスペーサーの高さ
+MID_T_AT_PI = 2.0                  # ミドルプレートの Pi 用の穴のまわりの厚さ
+PI_Z = MID_Z + MID_T_AT_PI + PI_SPACER   # Pi 5 の基板の裏面
+PI_HOLES = [(3.5, 3.5), (61.5, 3.5), (3.5, 52.5), (61.5, 52.5)]
+PI_OFFSET = (-39.5, -28.0)         # Pi 5 の基板座標の原点 → プレート座標（穴 (3.5, 3.5) → (−36, −24.5)）
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CAD_DIR = os.path.dirname(HERE)
@@ -159,6 +172,8 @@ def main():
     nut_doc = App.openDocument(os.path.join(CAD_DIR, "m3-nut.FCStd"))
     rod_doc = App.openDocument(os.path.join(CAD_DIR, "m3-rod-350.FCStd"))
     drv_doc = App.openDocument(os.path.join(CAD_DIR, "ae-l6470.FCStd"))
+    pi_doc = App.openDocument(os.path.join(CAD_DIR, "rpi5.FCStd"))
+    sp5_doc = App.openDocument(os.path.join(CAD_DIR, "m25-hex-spacer-5.FCStd"))
 
     # 別ファイルへの App::Link は相対パスで保存されるので、先に保存先を決めておく
     out = os.path.join(CAD_DIR, "krilly-assembly.FCStd")
@@ -245,6 +260,16 @@ def main():
                 at(p.x, p.y, MID_Z - DRV_SPACER), ["Spacer"])
             drv_holes.append((key, p))
 
+    pi_pl = at(PI_OFFSET[0], PI_OFFSET[1], PI_Z)
+    add("Pi5", "RaspberryPi5", pi_doc, "Part", pi_pl,
+        ["Board", "Usb", "Ethernet", "Gpio", "Camera", "SdSocket"])
+    pi_holes = []
+    for j, (hx, hy) in enumerate(PI_HOLES):
+        p = pi_pl.multVec(App.Vector(hx, hy, 0))
+        add(f"PiSpacer{j}", f"Pi5_spacer{j}_M2.5x5", sp5_doc, "Part",
+            at(p.x, p.y, MID_Z + MID_T_AT_PI), ["Spacer"])
+        pi_holes.append(p)
+
     # シャーシを固定（Assembly ワークベンチの Grounded joint）
     try:
         import JointObject  # noqa: F401  (FreeCAD 1.x の Assembly モジュール)
@@ -324,6 +349,16 @@ def main():
         gap = upper[f"Driver{key}"].distToShape(shapes["UPS"])[0]
         print(f"Driver{key} x {db.XMin:.2f}..{db.XMax:.2f} y {db.YMin:.2f}..{db.YMax:.2f} "
               f"z {db.ZMin:.2f}..{db.ZMax:.2f}  gap to UPS {gap:.2f}")
+    pi_plate_holes = [(f.Surface.Center.x, f.Surface.Center.y) for f in mid_body.Shape.Faces
+                      if type(f.Surface).__name__ == "Cylinder"
+                      and abs(f.Surface.Radius - 1.35) < 1e-3]
+    for p in pi_holes:
+        d = min(math.hypot(p.x - x, p.y - y) for x, y in pi_plate_holes)
+        print(f"Pi5 hole ({p.x:.2f},{p.y:.2f}) -> nearest plate ø2.7 hole {d:.3f} mm")
+    pb = upper["Pi5"].BoundBox
+    print(f"Pi5 x {pb.XMin:.2f}..{pb.XMax:.2f} y {pb.YMin:.2f}..{pb.YMax:.2f} "
+          f"z {pb.ZMin:.2f}..{pb.ZMax:.2f}  gap to middle plate "
+          f"{upper['Pi5'].distToShape(upper['MiddlePlate'])[0]:.2f}")
     mb = upper["MiddlePlate"].BoundBox
     print(f"MiddlePlate z {mb.ZMin:.2f}..{mb.ZMax:.2f}  rods z "
           f"{TOP_PLATE_BOTTOM_Z - ROD_BELOW:.1f}..{TOP_PLATE_BOTTOM_Z - ROD_BELOW + 350:.1f}")
@@ -338,4 +373,14 @@ def main():
           f"(chassis top z={body.BoundBox.ZMax:.2f}, envelope bottom z={benv.BoundBox.ZMin:.2f})")
 
 
-main()
+
+try:
+    main()
+except Exception:  # FreeCAD のコンソール版は例外を表示せずに終わるので、自分で出す
+    import traceback
+    traceback.print_exc()
+    raise
+finally:
+    # flush しないと、終了時に標準出力の最後の部分が捨てられる
+    sys.stdout.flush()
+    sys.stderr.flush()
