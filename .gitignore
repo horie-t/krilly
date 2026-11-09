@@ -24,6 +24,8 @@ logs/snapshots/
 *.FCStd[0-9]
 *.FCBak
 *.FCStd.lock
+# メーカー配布の図面。再配布の許諾が無いので入れない（取得手順は hardware/cad/scripts/README.md）
+hardware/cad/vendor/
 
 # 当日の走行設定 (#79)。機体ごと・会場ごとの状態なので入れない
 src/krilly/config/run.yaml

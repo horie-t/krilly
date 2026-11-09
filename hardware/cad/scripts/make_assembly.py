@@ -1,13 +1,16 @@
-"""シャーシに SS2421-5041・六角ハブ・φ48 オムニホイールを 3 組取り付けたアセンブリを作る。
+"""シャーシに SS2421-5041・六角ハブ・φ48 オムニホイールを 3 組取り付け、天板の上に
+UPS 基板 X-UPS1 を載せたアセンブリを作る。
 
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_ss2421.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_omni.py </dev/null
+    hardware/cad/scripts/fcrun hardware/cad/scripts/make_spacer.py </dev/null
+    hardware/cad/scripts/fcrun hardware/cad/scripts/make_xups1.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_assembly.py </dev/null
 
 出力: hardware/cad/krilly-assembly.FCStd
 
 部品は App::Link で参照するだけなので、krilly-chassis.FCStd / ss2421-5041.FCStd /
-omni-hub-hex12.FCStd / omni-wheel-48.FCStd を直せばアセンブリにもそのまま反映される
+omni-hub-hex12.FCStd / omni-wheel-48.FCStd / m3-hex-spacer-10.FCStd / x-ups1.FCStd を直せばアセンブリにもそのまま反映される
 （同じフォルダに置いておくこと）。
 
 取付位置はシャーシの M0 取付部（Sketch001 / Pocket）から決めている:
@@ -22,12 +25,20 @@ omni-hub-hex12.FCStd / omni-wheel-48.FCStd を直せばアセンブリにもそ�
 M4 ボルトで締める）。
 M1 / M2 は M0 を z 軸まわりに 120° / 240° 回したもの（docs/coordinate-frames.md の
 スポーク角どおり。シャーシの Pocket001 / Pocket002 もこの位置にある）。
+
+X-UPS1 は天板（Pad001、z 47..49）の上に高さ 10 の六角スペーサー 4 本で載せる。天板の
+ø3.2 穴 (−41.75, ±35.05) / (47.75, 35.05) / (47.75, −19.95) が X-UPS1 の取付穴と一致し、
+基板の長辺（基板座標 +Y）が車体 +x、基板の外形が天板の外形 ±53.75 × ±38.55 に重なる。
+基板は表（電池側）が上。
+天板中央の出っ張り（Pad002、z 49..52）の上は基板の裏面まで 7 しかない。そこにある裏面の
+部品は 7 以下であることを実物で確認済み（裏面で一番高い GPIO ヘッダー 9 は出っ張りの外）。
 """
 
 import math
 import os
 
 import FreeCAD as App
+import Part
 
 WALL_OUTER_X = 27.20170592217176   # シャーシ Sketch001 の取付面（外面）
 WALL_T = 2.0                       # 取付壁の厚さ（Pocket の深さ）
@@ -37,6 +48,13 @@ HUB_LEN = 18.0                     # ハブ全長（六角側の端面 = 輪に�
 WHEEL_HEX_DEPTH = 10.5             # ホイールの六角穴の深さ
 WHEEL_W = 25.5
 SPOKES_DEG = {"M0": 0.0, "M1": 120.0, "M2": 240.0}
+
+TOP_PLATE_Z = 49.0                 # 天板（Pad001）の上面
+SPACER_LEN = 10.0                  # 六角スペーサーの高さ
+UPS_Z = TOP_PLATE_Z + SPACER_LEN   # X-UPS1 の裏面
+# X-UPS1 の取付穴（基板座標）。make_xups1.py の出力と同じ
+UPS_HOLES = [(3.5, 12.0), (73.6, 12.0), (3.5, 101.5), (58.5, 101.5)]
+UPS_PARTS = ("Board", "Holders", "Cells", "GpioHeader")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CAD_DIR = os.path.dirname(HERE)
@@ -61,6 +79,19 @@ def along_shaft(spoke_deg, z):
     return motor_placement(spoke_deg).multiply(App.Placement(App.Vector(0, 0, z), App.Rotation()))
 
 
+def ups_placement():
+    """X-UPS1 の基板座標（左下の角が原点、裏面 Z=0）→ 車体座標。
+
+    基板 +Y（長辺）→ 車体 +x、基板 +X → 車体 −y（z 軸まわりに −90°。裏返しではない）。
+    """
+    return App.Placement(App.Matrix(
+        0, 1, 0, -53.75,
+        -1, 0, 0, 38.55,
+        0, 0, 1, UPS_Z,
+        0, 0, 0, 1,
+    ))
+
+
 HUB_Z = WALL_T + HUB_GAP                          # モータ座標でのハブ端面
 WHEEL_Z = HUB_Z + HUB_LEN - WHEEL_HEX_DEPTH       # モータ座標でのホイール内側面
 
@@ -79,6 +110,10 @@ def main():
     wheel_doc = App.openDocument(os.path.join(CAD_DIR, "omni-wheel-48.FCStd"))
     hub, hub_env = hub_doc.getObject("Part"), hub_doc.getObject("Envelope")
     wheel, wheel_env = wheel_doc.getObject("Part"), wheel_doc.getObject("Envelope")
+    spacer_doc = App.openDocument(os.path.join(CAD_DIR, "m3-hex-spacer-10.FCStd"))
+    ups_doc = App.openDocument(os.path.join(CAD_DIR, "x-ups1.FCStd"))
+    spacer = spacer_doc.getObject("Part")
+    ups = ups_doc.getObject("Part")
 
     # 別ファイルへの App::Link は相対パスで保存されるので、先に保存先を決めておく
     out = os.path.join(CAD_DIR, "krilly-assembly.FCStd")
@@ -108,6 +143,22 @@ def main():
             w.Placement = along_shaft(spoke, z)
             asm.addObject(w)
             extra[f"{kind}{name[1]}"] = w
+
+    upl = ups_placement()
+    u = doc.addObject("App::Link", "UPS")
+    u.Label = "X-UPS1"
+    u.LinkedObject = ups
+    u.Placement = upl
+    asm.addObject(u)
+    spacers = []
+    for i, (hx, hy) in enumerate(UPS_HOLES):
+        p = upl.multVec(App.Vector(hx, hy, 0))
+        sp = doc.addObject("App::Link", f"Spacer{i}")
+        sp.Label = f"Spacer{i}_M3x10"
+        sp.LinkedObject = spacer
+        sp.Placement = App.Placement(App.Vector(p.x, p.y, TOP_PLATE_Z), App.Rotation())
+        asm.addObject(sp)
+        spacers.append(sp)
 
     # シャーシを固定（Assembly ワークベンチの Grounded joint）
     try:
@@ -144,6 +195,11 @@ def main():
     for name, lk in extra.items():
         env = hub_env if name.startswith("Hub") else wheel_env
         shapes[name] = env.Shape.transformGeometry(lk.Placement.toMatrix())
+    for sp in spacers:
+        shapes[sp.Name] = spacer_doc.getObject("Spacer").Shape.transformGeometry(
+            sp.Placement.toMatrix())
+    shapes["UPS"] = Part.makeCompound([
+        ups_doc.getObject(k).Shape.transformGeometry(upl.toMatrix()) for k in UPS_PARTS])
     names = list(shapes)
     worst = 0.0
     for i, a in enumerate(names):
@@ -162,6 +218,17 @@ def main():
               f"wheel r={_r(w.Base):.2f}..{_r(w.multVec(App.Vector(0, 0, WHEEL_W))):.2f}  "
               f"mid r={_r(w.multVec(App.Vector(0, 0, WHEEL_W / 2))):.2f}  "
               f"floor z={w.Base.z - 24:.2f}")
+
+    hs = "  ".join(f"({sp.Placement.Base.x:.2f},{sp.Placement.Base.y:.2f})" for sp in spacers)
+    print(f"UPS spacers at {hs}")
+    ub = shapes["UPS"].BoundBox
+    print(f"UPS x {ub.XMin:.2f}..{ub.XMax:.2f} y {ub.YMin:.2f}..{ub.YMax:.2f} "
+          f"z {ub.ZMin:.2f}..{ub.ZMax:.2f}")
+    # 裏面の部品が占めうる範囲（外形 × 9）とシャーシの重なり。出っ張りの上の部品は 7 以下と
+    # 実物で確認済みなので、ここが 0 でなくても干渉ではない（天板やシャーシを変えたときの目安）
+    benv = ups_doc.getObject("BottomEnvelope").Shape.transformGeometry(upl.toMatrix())
+    print(f"UPS bottom envelope x chassis: {benv.common(body).Volume:.1f} mm^3  "
+          f"(chassis top z={body.BoundBox.ZMax:.2f}, envelope bottom z={benv.BoundBox.ZMin:.2f})")
 
 
 main()
