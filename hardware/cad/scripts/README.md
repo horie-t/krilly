@@ -24,6 +24,17 @@ hardware/cad/scripts/fcrun hardware/cad/scripts/three_view.py
 - [`three_view.py`](three_view.py) — 3部品の**三面図**（第三角法・A4横・尺度 1:1）を
   [`../export/`](../export/) に出力する。対象は `PARTS`、構成は `LAYOUTS` で定義。
   TechDraw の HLR で稜線とシルエットを抽出し、SVG は自前で組んでいる。
+- [`make_ss2421.py`](make_ss2421.py) — ステッピングモータ SS2421-5041（□42 薄型・片軸）の
+  外形モデル `../ss2421-5041.FCStd` と `../export/ss2421-5041.step` を作る。寸法は
+  カタログの外形図による。
+- [`make_omni.py`](make_omni.py) — φ48 オムニホイール `../omni-wheel-48.FCStd` と
+  六角ハブ `../omni-hub-hex12.FCStd`（ヴイストン販売品）を作る。
+- [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付けた
+  `../krilly-assembly.FCStd` を作る。部品は App::Link 参照なので、元の FCStd を直せば
+  そのまま反映される。実行時に穴位置の一致と干渉体積を表示する。
+
+FreeCAD のコンソール版は標準入力が開いていると入力待ちで止まるので、
+`fcrun ... </dev/null` で実行すること。
 
 ### 図の構成（2種を併置）
 
