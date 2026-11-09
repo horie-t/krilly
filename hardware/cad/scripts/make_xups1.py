@@ -12,12 +12,14 @@ DXF にあるのは 2D の情報だけなので、高さは実物の実測で補
                    TOOL_TOP / TOOL_BOT の丸穴と DRILLHOLE の長穴を開けた基板
     - Holders    : 18650 × 2 本用の電池ホルダー × 2。外形は PLACEMENT_OUTLINE_TOP、高さは実測
     - Cells      : 18650 × 4（B1〜B4）。Geekworm の許容最大寸法（ø18.5 × 65.3）で作る。
-                   中心はホルダーのピン穴から決めた推定、下端の高さ（ホルダーの床）は仮の値
-    - GpioHeader : 裏面の GPIO ヘッダー（2×9、高さは実測）
+                   中心はホルダーのピン穴から決めた推定。てっぺんは基板表面から 20（実測）
+    - GpioHeader : GPIO ヘッダー（2×9）。重ねて使うための貫通型で、表・裏とも
+                   基板面から 9 出っ張る（実測）
     - BottomEnvelope : 裏面の部品が占めうる範囲（外形 × 裏面最大高さ）。非表示。
                    裏側の干渉チェック用
     - OutlineTop / OutlineBottom : 部品外形（PLACEMENT_OUTLINE_*）の線。基板の表・裏の面に置く
-上下の縁のコネクタ（DC ジャック・USB-A・XH など）は高さが分からないので線だけ。
+上下の縁のコネクタ（DC ジャック・USB-A・XH など）は線だけ。どれも電池より低い（実物で
+確認）ので、表側の高さは電池で決まる。
 
 取付穴は ø3.0 × 4（DXF の TOOL_TOP で「FM」が付いたもの）。メーカーのプレート図
 X-UPS1-Plate.pdf の寸法（端から 3.5 / 12、反対側は 6 と 18.6）と一致する。
@@ -42,10 +44,10 @@ NAME = "x-ups1"
 
 BOARD_T = 1.6            # 基板厚（実測）
 HOLDER_H = 15.0          # 電池ホルダーの高さ（基板表面から。実測）
-GPIO_H = 9.0             # 裏面の GPIO ヘッダーの高さ = 裏面で一番高い部品（実測）
+GPIO_H = 9.0             # GPIO ヘッダーの高さ（表・裏とも基板面から）。裏面で一番高い部品（実測）
 CELL_DIA = 18.5          # 18650 の直径（Geekworm の許容最大）
 CELL_LEN = 65.3          # 18650 の長さ（同上。フラットトップ・保護回路なし）
-CELL_GAP = 1.5           # 基板表面 ↔ 電池の下端（ホルダーの床。仮の値）
+CELL_GAP = 1.5           # 基板表面 ↔ 電池の下端。てっぺんが表面から 20 になる値（実測）
 # 電池ホルダーの外形（DXF 座標、PLACEMENT_OUTLINE_TOP の長方形）: x 全幅 × y の範囲
 HOLDER_Y_DXF = [(43.07, 82.97), (3.17, 43.07)]
 # GPIO ヘッダーの外形（DXF 座標、PLACEMENT_OUTLINE_BOTTOM の長方形）
@@ -218,8 +220,12 @@ def build(polys):
         holders.append(box.common(Part.Face(wire).extrude(App.Vector(0, 0, 50))))
 
     gx0, gy0, gx1, gy1 = GPIO_RECT_DXF
-    gpio = Part.makeBox(gx1 - gx0, gy1 - gy0, GPIO_H,
-                        App.Vector(gx0 - offset[0], gy0 - offset[1], -GPIO_H))
+    # 表側（基板表面から上）と裏側（裏面から下）の 2 つの箱
+    gpio = Part.makeCompound([
+        Part.makeBox(gx1 - gx0, gy1 - gy0, GPIO_H,
+                     App.Vector(gx0 - offset[0], gy0 - offset[1], z0))
+        for z0 in (BOARD_T, -GPIO_H)
+    ])
     env = Part.Face(wire).extrude(App.Vector(0, 0, -GPIO_H))
 
     return dict(board=board.removeSplitter(), holes=holes, n_slots=n_slots, top=top,
