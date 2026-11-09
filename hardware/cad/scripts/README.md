@@ -36,9 +36,13 @@ hardware/cad/scripts/fcrun hardware/cad/scripts/three_view.py
   ダウンロードして `../vendor/X-UPS1-PCB.dxf` に置く（`vendor/` は `.gitignore` 済み）。
 - [`make_l6470.py`](make_l6470.py) — 秋月 AE-L6470DRV（ステッピングモータドライバ）の外形モデル
   `../ae-l6470.FCStd`。寸法は秋月の基板寸法図、部品の高さは実測。
-- [`make_fasteners.py`](make_fasteners.py) — M3 の締結部品: 六角スペーサー 10 / 15
-  （`../m3-hex-spacer-*.FCStd`）、ナット（`../m3-nut.FCStd`）、全ネジ 350（`../m3-rod-350.FCStd`）。
-- [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付け、天板に X-UPS1、全ネジでミドルプレートとドライバ基板 3 枚を載せた
+- [`make_fasteners.py`](make_fasteners.py) — 締結部品: M3 六角スペーサー 10 / 15
+  （`../m3-hex-spacer-*.FCStd`）、M3 ナット（`../m3-nut.FCStd`）、M3 全ネジ 350（`../m3-rod-350.FCStd`）、
+  M2.5 六角スペーサー 5（`../m25-hex-spacer-5.FCStd`）。
+- [`make_rpi5.py`](make_rpi5.py) — Raspberry Pi 5 の簡易外形モデル `../rpi5.FCStd`。基板と、USB・
+  Ethernet・GPIO・カメラコネクタ・裏の microSD ソケットだけを箱で作る。寸法は公式の機械図面と
+  公式 STEP から測った値。
+- [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付け、天板に X-UPS1、全ネジでミドルプレートとドライバ基板 3 枚、その上に Raspberry Pi 5 を載せた
   `../krilly-assembly.FCStd` を作る。部品は App::Link 参照なので、元の FCStd を直せば
   そのまま反映される。実行時に穴位置の一致と干渉体積を表示する。
 

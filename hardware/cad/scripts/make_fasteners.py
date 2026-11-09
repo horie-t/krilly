@@ -1,4 +1,4 @@
-"""M3 の締結部品（六角スペーサー・ナット・全ネジ）の外形モデルを作る。
+"""M3 / M2.5 の締結部品（六角スペーサー・ナット・全ネジ）の外形モデルを作る。
 
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_fasteners.py </dev/null
 
@@ -7,6 +7,7 @@
     m3-hex-spacer-15 … ミドルプレートの裏 ↔ L6470 ドライバ基板（2 本 × 3 枚）
     m3-nut           … 全ネジをシャーシ天板とミドルプレートの上下から留める（8 個 × 2）
     m3-rod-350       … シャーシ ↔ ミドルプレート（から上の段）をつなぐ全ネジ（4 本）
+    m25-hex-spacer-5 … ミドルプレート ↔ Raspberry Pi 5（4 本）。二面幅 4.5（実物）
 
 寸法は実物で確認済み（スペーサーの高さと二面幅 5.5、全ネジの長さ 350）。ナットは
 JIS の M3（二面幅 5.5、厚さ 2.4）。ねじ山はモデル化せず、雌ねじは下穴、全ネジは
@@ -28,10 +29,12 @@ HEX_S = 5.5         # スペーサー・ナットの二面幅（実物 / JIS）
 TAP_DIA = 2.5       # M3 の下穴
 NUT_T = 2.4         # M3 ナットの厚さ（JIS）
 ROD_DIA = 3.0       # 全ネジの呼び径
+M25_HEX_S = 4.5     # M2.5 スペーサーの二面幅（実物）
+M25_TAP_DIA = 2.05  # M2.5 の下穴
 
 
-def hex_with_hole(length, hole=TAP_DIA):
-    r = HEX_S / math.sqrt(3)
+def hex_with_hole(length, hole=TAP_DIA, s=HEX_S):
+    r = s / math.sqrt(3)
     pts = [App.Vector(r * math.cos(math.radians(60 * i)), r * math.sin(math.radians(60 * i)), 0)
            for i in range(6)]
     solid = Part.Face(Part.makePolygon(pts + [pts[0]])).extrude(App.Vector(0, 0, length))
@@ -45,6 +48,8 @@ PARTS = {
     # ナットの穴は全ネジ（呼び径の丸棒）と同じ径にする。下穴径だと干渉チェックで食い合う
     "m3-nut": ("M3_nut", "Nut", lambda: hex_with_hole(NUT_T, ROD_DIA)),
     "m3-rod-350": ("M3_rod_350", "Rod", lambda: Part.makeCylinder(ROD_DIA / 2, 350.0)),
+    "m25-hex-spacer-5": ("M2.5_hex_spacer_5", "Spacer",
+                         lambda: hex_with_hole(5.0, M25_TAP_DIA, M25_HEX_S)),
 }
 
 
