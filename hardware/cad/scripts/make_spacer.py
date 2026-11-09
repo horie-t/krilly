@@ -4,7 +4,7 @@
 
 出力: hardware/cad/m3-hex-spacer-10.FCStd、hardware/cad/export/m3-hex-spacer-10.step
 
-シャーシ天板と X-UPS1 の間に 4 本使う。二面幅は M3 用の一般的な値で、実物とは未照合。
+シャーシ天板と X-UPS1 の間に 4 本使う。寸法は実物で確認済み（高さ 10、二面幅 5.5）。
 ねじ山はモデル化せず、両端からの雌ねじを貫通した下穴で表す。
 
 座標系: 軸 = +Z、Z=0 = 下端、Z=LENGTH = 上端。
@@ -21,7 +21,7 @@ CAD_DIR = os.path.dirname(HERE)
 NAME = "m3-hex-spacer-10"
 
 LENGTH = 10.0       # 高さ 10（実物）
-HEX_S = 5.5         # 二面幅（M3 スペーサーの一般的な値。仮）
+HEX_S = 5.5         # 二面幅（実物）
 TAP_DIA = 2.5       # M3 の下穴
 
 

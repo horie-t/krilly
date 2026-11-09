@@ -30,6 +30,8 @@ X-UPS1 は天板（Pad001、z 47..49）の上に高さ 10 の六角スペーサ�
 ø3.2 穴 (−41.75, ±35.05) / (47.75, 35.05) / (47.75, −19.95) が X-UPS1 の取付穴と一致し、
 基板の長辺（基板座標 +Y）が車体 +x、基板の外形が天板の外形 ±53.75 × ±38.55 に重なる。
 基板は表（電池側）が上。
+天板中央の出っ張り（Pad002、z 49..52）の上は基板の裏面まで 7 しかない。そこにある裏面の
+部品は 7 以下であることを実物で確認済み（裏面で一番高い GPIO ヘッダー 9 は出っ張りの外）。
 """
 
 import math
@@ -222,7 +224,8 @@ def main():
     ub = shapes["UPS"].BoundBox
     print(f"UPS x {ub.XMin:.2f}..{ub.XMax:.2f} y {ub.YMin:.2f}..{ub.YMax:.2f} "
           f"z {ub.ZMin:.2f}..{ub.ZMax:.2f}")
-    # 裏面の部品が占めうる範囲（外形 × 9）とシャーシのすき間。実際の部品は GPIO だけ見ている
+    # 裏面の部品が占めうる範囲（外形 × 9）とシャーシの重なり。出っ張りの上の部品は 7 以下と
+    # 実物で確認済みなので、ここが 0 でなくても干渉ではない（天板やシャーシを変えたときの目安）
     benv = ups_doc.getObject("BottomEnvelope").Shape.transformGeometry(upl.toMatrix())
     print(f"UPS bottom envelope x chassis: {benv.common(body).Volume:.1f} mm^3  "
           f"(chassis top z={body.BoundBox.ZMax:.2f}, envelope bottom z={benv.BoundBox.ZMin:.2f})")
