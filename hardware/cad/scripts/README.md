@@ -29,6 +29,11 @@ hardware/cad/scripts/fcrun hardware/cad/scripts/three_view.py
   カタログの外形図による。
 - [`make_omni.py`](make_omni.py) — φ48 オムニホイール `../omni-wheel-48.FCStd` と
   六角ハブ `../omni-hub-hex12.FCStd`（ヴイストン販売品）を作る。
+- [`make_xups1.py`](make_xups1.py) — UPS 基板 Geekworm X-UPS1 のモデル `../x-ups1.FCStd` を
+  メーカー配布の DXF から作る。部品の高さ（電池ホルダー 15、裏面の GPIO ヘッダー 9）は実測。
+  **DXF は再配布の許諾が無いのでリポジトリに入れていない。**
+  [wiki.geekworm.com/File:X-UPS1-PCB.dxf](https://wiki.geekworm.com/File:X-UPS1-PCB.dxf) から
+  ダウンロードして `../vendor/X-UPS1-PCB.dxf` に置く（`vendor/` は `.gitignore` 済み）。
 - [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付けた
   `../krilly-assembly.FCStd` を作る。部品は App::Link 参照なので、元の FCStd を直せば
   そのまま反映される。実行時に穴位置の一致と干渉体積を表示する。
