@@ -38,11 +38,13 @@ hardware/cad/scripts/fcrun hardware/cad/scripts/three_view.py
   `../ae-l6470.FCStd`。寸法は秋月の基板寸法図、部品の高さは実測。
 - [`make_fasteners.py`](make_fasteners.py) — 締結部品: M3 六角スペーサー 10 / 15
   （`../m3-hex-spacer-*.FCStd`）、M3 ナット（`../m3-nut.FCStd`）、M3 全ネジ 350（`../m3-rod-350.FCStd`）、
-  M2.5 六角スペーサー 5（`../m25-hex-spacer-5.FCStd`）。
+  M2.5 六角スペーサー 5（`../m25-hex-spacer-5.FCStd`）、M3 ナイロンナット（`../m3-nylon-nut.FCStd`）。
+- [`make_camera3.py`](make_camera3.py) — Raspberry Pi Camera Module 3 Wide の簡易外形モデル
+  `../camera-module-3-wide.FCStd`（基板・レンズホルダー・鏡筒・裏の FPC コネクタ）。寸法は公式の機械図面。
 - [`make_rpi5.py`](make_rpi5.py) — Raspberry Pi 5 の簡易外形モデル `../rpi5.FCStd`。基板と、USB・
   Ethernet・GPIO・カメラコネクタ・裏の microSD ソケットだけを箱で作る。寸法は公式の機械図面と
   公式 STEP から測った値。
-- [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付け、天板に X-UPS1、全ネジでミドルプレートとドライバ基板 3 枚、その上に Raspberry Pi 5 を載せた
+- [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付け、天板に X-UPS1、全ネジでミドルプレートとドライバ基板 3 枚、その上に Raspberry Pi 5、全ネジの上端にルーフとカメラを付けた
   `../krilly-assembly.FCStd` を作る。部品は App::Link 参照なので、元の FCStd を直せば
   そのまま反映される。実行時に穴位置の一致と干渉体積を表示する。
 

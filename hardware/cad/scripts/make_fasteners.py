@@ -5,7 +5,9 @@
 出力（hardware/cad/ と export/ に .FCStd / .step）:
     m3-hex-spacer-10 … シャーシ天板 ↔ X-UPS1（4 本）
     m3-hex-spacer-15 … ミドルプレートの裏 ↔ L6470 ドライバ基板（2 本 × 3 枚）
-    m3-nut           … 全ネジをシャーシ天板とミドルプレートの上下から留める（8 個 × 2）
+    m3-nut           … 全ネジをシャーシ天板とミドルプレートの上下から、ルーフの下から
+                       ダブルナットで留める
+    m3-nylon-nut     … 全ネジをルーフの上から留める（4 個）。厚さ 4.0（実物と合っている）
     m3-rod-350       … シャーシ ↔ ミドルプレート（から上の段）をつなぐ全ネジ（4 本）
     m25-hex-spacer-5 … ミドルプレート ↔ Raspberry Pi 5（4 本）。二面幅 4.5（実物）
 
@@ -28,6 +30,7 @@ CAD_DIR = os.path.dirname(HERE)
 HEX_S = 5.5         # スペーサー・ナットの二面幅（実物 / JIS）
 TAP_DIA = 2.5       # M3 の下穴
 NUT_T = 2.4         # M3 ナットの厚さ（JIS）
+NYLON_NUT_T = 4.0   # M3 ナイロンナットの厚さ（一般的な値。実物と合っている）
 ROD_DIA = 3.0       # 全ネジの呼び径
 M25_HEX_S = 4.5     # M2.5 スペーサーの二面幅（実物）
 M25_TAP_DIA = 2.05  # M2.5 の下穴
@@ -47,6 +50,7 @@ PARTS = {
     "m3-hex-spacer-15": ("M3_hex_spacer_15", "Spacer", lambda: hex_with_hole(15.0)),
     # ナットの穴は全ネジ（呼び径の丸棒）と同じ径にする。下穴径だと干渉チェックで食い合う
     "m3-nut": ("M3_nut", "Nut", lambda: hex_with_hole(NUT_T, ROD_DIA)),
+    "m3-nylon-nut": ("M3_nylon_nut", "Nut", lambda: hex_with_hole(NYLON_NUT_T, ROD_DIA)),
     "m3-rod-350": ("M3_rod_350", "Rod", lambda: Part.makeCylinder(ROD_DIA / 2, 350.0)),
     "m25-hex-spacer-5": ("M2.5_hex_spacer_5", "Spacer",
                          lambda: hex_with_hole(5.0, M25_TAP_DIA, M25_HEX_S)),
