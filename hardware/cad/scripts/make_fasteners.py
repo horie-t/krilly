@@ -10,6 +10,7 @@
     m3-nylon-nut     … 全ネジをルーフの上から留める（4 個）。厚さ 4.0（実物と合っている）
     m3-rod-350       … シャーシ ↔ ミドルプレート（から上の段）をつなぐ全ネジ（4 本）
     m25-hex-spacer-5 … ミドルプレート ↔ Raspberry Pi 5（4 本）。二面幅 4.5（実物）
+    m25-hex-spacer-11 … Raspberry Pi 5 ↔ 中継基板 HAT（3 本）。二面幅 4.5
 
 寸法は実物で確認済み（スペーサーの高さと二面幅 5.5、全ネジの長さ 350）。ナットは
 JIS の M3（二面幅 5.5、厚さ 2.4）。ねじ山はモデル化せず、雌ねじは下穴、全ネジは
@@ -54,6 +55,8 @@ PARTS = {
     "m3-rod-350": ("M3_rod_350", "Rod", lambda: Part.makeCylinder(ROD_DIA / 2, 350.0)),
     "m25-hex-spacer-5": ("M2.5_hex_spacer_5", "Spacer",
                          lambda: hex_with_hole(5.0, M25_TAP_DIA, M25_HEX_S)),
+    "m25-hex-spacer-11": ("M2.5_hex_spacer_11", "Spacer",
+                          lambda: hex_with_hole(11.0, M25_TAP_DIA, M25_HEX_S)),
 }
 
 
