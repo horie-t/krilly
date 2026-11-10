@@ -1,6 +1,6 @@
 """シャーシに SS2421-5041・六角ハブ・φ48 オムニホイールを 3 組取り付け、天板の上に
 UPS 基板 X-UPS1 を載せ、全ネジでミドルプレートと L6470 ドライバ基板 3 枚を吊り、
-ミドルプレートの上に Raspberry Pi 5 を載せ、全ネジの上端にルーフとカメラを付けた
+ミドルプレートの上に Raspberry Pi 5 と中継基板 HAT を載せ、全ネジの上端にルーフとカメラを付けた
 アセンブリを作る。
 
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_ss2421.py </dev/null
@@ -10,6 +10,7 @@ UPS 基板 X-UPS1 を載せ、全ネジでミドルプレートと L6470 ドラ�
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_l6470.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_rpi5.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_camera3.py </dev/null
+    hardware/cad/scripts/fcrun hardware/cad/scripts/make_hat.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_assembly.py </dev/null
 
 出力: hardware/cad/krilly-assembly.FCStd
@@ -116,6 +117,14 @@ PI_HOLES = [(3.5, 3.5), (61.5, 3.5), (3.5, 52.5), (61.5, 52.5)]
 ROOF_ROD_ABOVE = 5.0               # 全ネジがルーフの上面から突き出す長さ（平均、実物）
 ROOF_T_AT_ROD = 2.0                # ルーフの全ネジの穴のまわりの厚さ
 NYLON_NUT_T = 4.0
+PI_BOARD_T = 1.3                   # Raspberry Pi 5 の基板の厚さ（make_rpi5.py）
+HAT_SPACER = 11.0                  # Pi ↔ HAT の M2.5 スペーサー（実物）
+# HAT の取付穴（HAT 座標 = Pi 座標）。Pi の右下の穴は HAT の切り欠きの中なので使わない
+HAT_HOLES = [(3.5, 52.5), (61.5, 52.5), (3.5, 3.5)]
+# HAT の部品（make_hat.py の NOT_FITTED = J13 は入っていない）
+HAT_PARTS = ("Board", "J1", "J2", "J3", "J4", "J5", "J6", "J7", "J8", "J9", "J10", "J11",
+             "J12", "JP1", "JP2", "JP3", "SW1", "SW2", "BZ1", "Q1", "R1", "R2", "R3",
+             "D1", "BNO055")
 PI_OFFSET = (-39.5, -28.0)         # Pi 5 の基板座標の原点 → プレート座標（穴 (3.5, 3.5) → (−36, −24.5)）
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -192,6 +201,8 @@ def main():
     roof_doc = App.openDocument(os.path.join(CAD_DIR, "krilly-roof.FCStd"))
     nylon_doc = App.openDocument(os.path.join(CAD_DIR, "m3-nylon-nut.FCStd"))
     cam_doc = App.openDocument(os.path.join(CAD_DIR, "camera-module-3-wide.FCStd"))
+    hat_doc = App.openDocument(os.path.join(CAD_DIR, "krilly-hat.FCStd"))
+    sp11_doc = App.openDocument(os.path.join(CAD_DIR, "m25-hex-spacer-11.FCStd"))
 
     # 別ファイルへの App::Link は相対パスで保存されるので、先に保存先を決めておく
     out = os.path.join(CAD_DIR, "krilly-assembly.FCStd")
@@ -309,6 +320,23 @@ def main():
     add("Camera", "CameraModule3Wide", cam_doc, "Part", cam_pl,
         ["Board", "Housing", "Lens", "Connector"])
 
+    # 中継基板 HAT: Pi 5 の上に M2.5 スペーサー 3 本。HAT の座標は Pi の座標と同じ向き・原点
+    hat_z = PI_Z + PI_BOARD_T + HAT_SPACER
+    hat_pl = at(PI_OFFSET[0], PI_OFFSET[1], hat_z)
+    add("Hat", "krilly_HAT", hat_doc, "Part", hat_pl,
+        [k for k in HAT_PARTS if k != "J1"])
+    # J1（裏面のメスヘッダー）は Pi の GPIO（オス）と差し込み合って重なるのが正しいので、
+    # 全体の干渉チェックからは外し、下で J1 と GPIO の位置だけ確かめる
+    hat_j1 = hat_doc.getObject("J1").Shape.transformGeometry(hat_pl.toMatrix())
+    lk = doc.addObject("App::Link", "HatJ1")  # 表示用（形状は Hat のリンクに含まれない）
+    lk.Label = "krilly_HAT_J1"
+    lk.LinkedObject = hat_doc.getObject("J1")
+    lk.Placement = hat_pl
+    asm.addObject(lk)
+    for j, (hx, hy) in enumerate(HAT_HOLES):
+        add(f"HatSpacer{j}", f"HAT_spacer{j}_M2.5x11", sp11_doc, "Part",
+            at(PI_OFFSET[0] + hx, PI_OFFSET[1] + hy, PI_Z + PI_BOARD_T), ["Spacer"])
+
     # シャーシを固定（Assembly ワークベンチの Grounded joint）
     try:
         import JointObject  # noqa: F401  (FreeCAD 1.x の Assembly モジュール)
@@ -361,6 +389,17 @@ def main():
             if v > 1e-3:
                 print(f"  INTERFERENCE {a} x {b}: {v:.3f} mm^3")
     print(f"max overlap {worst:.4f} mm^3")
+
+    # HAT の J1（メス）と Pi の GPIO（オス）: 同じ位置に重なり、J1 の下端が GPIO の樹脂部の上面に来るか
+    gpio = pi_doc.getObject("Gpio").Shape.transformGeometry(pi_pl.toMatrix())
+    gb, jb = gpio.Solids[0].BoundBox, hat_j1.BoundBox   # Solids[0] = GPIO の樹脂部
+    print(f"HAT J1 x {jb.XMin:.2f}..{jb.XMax:.2f} y {jb.YMin:.2f}..{jb.YMax:.2f} "
+          f"bottom z {jb.ZMin:.2f} / Pi GPIO x {gb.XMin:.2f}..{gb.XMax:.2f} "
+          f"y {gb.YMin:.2f}..{gb.YMax:.2f} base top z {gb.ZMax:.2f}")
+    hb = upper["Hat"].BoundBox
+    print(f"HAT x {hb.XMin:.2f}..{hb.XMax:.2f} y {hb.YMin:.2f}..{hb.YMax:.2f} "
+          f"z {hb.ZMin:.2f}..{hb.ZMax:.2f}  gap to Pi5 {upper['Hat'].distToShape(upper['Pi5'])[0]:.2f}  "
+          f"gap to roof {upper['Hat'].distToShape(upper['Roof'])[0]:.1f}")
 
     for n in ("0",):
         w, h = extra[f"Wheel{n}"].Placement, extra[f"Hub{n}"].Placement
