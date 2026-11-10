@@ -1,6 +1,7 @@
 """シャーシに SS2421-5041・六角ハブ・φ48 オムニホイールを 3 組取り付け、天板の上に
 UPS 基板 X-UPS1 を載せ、全ネジでミドルプレートと L6470 ドライバ基板 3 枚を吊り、
-ミドルプレートの上に Raspberry Pi 5 を載せたアセンブリを作る。
+ミドルプレートの上に Raspberry Pi 5 を載せ、全ネジの上端にルーフとカメラを付けた
+アセンブリを作る。
 
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_ss2421.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_omni.py </dev/null
@@ -8,6 +9,7 @@ UPS 基板 X-UPS1 を載せ、全ネジでミドルプレートと L6470 ドラ�
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_xups1.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_l6470.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_rpi5.py </dev/null
+    hardware/cad/scripts/fcrun hardware/cad/scripts/make_camera3.py </dev/null
     hardware/cad/scripts/fcrun hardware/cad/scripts/make_assembly.py </dev/null
 
 出力: hardware/cad/krilly-assembly.FCStd
@@ -52,6 +54,16 @@ Raspberry Pi 5 はミドルプレートの上に高さ 5 の M2.5 六角スペ�
 ø2.7 穴 (−36, ±24.5) / (22, ±24.5) が Pi 5 の取付穴（58 × 49）で、穴のまわりのプレートは
 厚さ 2。Pi 5 の長辺を車体 x にし、USB / Ethernet の端（基板 X=85）を前（+x）に向けると、
 基板の端がプレートの前の縁 x = 45.5 にちょうど揃う（この向きは実物で確認済み）。
+
+ルーフは全ネジの上端に付け、全ネジがルーフの上面から ROOF_ROD_ABOVE（平均）突き出す。
+上からナイロンナット、下からダブルナットで留める。ロールとピッチはこの 4 本のナットの
+高さでルーフごと傾けて調整するが、モデルは水平（平均の高さ）にしておく。ルーフは
+全ネジの穴のまわりが厚さ 2 で、リブが上、向きはシャーシと同じ。
+カメラ（Camera Module 3 Wide）はスペーサー無しでルーフの下面に直接ねじ留めする。
+基板の裏（FPC コネクタの面）をルーフの下面に当て、レンズは真下。ルーフの ø2.3 穴
+(−0.1, ±10.5) / (12.4, ±10.5) がカメラの 21 × 12.5 の穴で、レンズ側の穴の列が x = −0.1、
+コネクタの辺が後ろ（−x）を向き、コネクタはルーフ中央の開口に入る。光軸は車体の中心
+(0, 0) に来る（docs/claude/camera-geometry.md）。
 """
 
 import math
@@ -101,6 +113,9 @@ PI_SPACER = 5.0                    # Raspberry Pi 5 のスペーサーの高さ
 MID_T_AT_PI = 2.0                  # ミドルプレートの Pi 用の穴のまわりの厚さ
 PI_Z = MID_Z + MID_T_AT_PI + PI_SPACER   # Pi 5 の基板の裏面
 PI_HOLES = [(3.5, 3.5), (61.5, 3.5), (3.5, 52.5), (61.5, 52.5)]
+ROOF_ROD_ABOVE = 5.0               # 全ネジがルーフの上面から突き出す長さ（平均、実物）
+ROOF_T_AT_ROD = 2.0                # ルーフの全ネジの穴のまわりの厚さ
+NYLON_NUT_T = 4.0
 PI_OFFSET = (-39.5, -28.0)         # Pi 5 の基板座標の原点 → プレート座標（穴 (3.5, 3.5) → (−36, −24.5)）
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -174,6 +189,9 @@ def main():
     drv_doc = App.openDocument(os.path.join(CAD_DIR, "ae-l6470.FCStd"))
     pi_doc = App.openDocument(os.path.join(CAD_DIR, "rpi5.FCStd"))
     sp5_doc = App.openDocument(os.path.join(CAD_DIR, "m25-hex-spacer-5.FCStd"))
+    roof_doc = App.openDocument(os.path.join(CAD_DIR, "krilly-roof.FCStd"))
+    nylon_doc = App.openDocument(os.path.join(CAD_DIR, "m3-nylon-nut.FCStd"))
+    cam_doc = App.openDocument(os.path.join(CAD_DIR, "camera-module-3-wide.FCStd"))
 
     # 別ファイルへの App::Link は相対パスで保存されるので、先に保存先を決めておく
     out = os.path.join(CAD_DIR, "krilly-assembly.FCStd")
@@ -270,6 +288,27 @@ def main():
             at(p.x, p.y, MID_Z + MID_T_AT_PI), ["Spacer"])
         pi_holes.append(p)
 
+    rod_top = TOP_PLATE_BOTTOM_Z - ROD_BELOW + 350.0
+    roof_z = rod_top - ROOF_ROD_ABOVE - ROOF_T_AT_ROD      # ルーフの下面
+    roof_body = [o for o in roof_doc.Objects if o.TypeId == "PartDesign::Body"][0]
+    add("Roof", "Roof", roof_doc, roof_body.Name, at(0, 0, roof_z), [roof_body.Name])
+    for i, (x, y) in enumerate(ROD_XY):
+        add(f"RoofNylon{i}", f"Rod{i}_roof_nylon_nut", nylon_doc, "Part",
+            at(x, y, roof_z + ROOF_T_AT_ROD), ["Nut"])
+        for k in (1, 2):  # ダブルナット
+            add(f"RoofNutLo{i}_{k}", f"Rod{i}_roof_nut_below{k}", nut_doc, "Part",
+                at(x, y, roof_z - k * NUT_T), ["Nut"])
+    # カメラの座標（+X 右・+Y コネクタ側・+Z 光軸、表が Z=0、裏が Z=−1.12）→ 車体座標:
+    # カメラ +X → 車体 −y、+Y → −x、+Z → −z（レンズが真下）。光軸 (12.5, 14.4) → (0, 0)
+    cam_pl = App.Placement(App.Matrix(
+        0, -1, 0, 14.4,
+        -1, 0, 0, 12.5,
+        0, 0, -1, roof_z - 1.12,
+        0, 0, 0, 1,
+    ))
+    add("Camera", "CameraModule3Wide", cam_doc, "Part", cam_pl,
+        ["Board", "Housing", "Lens", "Connector"])
+
     # シャーシを固定（Assembly ワークベンチの Grounded joint）
     try:
         import JointObject  # noqa: F401  (FreeCAD 1.x の Assembly モジュール)
@@ -359,6 +398,18 @@ def main():
     print(f"Pi5 x {pb.XMin:.2f}..{pb.XMax:.2f} y {pb.YMin:.2f}..{pb.YMax:.2f} "
           f"z {pb.ZMin:.2f}..{pb.ZMax:.2f}  gap to middle plate "
           f"{upper['Pi5'].distToShape(upper['MiddlePlate'])[0]:.2f}")
+    roof_holes = [(f.Surface.Center.x, f.Surface.Center.y) for f in roof_body.Shape.Faces
+                  if type(f.Surface).__name__ == "Cylinder"
+                  and abs(f.Surface.Radius - 1.15) < 1e-3]
+    for hx, hy in [(2.0, 2.0), (23.0, 2.0), (2.0, 14.5), (23.0, 14.5)]:
+        p = cam_pl.multVec(App.Vector(hx, hy, 0))
+        d = min(math.hypot(p.x - x, p.y - y) for x, y in roof_holes)
+        print(f"Camera hole ({p.x:.2f},{p.y:.2f}) -> nearest roof ø2.3 hole {d:.3f} mm")
+    axis = cam_pl.multVec(App.Vector(12.5, 14.4, 8.3))
+    floor_z = min(shapes[f"Wheel{n}"].BoundBox.ZMin for n in "012")
+    rb = upper["Roof"].BoundBox
+    print(f"Roof z {rb.ZMin:.2f}..{rb.ZMax:.2f}  lens tip ({axis.x:.2f},{axis.y:.2f},{axis.z:.2f})  "
+          f"lens above floor {axis.z - floor_z:.1f} mm")
     mb = upper["MiddlePlate"].BoundBox
     print(f"MiddlePlate z {mb.ZMin:.2f}..{mb.ZMax:.2f}  rods z "
           f"{TOP_PLATE_BOTTOM_Z - ROD_BELOW:.1f}..{TOP_PLATE_BOTTOM_Z - ROD_BELOW + 350:.1f}")
