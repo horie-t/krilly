@@ -143,6 +143,8 @@ Layered under `src/krilly/` (low → high level; each layer is independently tes
 
 `scripts/` = per-peripheral bring-up CLIs. `tests/` = pure-logic unit tests with faked transports.
 
+`hardware/cad/` = FreeCAD models of the whole machine (chassis, motors/wheels, X-UPS1, L6470 boards, Pi 5, HAT, roof + camera). FCStd is binary: read the generated text summaries `hardware/cad/export/assembly.md` (positions, clearances, interference) and `*-describe.md` instead — see [hardware-cad](docs/claude/hardware-cad.md).
+
 ### Conventions & gotchas (always-on)
 
 - **Testable-HAL pattern**: every HAL class takes an injectable transport (`spi=` / `serial_obj=` / `bus=` / `picam2=`); tests pass a fake and assert the exact byte/register stream. The real transport is opened (and its hardware lib lazy-imported) only when the arg is omitted. Follow this for new HAL so it stays unit-testable off-Pi.
@@ -177,6 +179,7 @@ The measured findings, their numbers and the reasoning behind each design decisi
 | [wall-detection](docs/claude/wall-detection.md) | ROI の較正と探索、HSV マスク (`h2_lo` など)、リボンケーブル、閾値の根拠、木の床と自立壁、手動/走行中の較正データ収集 (#78)。 |
 | [lighting-and-floors](docs/claude/lighting-and-floors.md) | AE/ゲインの余裕、色温度、黒い床での BACK の白飛びと `--ev -2`、始点/終点の白・黄の壁上面 (#125/#126)。 |
 | [hardware-sessions](docs/claude/hardware-sessions.md) | 5×5・8×8 の通し走行、試走会 (2026-09-26) と本番 (2026-09-27) で何が起き、何を学んだか。 |
+| [hardware-cad](docs/claude/hardware-cad.md) | 機体の 3D モデル (`hardware/cad/`): 読むべきテキストの要約、作り直し方とコンソール版 FreeCAD の罠、各段の高さ、余裕の小さいすき間、未解決 (#173)、データの扱い。 |
 
 When a session produces a new finding, add it to the matching page (or create a new page and add a row here) — **do not grow CLAUDE.md itself**; it stays an overview + index so that it fits the context limit. Keep the existing style: a bold one-line claim, then the measurement with its conditions (speed, floor, sign convention, issue number).
 
