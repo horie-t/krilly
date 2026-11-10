@@ -46,9 +46,11 @@ hardware/cad/scripts/fcrun hardware/cad/scripts/three_view.py
 - [`make_rpi5.py`](make_rpi5.py) — Raspberry Pi 5 の簡易外形モデル `../rpi5.FCStd`。基板と、USB・
   Ethernet・GPIO・カメラコネクタ・裏の microSD ソケットだけを箱で作る。寸法は公式の機械図面と
   公式 STEP から測った値。
+- [`describe_fcstd.py`](describe_fcstd.py) — GUI で作った板（シャーシ・ミドルプレート・ルーフ）の
+  特徴・スケッチ・穴・面の高さを `../export/*-describe.md` に書き出す。FCStd を GUI で直したら実行する。
 - [`make_assembly.py`](make_assembly.py) — シャーシにモータ・ハブ・ホイールを 3 組（M0/M1/M2）取り付け、天板に X-UPS1、全ネジでミドルプレートとドライバ基板 3 枚、その上に Raspberry Pi 5 と HAT、全ネジの上端にルーフとカメラを付けた
   `../krilly-assembly.FCStd` を作る。部品は App::Link 参照なので、元の FCStd を直せば
-  そのまま反映される。実行時に穴位置の一致と干渉体積を表示する。
+  そのまま反映される。穴位置の一致・干渉・すき間を表示し、`../export/assembly.md` にも書き出す。
 
 FreeCAD のコンソール版は標準入力が開いていると入力待ちで止まるので、
 `fcrun ... </dev/null` で実行すること。

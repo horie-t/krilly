@@ -173,6 +173,35 @@ HUB_Z = WALL_T + HUB_GAP                          # モータ座標でのハブ�
 WHEEL_Z = HUB_Z + HUB_LEN - WHEEL_HEX_DEPTH       # モータ座標でのホイール内側面
 
 
+class Report:
+    """確認結果を画面に出しつつ、Markdown として貯めて最後にファイルに書く。"""
+
+    HEADER = """# krilly アセンブリの要約
+
+`hardware/cad/scripts/make_assembly.py` が `krilly-assembly.FCStd` と一緒に書き出す。
+**手で編集しない**（作り直すと上書きされる）。座標は車体座標（mm）: 原点 = 車体の中心、
++x 前 / +y 左 / +z 上（docs/coordinate-frames.md）。部品ごとの寸法と出典は
+`hardware/cad/scripts/make_*.py`、GUI で作った板（シャーシ・ミドルプレート・ルーフ）は
+`hardware/cad/export/*-describe.md` を見る。
+"""
+
+    def __init__(self):
+        self.lines = [self.HEADER]
+
+    def section(self, title):
+        self.lines += ["", f"## {title}", ""]
+        print(f"== {title}")
+
+    def line(self, text):
+        self.lines.append(text)
+        if text:
+            print(text)
+
+    def write(self, path):
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(self.lines) + "\n")
+
+
 def _r(v):
     return math.hypot(v.x, v.y)
 
@@ -351,21 +380,13 @@ def main():
     doc.save()
     print(f"saved {out}")
 
-    # ---- 検証: 穴位置の一致と干渉 -------------------------------------
+    # ---- 検証と要約 ----------------------------------------------------
+    # 結果は画面に出すと同時に export/assembly.md に書く。FCStd はバイナリで読めないので、
+    # 他のセッション（や人）はこの要約で機体の状態を知る。差分を見れば何がどれだけ動いたか分かる
+    report = Report()
     body = chassis.Shape
-    for name, lk in links.items():
-        pl = lk.Placement
-        holes = [pl.multVec(App.Vector(s * 15.5, s * 15.5, 0)) for s in (1, -1)]
-        hs = "  ".join(f"({h.x:.2f},{h.y:.2f},{h.z:.2f})" for h in holes)
-        env = envelope.Shape.copy()
-        env.Placement = pl
-        inter = body.common(env).Volume
-        bb = env.BoundBox
-        print(f"{name}: tap holes {hs}  overlap {inter:.3f} mm^3  "
-              f"z {bb.ZMin:.2f}..{bb.ZMax:.2f}  "
-              f"shaft tip r={_r(pl.multVec(App.Vector(0, 0, 7))):.2f}")
 
-    # 全部品の組み合わせで干渉体積を見る（はめあい面の接触は 0 になる）
+    # 干渉チェックとすき間に使う、車体座標に置いた形状
     shapes = {"Chassis": body}
     for name, lk in links.items():
         shapes[name] = envelope.Shape.transformGeometry(lk.Placement.toMatrix())
@@ -378,8 +399,58 @@ def main():
     shapes["UPS"] = Part.makeCompound([
         ups_doc.getObject(k).Shape.transformGeometry(upl.toMatrix()) for k in UPS_PARTS])
     shapes.update(upper)
+    # BoundBox は曲面を変換すると緩くなる（ホイールで 6 mm 低く出た）ので optimalBoundingBox を使う
+    floor_z = min(shapes[f"Wheel{n}"].optimalBoundingBox().ZMin for n in "012")
+
+    report.section("部品の範囲")
+    report.line(f"床（ホイールの接地点）は z = {floor_z:.2f}。範囲は各部品の境界箱（mm、車体座標）。")
+    report.line("")
+    report.line("| 名前 | ラベル | ファイル | x | y | z |")
+    report.line("|---|---|---|---|---|---|")
+    bbox_only = {"HatJ1": hat_j1}   # 干渉チェックには入れないが範囲は載せる
+    for o in doc.Objects:
+        if o.TypeId != "App::Link":
+            continue
+        shp = shapes.get(o.Name, bbox_only.get(o.Name))
+        if shp is None:
+            continue
+        b = shp.optimalBoundingBox()  # BoundBox は曲面の変換後に緩くなる
+        src = os.path.basename(o.LinkedObject.Document.FileName)
+        report.line(f"| {o.Name} | {o.Label} | {src} | {b.XMin:.2f}〜{b.XMax:.2f} | "
+                    f"{b.YMin:.2f}〜{b.YMax:.2f} | {b.ZMin:.2f}〜{b.ZMax:.2f} |")
+
+    report.section("取付穴の一致")
+    report.line("相手の穴の中心からのずれ（0 なら一致）。")
+    report.line("")
+    for name, lk in links.items():
+        pl = lk.Placement
+        for s in (1, -1):
+            h = pl.multVec(App.Vector(s * 15.5, s * 15.5, 0))
+            report.line(f"- {name} のタップ穴 ({h.x:.2f}, {h.y:.2f}, {h.z:.2f})"
+                        "（シャーシの ø3.5 穴と同じ軸上）")
+
+    def hole_check(label, points, plate_shape, radius, plate_name):
+        holes = [(f.Surface.Center.x, f.Surface.Center.y) for f in plate_shape.Faces
+                 if type(f.Surface).__name__ == "Cylinder"
+                 and abs(f.Surface.Radius - radius) < 1e-3]
+        for p in points:
+            d = min(math.hypot(p.x - x, p.y - y) for x, y in holes)
+            report.line(f"- {label} ({p.x:.2f}, {p.y:.2f}) → {plate_name}の "
+                        f"ø{2 * radius:.1f} 穴まで {d:.3f}")
+
+    hole_check("ドライバ基板の穴", [p for _, p in drv_holes], mid_body.Shape, 1.7, "ミドルプレート")
+    hole_check("Pi 5 の穴", pi_holes, mid_body.Shape, 1.35, "ミドルプレート")
+    hole_check("カメラの穴", [cam_pl.multVec(App.Vector(x, y, 0))
+                         for x, y in [(2.0, 2.0), (23.0, 2.0), (2.0, 14.5), (23.0, 14.5)]],
+               roof_body.Shape, 1.15, "ルーフ")
+    for sp in spacers:
+        report.line(f"- X-UPS1 のスペーサー ({sp.Placement.Base.x:.2f}, {sp.Placement.Base.y:.2f})"
+                    "（天板の ø3.2 穴）")
+
+    report.section("干渉")
     names = list(shapes)
     worst = 0.0
+    hits = []
     for i, a in enumerate(names):
         for b in names[i + 1:]:
             if not shapes[a].BoundBox.intersect(shapes[b].BoundBox):
@@ -387,81 +458,63 @@ def main():
             v = shapes[a].common(shapes[b]).Volume
             worst = max(worst, v)
             if v > 1e-3:
-                print(f"  INTERFERENCE {a} x {b}: {v:.3f} mm^3")
-    print(f"max overlap {worst:.4f} mm^3")
-
-    # HAT の J1（メス）と Pi の GPIO（オス）: 同じ位置に重なり、J1 の下端が GPIO の樹脂部の上面に来るか
+                hits.append(f"- **{a} × {b}: {v:.3f} mm³**")
+    report.line(f"全 {len(names)} 部品の組み合わせで、重なりの最大は {worst:.4f} mm³"
+                "（はめあい面の接触は 0 になる）。")
+    for h in hits:
+        report.line(h)
+    report.line("")
+    report.line("チェックから外しているもの:")
     gpio = pi_doc.getObject("Gpio").Shape.transformGeometry(pi_pl.toMatrix())
     gb, jb = gpio.Solids[0].BoundBox, hat_j1.BoundBox   # Solids[0] = GPIO の樹脂部
-    print(f"HAT J1 x {jb.XMin:.2f}..{jb.XMax:.2f} y {jb.YMin:.2f}..{jb.YMax:.2f} "
-          f"bottom z {jb.ZMin:.2f} / Pi GPIO x {gb.XMin:.2f}..{gb.XMax:.2f} "
-          f"y {gb.YMin:.2f}..{gb.YMax:.2f} base top z {gb.ZMax:.2f}")
-    hb = upper["Hat"].BoundBox
-    print(f"HAT x {hb.XMin:.2f}..{hb.XMax:.2f} y {hb.YMin:.2f}..{hb.YMax:.2f} "
-          f"z {hb.ZMin:.2f}..{hb.ZMax:.2f}  gap to Pi5 {upper['Hat'].distToShape(upper['Pi5'])[0]:.2f}  "
-          f"gap to roof {upper['Hat'].distToShape(upper['Roof'])[0]:.1f}")
+    report.line(f"- HAT の J1（メス、x {jb.XMin:.2f}〜{jb.XMax:.2f}, y {jb.YMin:.2f}〜{jb.YMax:.2f}, "
+                f"下端 z {jb.ZMin:.2f}）と Pi の GPIO（オス、x {gb.XMin:.2f}〜{gb.XMax:.2f}, "
+                f"y {gb.YMin:.2f}〜{gb.YMax:.2f}, 樹脂部の上面 z {gb.ZMax:.2f}）。差し込み合うのが正しい")
+    report.line("- HAT の中の BZ1 × SW1（0.13 mm³）。実物でも接している（make_hat.py）")
 
-    for n in ("0",):
-        w, h = extra[f"Wheel{n}"].Placement, extra[f"Hub{n}"].Placement
-        print(f"M{n}: hub end r={_r(h.Base):.2f}  set screw r={_r(h.multVec(App.Vector(0, 0, 5))):.2f}  "
-              f"wheel r={_r(w.Base):.2f}..{_r(w.multVec(App.Vector(0, 0, WHEEL_W))):.2f}  "
-              f"mid r={_r(w.multVec(App.Vector(0, 0, WHEEL_W / 2))):.2f}  "
-              f"floor z={w.Base.z - 24:.2f}")
+    report.section("すき間（余裕の小さい所）")
+    report.line("最短距離（mm）。機構を変えるときは、ここが詰まらないか確かめる。")
+    report.line("")
 
-    hs = "  ".join(f"({sp.Placement.Base.x:.2f},{sp.Placement.Base.y:.2f})" for sp in spacers)
-    print(f"UPS spacers at {hs}")
-    ub = shapes["UPS"].BoundBox
-    print(f"UPS x {ub.XMin:.2f}..{ub.XMax:.2f} y {ub.YMin:.2f}..{ub.YMax:.2f} "
-          f"z {ub.ZMin:.2f}..{ub.ZMax:.2f}")
-    # 裏面の部品が占めうる範囲（外形 × 9）とシャーシの重なり。出っ張りの上の部品は 7 以下と
-    # 実物で確認済みなので、ここが 0 でなくても干渉ではない（天板やシャーシを変えたときの目安）
-    benv = ups_doc.getObject("BottomEnvelope").Shape.transformGeometry(upl.toMatrix())
-    # ドライバ基板の穴がミドルプレートの ø3.4 穴の中心に来ているか
-    mid_holes = [(f.Surface.Center.x, f.Surface.Center.y) for f in mid_body.Shape.Faces
-                 if type(f.Surface).__name__ == "Cylinder" and abs(f.Surface.Radius - 1.7) < 1e-3]
-    for key, p in drv_holes:
-        d = min(math.hypot(p.x - x, p.y - y) for x, y in mid_holes)
-        print(f"Driver{key} hole ({p.x:.2f},{p.y:.2f}) -> nearest plate ø3.4 hole {d:.3f} mm")
-    for key in DRIVERS:
-        db = upper[f"Driver{key}"].optimalBoundingBox()  # BoundBox は曲面の変換後に緩くなる
-        gap = upper[f"Driver{key}"].distToShape(shapes["UPS"])[0]
-        print(f"Driver{key} x {db.XMin:.2f}..{db.XMax:.2f} y {db.YMin:.2f}..{db.YMax:.2f} "
-              f"z {db.ZMin:.2f}..{db.ZMax:.2f}  gap to UPS {gap:.2f}")
-    pi_plate_holes = [(f.Surface.Center.x, f.Surface.Center.y) for f in mid_body.Shape.Faces
-                      if type(f.Surface).__name__ == "Cylinder"
-                      and abs(f.Surface.Radius - 1.35) < 1e-3]
-    for p in pi_holes:
-        d = min(math.hypot(p.x - x, p.y - y) for x, y in pi_plate_holes)
-        print(f"Pi5 hole ({p.x:.2f},{p.y:.2f}) -> nearest plate ø2.7 hole {d:.3f} mm")
-    pb = upper["Pi5"].BoundBox
-    print(f"Pi5 x {pb.XMin:.2f}..{pb.XMax:.2f} y {pb.YMin:.2f}..{pb.YMax:.2f} "
-          f"z {pb.ZMin:.2f}..{pb.ZMax:.2f}  gap to middle plate "
-          f"{upper['Pi5'].distToShape(upper['MiddlePlate'])[0]:.2f}")
-    roof_holes = [(f.Surface.Center.x, f.Surface.Center.y) for f in roof_body.Shape.Faces
-                  if type(f.Surface).__name__ == "Cylinder"
-                  and abs(f.Surface.Radius - 1.15) < 1e-3]
-    for hx, hy in [(2.0, 2.0), (23.0, 2.0), (2.0, 14.5), (23.0, 14.5)]:
-        p = cam_pl.multVec(App.Vector(hx, hy, 0))
-        d = min(math.hypot(p.x - x, p.y - y) for x, y in roof_holes)
-        print(f"Camera hole ({p.x:.2f},{p.y:.2f}) -> nearest roof ø2.3 hole {d:.3f} mm")
-    axis = cam_pl.multVec(App.Vector(12.5, 14.4, 8.3))
-    floor_z = min(shapes[f"Wheel{n}"].BoundBox.ZMin for n in "012")
-    rb = upper["Roof"].BoundBox
-    print(f"Roof z {rb.ZMin:.2f}..{rb.ZMax:.2f}  lens tip ({axis.x:.2f},{axis.y:.2f},{axis.z:.2f})  "
-          f"lens above floor {axis.z - floor_z:.1f} mm")
-    mb = upper["MiddlePlate"].BoundBox
-    print(f"MiddlePlate z {mb.ZMin:.2f}..{mb.ZMax:.2f}  rods z "
-          f"{TOP_PLATE_BOTTOM_Z - ROD_BELOW:.1f}..{TOP_PLATE_BOTTOM_Z - ROD_BELOW + 350:.1f}")
-    # 全ネジの下端と天板の下のナットは、後ろの 2 輪（M1 / M2）の上をかすめる
+    def gap(a, b, note=""):
+        d = shapes[a].distToShape(shapes[b])[0]
+        report.line(f"- {a} ↔ {b}: {d:.2f}" + (f"（{note}）" if note else ""))
+
     for i in range(len(ROD_XY)):
         for part in ("Rod", "NutLo"):
             for n in ("0", "1", "2"):
-                g = upper[f"{part}{i}"].distToShape(shapes[f"Wheel{n}"])[0]
-                if g < 5:
-                    print(f"  {part}{i} {ROD_XY[i]} - Wheel{n} gap {g:.2f} mm")
-    print(f"UPS bottom envelope x chassis: {benv.common(body).Volume:.1f} mm^3  "
-          f"(chassis top z={body.BoundBox.ZMax:.2f}, envelope bottom z={benv.BoundBox.ZMin:.2f})")
+                d = upper[f"{part}{i}"].distToShape(shapes[f"Wheel{n}"])[0]
+                if d < 5:
+                    report.line(f"- {part}{i} {ROD_XY[i]} ↔ Wheel{n}: {d:.2f}"
+                                "（全ネジの下端 / 天板の下のナットが後輪の上をかすめる）")
+    for key in DRIVERS:
+        gap(f"Driver{key}", "UPS", "部品面を下にすると C5 が電池に当たる")
+        gap(f"Driver{key}", "MiddlePlate", "部品面はプレート側")
+    gap("Pi5", "MiddlePlate", "裏の GPIO のピンの先と SD ソケット ↔ リブ")
+    gap("Hat", "Pi5", "J1 を除く")
+    benv = ups_doc.getObject("BottomEnvelope").Shape.transformGeometry(upl.toMatrix())
+    report.line(f"- X-UPS1 の裏面の部品の範囲（外形 × 9）× シャーシ: {benv.common(body).Volume:.1f} mm³"
+                "（天板中央の出っ張りの上はすき間 7。そこにある裏面の部品は 7 以下と実物で確認済み"
+                "なので干渉ではない）")
 
+    report.section("主な寸法")
+    for n in ("0", "1", "2"):
+        w, h = extra[f"Wheel{n}"].Placement, extra[f"Hub{n}"].Placement
+        tip = links[f"M{n}"].Placement.multVec(App.Vector(0, 0, 7))
+        report.line(f"- M{n}: 軸の先端 r = {_r(tip):.2f}、ハブの端面 r = {_r(h.Base):.2f}、"
+                    f"イモネジ r = {_r(h.multVec(App.Vector(0, 0, 5))):.2f}、"
+                    f"ホイール r = {_r(w.Base):.2f}〜{_r(w.multVec(App.Vector(0, 0, WHEEL_W))):.2f}"
+                    f"（幅の中央 {_r(w.multVec(App.Vector(0, 0, WHEEL_W / 2))):.2f}）")
+    report.line("  - イモネジが軸の先端より外にある = 軸に半分ほどしか掛からない（#173）。"
+                "幅の中央は robot.yaml の center_to_wheel_m と比べる")
+    axis = cam_pl.multVec(App.Vector(12.5, 14.4, 8.3))
+    report.line(f"- カメラのレンズの先端: ({axis.x:.2f}, {axis.y:.2f}, {axis.z:.2f})、"
+                f"床から {axis.z - floor_z:.1f}")
+    rod_z0 = TOP_PLATE_BOTTOM_Z - ROD_BELOW
+    report.line(f"- 全ネジ: z = {rod_z0:.1f}〜{rod_z0 + 350:.1f}")
+
+    report.write(os.path.join(CAD_DIR, "export", "assembly.md"))
+    print(f"saved {os.path.join(CAD_DIR, 'export', 'assembly.md')}")
 
 
 try:
