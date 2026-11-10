@@ -120,7 +120,8 @@ journalctl -u krilly-launcher -f
 ## 8. 会場用のネットワークと、つながらないときの復旧 (シリアルコンソール)
 
 会場ではスマートフォン (Pixel 4a) のテザリングに Pi とノート PC の両方をつなぎ、SSH する。
-Pi がテザリングにつながらなかったときのために、**USB シリアルでログインできる**ようにしておく。
+テザリングが不安定なときは **LAN ケーブルで直結**して SSH する (下の「LAN ケーブルで直結する」)。
+どちらもつながらなかったときのために、**USB シリアルでログインできる**ようにしておく。
 
 ### テザリングの接続設定
 
@@ -193,6 +194,43 @@ krilly() {
 sudo sh -c 'echo ":WSLInterop:M::MZ::/init:PF" > /usr/lib/binfmt.d/WSLInterop.conf'
 sudo systemctl restart systemd-binfmt       # それでもだめなら PowerShell で wsl --shutdown
 ```
+
+### LAN ケーブルで直結する (2026-11-10 に開通)
+
+Pi の有線 (`eth0`) とノート PC のイーサネットに、同じ小さなネットワークの固定 IP を振る。ケーブルはクロスでも
+ストレートでもよい (Pi 5 は自動で判別する)。テザリングや電波に左右されず、ファイルの転送もできる。
+
+Pi 側 (1 回だけ。設定は残る):
+
+```bash
+sudo nmcli con add type ethernet ifname eth0 con-name pc-direct \
+  ipv4.method manual ipv4.addresses 192.168.50.2/24 ipv4.never-default yes \
+  ipv6.method link-local connection.autoconnect-priority 10
+sudo nmcli con up pc-direct
+ip -br addr show eth0       # 192.168.50.2/24 が出れば OK
+```
+
+Windows 側: **設定 → ネットワークとインターネット → イーサネット → IP 割り当て の「編集」** で、手動・IPv4 オン・
+IP アドレス `192.168.50.1`・サブネットマスク `255.255.255.0`。**ゲートウェイと DNS は空欄** (入れると Windows が
+そちらからインターネットへ出ようとする)。USB の LAN アダプターなら「イーサネット 2」のように別名で出るので、
+ケーブルを挿したアダプターを選ぶ。
+
+WSL2 から:
+
+```bash
+ssh tetsuya@192.168.50.2     # Pi の who には送信元 192.168.50.1 として出る
+```
+
+- **名前 (`krilly.local`) ではなく IP で入る。** WSL2 (NAT) からは `.local` を引けない。WSL2 の通信は Windows を
+  経由してイーサネットへ出るので、WSL2 側の設定は要らない
+- `ipv4.never-default yes` なので、有線がインターネットへの出口を横取りしない。Pi は Wi-Fi で外へ出たまま
+- `192.168.50.x` は家の LAN (`192.168.1.x`) や WSL2 の内部ネットワークと重ならない番号を選んだ
+- 優先度 10 なので、ケーブルを挿すと直結の設定が選ばれる。**家のルーターに有線でつなぐとき**は
+  `sudo nmcli con up "Wired connection 1"` (DHCP) に切り替える
+- つながらないときの切り分け: Pi で `ip neigh show dev eth0` が `192.168.50.1 ... INCOMPLETE` なら、Windows 側に
+  IP が付いていない (別のアダプターに設定した、など)。ARP はファイアウォールに関係なく応答するので、
+  ここで止まるなら Windows の IP の設定を疑う。Pi から Windows への `ping` は、Windows のファイアウォールの
+  設定によっては通らないことがあるが、WSL2 から Pi への SSH には関係ない
 
 ## 9. 電源とログの設定 (本番 2026-09-27 の起動失敗の後に入れた)
 
