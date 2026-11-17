@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import math
+import queue
 import re
 import statistics
 import sys
@@ -58,7 +59,7 @@ from krilly.hal.imu import Bno055Imu
 from krilly.hal.l6470_chain import L6470Chain
 from krilly.kinematics.kiwi import KiwiKinematics
 from krilly.localization.estimator import DeadReckoning
-from krilly.localization.grid import apply_axis_heading
+from krilly.localization.grid import apply_axis_heading, apply_cell_offset
 from krilly.logging_config import get_logger, setup_logging
 from krilly.motion.cell_motion import CellMotion
 from krilly.motion.emergency_stop import emergency_stop
@@ -256,6 +257,10 @@ def _main() -> int | None:
                    help="動作前後のセル内位置をカメラで実測し、理想量とのズレを出す")
     p.add_argument("--chain", action="store_true",
                    help="連続する平行移動を止まらずに繋ぐ (#80)。旋回で区切られる")
+    p.add_argument("--apply-pose", action="store_true",
+                   help="開始前にカメラで測ったセル内のずれを推定に入れる (speed_run が止まるたびに"
+                        "するのと同じ補正)。機体は最初の動作の中でそのずれを直しに行く。"
+                        "--camera-pose が要る")
     p.add_argument("--align", action="store_true",
                    help="開始前にカメラで迷路軸を測り、推定方位をそこへ引き戻す "
                         "(実走と同じ挙動。置き方の傾きが横流れになるのを防ぐ)")
@@ -273,6 +278,18 @@ def _main() -> int | None:
     p.add_argument("--frame-log-light", action="store_true",
                    help="--frame-log で壁の帯 (cell_offset) だけを測る。axis_yaw と傾き (計 50ms 前後) "
                         "を省くので、走行中に毎フレーム回すときの fps と遅れが分かる")
+    p.add_argument("--fuse", action="store_true",
+                   help="走行中のカメラの測定 (横ずれと向き) を、遅れを補って推定に融合する "
+                        "(#186)。--frame-log と併用すると補正量も記録する")
+    p.add_argument("--fuse-gain", type=float, default=None, metavar="割合",
+                   help="1 回の測定で食い違いの何割を直すか (既定 FusionConfig の 0.2)")
+    p.add_argument("--fuse-delay", type=float, default=None, metavar="ミリ秒",
+                   help="絵が合う推定位置の、撮影時刻からの遅れ (既定 40、#184 の実測)")
+    p.add_argument("--fuse-yaw-every", type=int, default=3, metavar="N",
+                   help="--fuse で axis_yaw を N 枚に 1 枚測る (毎フレームだと 30fps が保てない)。"
+                        "0 で向きは融合しない")
+    p.add_argument("--fuse-along", action="store_true",
+                   help="--fuse で進行方向の軸も補正する (既定は横ずれだけ。直角な帯は走行中ブレる)")
     p.add_argument("--frame-log-tail", type=float, default=1.5, metavar="秒",
                    help="最後の動作の後も記録を続ける秒数 (止まった後の揺れが収まるまで)")
     args = p.parse_args()
@@ -280,6 +297,8 @@ def _main() -> int | None:
     setup_logging()
     if args.align and not args.camera_yaw:
         raise SystemExit("--align はカメラで軸角を測るので --camera-yaw が要ります")
+    if args.apply_pose and not args.camera_pose:
+        raise SystemExit("--apply-pose はカメラでセル内のずれを測るので --camera-pose が要ります")
     seq = parse_seq(args.seq)
     kin = KiwiKinematics()
     tuning = build_tuning(args)
@@ -312,7 +331,7 @@ def _main() -> int | None:
             log.info("ジャイロバイアス z=%.3f deg/s / スケール %.4f", bias_z, gyro_scale)
 
         camera = None
-        if args.camera_yaw or args.camera_pose or args.frame_log:
+        if args.camera_yaw or args.camera_pose or args.frame_log or args.fuse:
             from krilly.hal.camera import Camera   # 遅延 import (実機専用の依存)
 
             camera = stack.enter_context(Camera(**camera_kwargs(args)))
@@ -409,10 +428,37 @@ def _main() -> int | None:
             return (off, motion.reference[2])
 
         ticks = None          # #184: 制御ループの記録 (--frame-log のときだけ)
+        fusion = None         # #186: 走行中のカメラの融合 (--fuse のときだけ)
+        pending: queue.SimpleQueue = queue.SimpleQueue()   # カメラのスレッド -> 制御ループ
 
-        def record_tick(dt: float, rate: float | None) -> None:
+        def fuse_pending() -> tuple[float, float, float, int] | None:
+            """届いている測定をすべて融合し、この tick の補正量の合計を返す。"""
+            if fusion is None:
+                return None
+            dx = dy = dphi = 0.0
+            n = 0
+            while True:
+                try:
+                    m = pending.get_nowait()
+                except queue.Empty:
+                    break
+                res = fusion.apply(m)
+                dx += res.dx_m
+                dy += res.dy_m
+                dphi += res.dphi_rad
+                n += 1
+            return (dx, dy, dphi, n)
+
+        def control_step(dt: float, rate: float | None) -> bool:
+            """1 tick: 届いた測定を融合 -> 推定と制御を進める -> 履歴と記録。"""
+            fused = fuse_pending()
+            done = motion.update(dt, gyro_rate=rate)
+            if fusion is not None:
+                fusion.record(time.monotonic_ns())
             if ticks is not None:
-                ticks.record(dt, est.pose, motion.reference, driver.current_velocity, rate)
+                ticks.record(dt, est.pose, motion.reference, driver.current_velocity, rate,
+                             fused)
+            return done
 
         def run_primitive(label: str, timeout: float) -> None:
             """完了 (または timeout) までループを回す。update は純計算なので寝るのはここ。"""
@@ -427,10 +473,7 @@ def _main() -> int | None:
                 dt = now - last
                 last = now
                 accumulate_point_sample(dt)
-                rate = gyro_rate()
-                done = motion.update(dt, gyro_rate=rate)
-                record_tick(dt, rate)
-                if done:
+                if control_step(dt, gyro_rate()):
                     break
                 if now - t0 > timeout:
                     log.warning("%s: %.1fs で終わらず打ち切り (残量 %.4f)",
@@ -467,9 +510,7 @@ def _main() -> int | None:
                 time.sleep(args.dt)
                 now = time.monotonic(); dt = now - last; last = now
                 accumulate_point_sample(dt)
-                rate = gyro_rate()
-                motion.update(dt, gyro_rate=rate)
-                record_tick(dt, rate)
+                control_step(dt, gyro_rate())
 
         log.info("シーケンス %s を実行 (1セル=%.3fm)",
                  " ".join(m.label for m in seq), motion.cell_pitch_m)
@@ -506,9 +547,20 @@ def _main() -> int | None:
             else:
                 log.warning("迷路軸への整列を見送った (補正量が大きすぎる)")
         pose_before = measure_pose("before")
+        if args.apply_pose and pose_before is not None:
+            # 推定を「機体は実際にここに居る」へ寄せる。基準 (理想格子) は動かさないので、
+            # 最初の動作の中で CellMotion がそのずれを直しに行く。横移動中に前後方向の
+            # ずれを直せるか (#186 の切り分け) を、融合を使わずに確かめるためのもの。
+            off = pose_before[0]
+            if apply_cell_offset(est, (0.0, 0.0), off.forward_m, off.left_m):
+                log.info("開始前のずれを推定に入れた: 推定 X=%+.1fmm Y=%+.1fmm "
+                         "(基準は原点のまま。最初の動作の中で直しに行く)",
+                         est.x * 1000, est.y * 1000)
+            else:
+                log.warning("開始前のずれを推定に入れなかった (大きすぎる)")
         phi_before = est.phi
         frame_logger = None
-        if args.frame_log:
+        if args.frame_log or args.fuse:
             # #184: ここから最後の動作の後 (--frame-log-tail) まで、カメラは記録の
             # スレッドだけが使う。前後の実測 (measure_yaw / measure_pose) はその外。
             from krilly.perception.frame_log import (
@@ -516,20 +568,52 @@ def _main() -> int | None:
                 ProbeConfig,
                 TickLog,
                 focal_px,
+                measurement_from_row,
             )
 
-            ticks = stack.enter_context(TickLog(f"{args.frame_log}_ticks.csv"))
+            on_measure = None
+            if args.fuse:
+                # #186: 測定はカメラのスレッドで作り、キュー越しに制御ループへ渡す。
+                # 推定 (est) に触るのは制御ループだけ。
+                from krilly.localization.delayed_fusion import DelayedFusion, FusionConfig
+
+                over = {"camera_yaw_offset_rad": math.radians(kin.cfg.camera_yaw_offset_deg),
+                        "along_track": args.fuse_along}
+                if args.fuse_gain is not None:
+                    over["gain"] = args.fuse_gain
+                if args.fuse_delay is not None:
+                    over["delay_s"] = args.fuse_delay / 1000.0
+                fusion = DelayedFusion(est, FusionConfig(**over))
+                fusion.record(time.monotonic_ns())
+
+                def on_measure(row: dict) -> None:
+                    m = measurement_from_row(row)
+                    if m is not None:
+                        pending.put(m)
+
+                log.info("走行中のカメラを融合する (#186): %s", fusion.cfg)
+            if args.fuse:
+                # 融合に使う構成: 壁の帯は毎フレーム、axis_yaw は N 枚に 1 枚、傾きは測らない
+                probe = ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg,
+                                    do_yaw=args.fuse_yaw_every > 0, do_tilt=False)
+            else:
+                probe = ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg,
+                                    do_yaw=not args.frame_log_light,
+                                    do_tilt=not args.frame_log_light)
+            if args.frame_log:
+                ticks = stack.enter_context(TickLog(f"{args.frame_log}_ticks.csv"))
             frame_logger = FrameLogger(
-                camera, detector,
-                ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg,
-                            do_yaw=not args.frame_log_light, do_tilt=not args.frame_log_light),
-                f"{args.frame_log}_frames.csv", save_every=args.frame_log_save,
-                save_dir=f"{args.frame_log}_frames")
+                camera, detector, probe,
+                f"{args.frame_log}_frames.csv" if args.frame_log else None,
+                save_every=args.frame_log_save,
+                save_dir=f"{args.frame_log}_frames" if args.frame_log else None,
+                on_measure=on_measure, yaw_every=args.fuse_yaw_every if args.fuse else 0)
             stack.enter_context(frame_logger)   # 例外で抜けてもスレッドを止める
-            log.info("走行中のフレームを記録する: %s_frames.csv / %s_ticks.csv%s",
-                     args.frame_log, args.frame_log,
-                     " (%d 枚に 1 枚を JPEG で保存)" % args.frame_log_save
-                     if args.frame_log_save else "")
+            if args.frame_log:
+                log.info("走行中のフレームを記録する: %s_frames.csv / %s_ticks.csv%s",
+                         args.frame_log, args.frame_log,
+                         " (%d 枚に 1 枚を JPEG で保存)" % args.frame_log_save
+                         if args.frame_log_save else "")
             coast(0.5, "開始前")     # 動き出す前の静止を記録しておく (揺れの基準)
         groups = chain_groups(seq) if args.chain else [[m] for m in seq]
         for i, group in enumerate(groups, 1):
@@ -547,10 +631,16 @@ def _main() -> int | None:
                          motion.corners, motion.blend_distance * 1000)
             coast(args.pause)
         if frame_logger is not None:
-            coast(args.frame_log_tail, "停止後")
+            if args.frame_log:
+                coast(args.frame_log_tail, "停止後")
             frame_logger.stop()
-            log.info("記録したフレーム %d 枚 (失敗 %d)", frame_logger.frames,
-                     frame_logger.errors)
+            fusion_was = fusion
+            fusion = None             # 以降の停止中の測定 (measure_pose) とは混ぜない
+            log.info("カメラのフレーム %d 枚 (失敗 %d)%s", frame_logger.frames,
+                     frame_logger.errors,
+                     "" if fusion_was is None else
+                     "、融合 %d 回 / 使わなかった %d 回" % (fusion_was.applied,
+                                                          fusion_was.rejected))
         yaw_after = measure_yaw("after")
         pose_after = measure_pose("after")
 

@@ -459,6 +459,42 @@ def report_tau(frames: list[dict], ticks: Ticks) -> list[str]:
     return lines
 
 
+def cross_track_mm(r: dict) -> float | None:
+    """走行中のフレームの横ずれ [mm] (進行方向と直角な車体軸のカメラの読み)。"""
+    st = r.get("state")
+    if st is None:
+        return None
+    if abs(st["vx"]) >= abs(st["vy"]):
+        return r.get("left_mm")
+    return r.get("forward_mm")
+
+
+def report_fusion(rows: list[dict], ticks: Ticks) -> list[str]:
+    """#186: 融合した補正量と、走行中のカメラの横ずれ (融合が効けば 0 付近に保たれる)。"""
+    lines = ["## 8. 走行中の横ずれと融合 (#186)",
+             "カメラの横ずれ = セル中央からの、進行方向と直角なずれ (真の位置に近い)。"
+             "融合が効いていれば走行中も 0 付近に保たれ、効いていなければ横流れがそのまま出る。", ""]
+    cross = [cross_track_mm(r) for r in rows if r.get("phase") in ("加速", "等速", "減速")]
+    cross = [c for c in cross if c is not None]
+    if cross:
+        lines.append(f"- 走行中のカメラの横ずれ: 平均 {statistics.fmean(cross):+.2f} mm、"
+                     f"最大 |{max(abs(c) for c in cross):.2f}| mm、"
+                     f"標準偏差 {statistics.pstdev(cross):.2f} mm ({len(cross)} 枚)")
+    rows_t = ticks.rows
+    n = [r.get("fuse_n") for r in rows_t if r.get("fuse_n") is not None]
+    if not n:
+        return lines + ["- 融合なし (--fuse を付けていない走行)"]
+    dx = [r.get("fuse_dx_mm") or 0.0 for r in rows_t]
+    dy = [r.get("fuse_dy_mm") or 0.0 for r in rows_t]
+    dp = [r.get("fuse_dphi_deg") or 0.0 for r in rows_t]
+    applied = sum(1 for a, b, c in zip(dx, dy, dp) if a or b or c)
+    lines.append(f"- 測定 {int(sum(n))} 件を融合に回し、補正を掛けた tick {applied} 回")
+    lines.append(f"- 補正の合計: x {sum(dx):+.2f} mm / y {sum(dy):+.2f} mm / "
+                 f"方位 {sum(dp):+.3f}° (絶対値の合計 x {sum(map(abs, dx)):.2f} / "
+                 f"y {sum(map(abs, dy)):.2f} mm / {sum(map(abs, dp)):.3f}°)")
+    return lines
+
+
 def plot(rows: list[dict], path: str) -> None:
     """時系列を PNG に描く (matplotlib を入れずに cv2 で。cv2 は日本語を描けないので見出しは英語)。"""
     import cv2
@@ -537,6 +573,7 @@ def analyze(prefix: str, camera_height_mm: float = CAMERA_HEIGHT_MM,
         out += report_accel(rows) + [""]
         out += report_settle(rows) + [""]
         out += report_tau(frames, ticks) + [""]
+        out += report_fusion(rows, ticks) + [""]
     else:
         rows = frames
         out += ["(tick の記録が無い = 静止のみ。読みのばらつきだけ出す)", ""]
