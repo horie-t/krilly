@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 import math
 import os
 import threading
@@ -76,6 +77,8 @@ FRAME_FIELDS = (
 TICK_FIELDS = (
     "t_ns", "dt_s", "x_m", "y_m", "phi_rad", "ref_x_m", "ref_y_m", "ref_phi_rad",
     "cmd_vx", "cmd_vy", "cmd_omega", "gyro_rad_s", "label",
+    # #186: この tick で融合したカメラの補正 (世界座標) と、使った測定の数
+    "fuse_dx_mm", "fuse_dy_mm", "fuse_dphi_deg", "fuse_n",
 )
 
 
@@ -154,11 +157,19 @@ class FrameLogger:
 
     ``save_every`` > 0 なら N 枚に 1 枚を ``save_dir`` に JPEG で残す (ブレを目で
     見るため)。**書き出しは処理時間を食う**ので、時間を測る走行では 0 にすること。
+
+    ``path`` が None なら CSV は書かない (融合だけに使うとき)。``on_measure`` を
+    与えると、1 枚測るたびに ``on_measure(row)`` を**このスレッドから**呼ぶ (#186:
+    制御ループへ測定を渡す。受け手はキューに積むだけにすること)。
+
+    ``yaw_every`` > 0 なら ``axis_yaw`` は N 枚に 1 枚だけ測る (``probe.do_yaw`` が
+    True のとき)。#184 の実測で ``axis_yaw`` は 23〜41 ms かかり、毎フレーム回すと
+    30 fps が保てない。
     """
 
-    def __init__(self, camera, detector: WallDetector, probe: ProbeConfig, path: str,
-                 save_every: int = 0, save_dir: str | None = None,
-                 clock_ns=time.monotonic_ns) -> None:
+    def __init__(self, camera, detector: WallDetector, probe: ProbeConfig,
+                 path: str | None, save_every: int = 0, save_dir: str | None = None,
+                 clock_ns=time.monotonic_ns, on_measure=None, yaw_every: int = 0) -> None:
         self.camera = camera
         self.detector = detector
         self.probe = probe
@@ -166,6 +177,8 @@ class FrameLogger:
         self.save_every = save_every
         self.save_dir = save_dir
         self.clock_ns = clock_ns
+        self.on_measure = on_measure
+        self.yaw_every = yaw_every
         self.frames = 0
         self.errors = 0
         self._stop = threading.Event()
@@ -175,11 +188,12 @@ class FrameLogger:
         self._lock = threading.Lock()
 
     def start(self) -> "FrameLogger":
-        new = not os.path.exists(self.path)
-        self._file = open(self.path, "a", newline="")
-        self._writer = csv.writer(self._file)
-        if new:
-            self._writer.writerow(FRAME_FIELDS)
+        if self.path is not None:
+            new = not os.path.exists(self.path)
+            self._file = open(self.path, "a", newline="")
+            self._writer = csv.writer(self._file)
+            if new:
+                self._writer.writerow(FRAME_FIELDS)
         if self.save_every > 0 and self.save_dir:
             os.makedirs(self.save_dir, exist_ok=True)
         self._stop.clear()
@@ -206,7 +220,10 @@ class FrameLogger:
         """1 枚撮って測り、1 行書く (スレッドから呼ばれる。テストでは直接呼べる)。"""
         frame, meta = self.camera.capture_with_metadata()
         recv = self.clock_ns()
-        row = probe_frame(frame, self.detector, self.probe)
+        probe = self.probe
+        if self.yaw_every > 0 and probe.do_yaw and self.frames % self.yaw_every:
+            probe = dataclasses.replace(probe, do_yaw=False)
+        row = probe_frame(frame, self.detector, probe)
         done = self.clock_ns()
         row.update(
             seq=self.frames, sensor_ts_ns=meta.get("SensorTimestamp"), recv_ns=recv,
@@ -224,6 +241,8 @@ class FrameLogger:
             if self._writer is not None:
                 self._writer.writerow([_fmt(row.get(k)) for k in FRAME_FIELDS])
         self.frames += 1
+        if self.on_measure is not None:
+            self.on_measure(row)
         return row
 
     def _run(self) -> None:
@@ -254,7 +273,9 @@ class TickLog:
             self._writer.writerow(TICK_FIELDS)
         self.label = ""
 
-    def record(self, dt: float, pose, reference, command, gyro: float | None) -> None:
+    def record(self, dt: float, pose, reference, command, gyro: float | None,
+               fused: tuple[float, float, float, int] | None = None) -> None:
+        """``fused`` = この tick の融合の (dx [m], dy [m], dphi [rad], 測定の数) (#186)。"""
         x, y, phi = pose
         rx, ry, rphi = reference
         vx, vy, w = command
@@ -263,6 +284,9 @@ class TickLog:
             _fmt(rx, 5), _fmt(ry, 5), _fmt(rphi, 6),
             _fmt(vx, 4), _fmt(vy, 4), _fmt(w, 4),
             "" if gyro is None else _fmt(gyro, 5), self.label,
+            *(("", "", "", "") if fused is None else
+              (_fmt(fused[0] * 1000.0), _fmt(fused[1] * 1000.0),
+               _fmt(math.degrees(fused[2]), 4), fused[3])),
         ])
 
     def close(self) -> None:
@@ -273,6 +297,22 @@ class TickLog:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def measurement_from_row(row: dict):
+    """:func:`probe_frame` の 1 行を融合の測定に直す (撮影時刻が無ければ None)。"""
+    from krilly.localization.delayed_fusion import CameraMeasurement
+
+    ts = row.get("sensor_ts_ns")
+    if ts is None:
+        return None
+    yaw = row.get("yaw_deg")
+    return CameraMeasurement(
+        int(ts),
+        forward_m=None if row.get("forward_mm") is None else row["forward_mm"] / 1000.0,
+        left_m=None if row.get("left_mm") is None else row["left_mm"] / 1000.0,
+        axis_rad=None if yaw is None else math.radians(yaw),
+    )
 
 
 def read_csv(path: str) -> list[dict]:

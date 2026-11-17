@@ -240,3 +240,21 @@ def test_report_runs_end_to_end(tmp_path):
     text = rep.analyze(prefix, plot_path=str(tmp_path / "p.png"))
     assert "実効" in text and "場面ごとの読み" in text and "止まった後の収束" in text
     assert (tmp_path / "p.png").exists()
+
+
+def test_logger_hands_measurements_and_thins_out_yaw(detector):
+    from krilly.perception.frame_log import measurement_from_row
+
+    got = []
+    cam = Camera(picam2=FakePicam(frame_with_bands(shift_x=6)))
+    logger = FrameLogger(cam, detector, probe_cfg(do_tilt=False), None,
+                         on_measure=got.append, yaw_every=3)
+    for _ in range(6):
+        logger.step()                        # path=None なので CSV は書かない
+    assert len(got) == 6
+    assert [r["yaw_deg"] is not None for r in got] == [True, False, False, True, False, False]
+    m = measurement_from_row(got[0])
+    assert m.t_ns == got[0]["sensor_ts_ns"]
+    assert m.left_m == pytest.approx(got[0]["left_mm"] / 1000.0)
+    assert m.axis_rad == pytest.approx(math.radians(got[0]["yaw_deg"]))
+    assert measurement_from_row({"sensor_ts_ns": None}) is None
