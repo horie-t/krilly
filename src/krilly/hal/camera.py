@@ -235,6 +235,29 @@ class Camera:
         """最新のフレームを BGR の NumPy 配列として返す (チャンネルに関する注意を参照)。"""
         return self._picam2.capture_array()
 
+    def capture_with_metadata(self):
+        """``(BGR フレーム, メタデータ dict)`` を**同じ 1 枚から**返す (#184)。
+
+        走行中の測定は「いつ撮った絵か」が要る。``capture()`` と ``capture_metadata()``
+        を別々に呼ぶと別のフレームになりうるので、``capture_request`` で 1 つの
+        リクエストから両方を取り出す。メタデータの ``SensorTimestamp`` [ns] は
+        ``time.monotonic_ns()`` と同じ時計 (Pi 5 で実測: 受け取りの約 20ms 前、
+        CLOCK_BOOTTIME とも一致)。
+
+        ``capture_request`` を持たない注入物 (テストの偽物) では、フレームと
+        ``capture_metadata()`` (無ければ空 dict) を返す。
+        """
+        cam = self._picam2
+        if hasattr(cam, "capture_request"):
+            request = cam.capture_request()
+            try:
+                return request.make_array("main"), dict(request.get_metadata())
+            finally:
+                request.release()
+        frame = cam.capture_array()
+        meta = cam.capture_metadata() if hasattr(cam, "capture_metadata") else {}
+        return frame, dict(meta or {})
+
     def close(self) -> None:
         try:
             self._picam2.stop()
