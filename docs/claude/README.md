@@ -21,3 +21,4 @@ CLAUDE.md には概要・コマンド・アーキテクチャ・常時必要な�
 | [wall-detection](wall-detection.md) | ROI の較正と探索、HSV マスク (`h2_lo` など)、リボンケーブル、閾値の根拠、木の床と自立壁、手動/走行中の較正データ収集 (#78)。 |
 | [lighting-and-floors](lighting-and-floors.md) | AE/ゲインの余裕、色温度、黒い床での BACK の白飛びと `--ev -2`、始点/終点の白・黄の壁上面 (#125/#126)。 |
 | [hardware-sessions](hardware-sessions.md) | 5×5・8×8 の通し走行、試走会 (2026-09-26) と本番 (2026-09-27) で何が起き、何を学んだか。 |
+| [in-motion-camera](in-motion-camera.md) | 走行中のカメラ測定 (M7): `--frame-log` の道具、30 fps・遅れ 30 ms (+ 絵は約 40 ms 前の位置)、揺れは約 1 画素、加減速の傾きの測り方 (往復では場所と交絡)、露光中のブレと速度の上限。 |

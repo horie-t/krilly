@@ -263,6 +263,18 @@ def _main() -> int | None:
     add_camera_args(p)
     p.add_argument("--save-frames", default=None,
                    help="カメラ実測フレームの保存先プレフィクス 例: /tmp/yaw")
+    p.add_argument("--frame-log", default=None, metavar="PREFIX",
+                   help="走行中もカメラを撮り続け、1 フレーム 1 行を PREFIX_frames.csv に、"
+                        "制御の 1 tick 1 行を PREFIX_ticks.csv に記録する (#184)。"
+                        "解析は scripts.frame_log_report")
+    p.add_argument("--frame-log-save", type=int, default=0, metavar="N",
+                   help="--frame-log 中、N 枚に 1 枚を PREFIX_frames/ に JPEG で残す "
+                        "(ブレを目で見る用。書き出しが処理時間を食うので、時間を測る走行では 0)")
+    p.add_argument("--frame-log-light", action="store_true",
+                   help="--frame-log で壁の帯 (cell_offset) だけを測る。axis_yaw と傾き (計 50ms 前後) "
+                        "を省くので、走行中に毎フレーム回すときの fps と遅れが分かる")
+    p.add_argument("--frame-log-tail", type=float, default=1.5, metavar="秒",
+                   help="最後の動作の後も記録を続ける秒数 (止まった後の揺れが収まるまで)")
     args = p.parse_args()
 
     setup_logging()
@@ -300,7 +312,7 @@ def _main() -> int | None:
             log.info("ジャイロバイアス z=%.3f deg/s / スケール %.4f", bias_z, gyro_scale)
 
         camera = None
-        if args.camera_yaw or args.camera_pose:
+        if args.camera_yaw or args.camera_pose or args.frame_log:
             from krilly.hal.camera import Camera   # 遅延 import (実機専用の依存)
 
             camera = stack.enter_context(Camera(**camera_kwargs(args)))
@@ -396,9 +408,17 @@ def _main() -> int | None:
                      if off.saturated else "")
             return (off, motion.reference[2])
 
+        ticks = None          # #184: 制御ループの記録 (--frame-log のときだけ)
+
+        def record_tick(dt: float, rate: float | None) -> None:
+            if ticks is not None:
+                ticks.record(dt, est.pose, motion.reference, driver.current_velocity, rate)
+
         def run_primitive(label: str, timeout: float) -> None:
             """完了 (または timeout) までループを回す。update は純計算なので寝るのはここ。"""
             drain_gyro()
+            if ticks is not None:
+                ticks.label = label
             t0 = time.monotonic()
             last = t0
             while True:
@@ -407,7 +427,10 @@ def _main() -> int | None:
                 dt = now - last
                 last = now
                 accumulate_point_sample(dt)
-                if motion.update(dt, gyro_rate=gyro_rate()):
+                rate = gyro_rate()
+                done = motion.update(dt, gyro_rate=rate)
+                record_tick(dt, rate)
+                if done:
                     break
                 if now - t0 > timeout:
                     log.warning("%s: %.1fs で終わらず打ち切り (残量 %.4f)",
@@ -433,16 +456,20 @@ def _main() -> int | None:
                      % (motion.retries, motion.retry_remaining),
             )
 
-        def coast(seconds: float) -> None:
+        def coast(seconds: float, label: str = "停止") -> None:
             """停止指令のまま update を回して減速しきる (推定も継続)。"""
             drain_gyro()
+            if ticks is not None:
+                ticks.label = label
             last = time.monotonic()
             deadline = last + seconds
             while time.monotonic() < deadline:
                 time.sleep(args.dt)
                 now = time.monotonic(); dt = now - last; last = now
                 accumulate_point_sample(dt)
-                motion.update(dt, gyro_rate=gyro_rate())
+                rate = gyro_rate()
+                motion.update(dt, gyro_rate=rate)
+                record_tick(dt, rate)
 
         log.info("シーケンス %s を実行 (1セル=%.3fm)",
                  " ".join(m.label for m in seq), motion.cell_pitch_m)
@@ -480,6 +507,30 @@ def _main() -> int | None:
                 log.warning("迷路軸への整列を見送った (補正量が大きすぎる)")
         pose_before = measure_pose("before")
         phi_before = est.phi
+        frame_logger = None
+        if args.frame_log:
+            # #184: ここから最後の動作の後 (--frame-log-tail) まで、カメラは記録の
+            # スレッドだけが使う。前後の実測 (measure_yaw / measure_pose) はその外。
+            from krilly.perception.frame_log import (
+                FrameLogger,
+                ProbeConfig,
+                TickLog,
+                focal_px,
+            )
+
+            ticks = stack.enter_context(TickLog(f"{args.frame_log}_ticks.csv"))
+            frame_logger = FrameLogger(
+                camera, detector,
+                ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg,
+                            do_yaw=not args.frame_log_light, do_tilt=not args.frame_log_light),
+                f"{args.frame_log}_frames.csv", save_every=args.frame_log_save,
+                save_dir=f"{args.frame_log}_frames")
+            stack.enter_context(frame_logger)   # 例外で抜けてもスレッドを止める
+            log.info("走行中のフレームを記録する: %s_frames.csv / %s_ticks.csv%s",
+                     args.frame_log, args.frame_log,
+                     " (%d 枚に 1 枚を JPEG で保存)" % args.frame_log_save
+                     if args.frame_log_save else "")
+            coast(0.5, "開始前")     # 動き出す前の静止を記録しておく (揺れの基準)
         groups = chain_groups(seq) if args.chain else [[m] for m in seq]
         for i, group in enumerate(groups, 1):
             label = " -> ".join(m.label for m in group)
@@ -495,6 +546,11 @@ def _main() -> int | None:
                 log.info("  止まらずに曲がった回数 %d (ブレンド距離 %.0fmm)",
                          motion.corners, motion.blend_distance * 1000)
             coast(args.pause)
+        if frame_logger is not None:
+            coast(args.frame_log_tail, "停止後")
+            frame_logger.stop()
+            log.info("記録したフレーム %d 枚 (失敗 %d)", frame_logger.frames,
+                     frame_logger.errors)
         yaw_after = measure_yaw("after")
         pose_after = measure_pose("after")
 
