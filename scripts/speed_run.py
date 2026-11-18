@@ -27,6 +27,7 @@ from krilly.app.exit_codes import EXIT_ABORTED, run_reporting_spi_lost
 from krilly.app.snapshot import save_snapshot
 from krilly.app.run_manager import RunManager, RunPhase
 from krilly.config import load_maze_config
+from krilly.app.motion_fusion import add_fusion_args, motion_fusion_from_args
 from krilly.hal.camera import add_camera_args, camera_kwargs
 from krilly.hal.gyro_sampler import GyroSampler
 from krilly.hal.imu import Bno055Imu
@@ -166,6 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="正解ラベルに使う既知形状の迷路 (既定: 走行後に確定した地図)")
     add_camera_args(p)
     add_wall_args(p)
+    add_fusion_args(p)
     p.add_argument("--save-run-config", action="store_true",
                    help="**完走したら**このコマンドを当日の走行設定 (config/run.yaml) に保存する "
                         "(#79)。前日の試走で検証したコマンドをそのまま当日ボタンで走らせるため")
@@ -274,6 +276,12 @@ def _main() -> int:
             VelocityDriver(chain, kin, limits=tuning.limits), est,
             config=tuning.motion, maze=maze_cfg,
         )
+        # #187: 動作の最中もカメラを撮り続けて横ずれを融合する (--fuse のときだけ)。
+        # カメラのスレッドは動作の間だけ回し、止まったら止めてから今までどおり撮る。
+        fuser = motion_fusion_from_args(args, camera, detector, est,
+                                        kin.cfg.camera_yaw_offset_deg, yaw_cfg)
+        if fuser is not None:
+            stack.enter_context(fuser)
         frame_no = [0]
         saved_name = [""]
         recovered = [0]                 # 姿勢を作り直した回数 (#113)
@@ -346,11 +354,18 @@ def _main() -> int:
             drain_gyro()
             watch.reset()
             stopped = None
+            if fuser is not None:
+                fuser.begin(label)
             t0 = last = time.monotonic()
             while True:
                 time.sleep(args.dt)
                 now = time.monotonic(); dt = now - last; last = now
-                if motion.update(dt, gyro_rate=gyro_rate()):
+                fused = fuser.before_update() if fuser is not None else None
+                rate = gyro_rate()
+                done = motion.update(dt, gyro_rate=rate)
+                if fuser is not None:
+                    fuser.after_update(dt, motion, rate, fused)
+                if done:
                     break
                 if (not args.turn_in_place and motion.translating
                         and watch.update(motion.heading_error)):
@@ -369,6 +384,10 @@ def _main() -> int:
             elapsed = time.monotonic() - t0
             if kind:
                 timings.setdefault(kind, []).append(elapsed)
+            fused_note = ""
+            if fuser is not None:
+                # 止まった状態で撮る前に、カメラのスレッドを止める
+                fused_note = " / " + fuser.end().describe()
             statuses = chain.get_status_all()
             # 応答なしはフォールトではなく通信断。回復 (#113) に渡さず打ち切る (#148)
             try:
@@ -383,8 +402,8 @@ def _main() -> int:
             log.info("    %s 完了 %.2fs 残差 前後=%+.4fm 左右=%+.4fm 方位=%+.2f° (動作中の最大 %.2f°)%s",
                      label, elapsed, along, cross, math.degrees(dphi),
                      math.degrees(watch.peak_rad),
-                     "" if motion.retries == 0 else " / やり直し %d 回 (判定時の残量 %+.4f)"
-                     % (motion.retries, motion.retry_remaining))
+                     ("" if motion.retries == 0 else " / やり直し %d 回 (判定時の残量 %+.4f)"
+                      % (motion.retries, motion.retry_remaining)) + fused_note)
             deadline = time.monotonic() + args.pause
             while time.monotonic() < deadline:
                 time.sleep(args.dt)

@@ -55,6 +55,8 @@ python -m scripts.cell_move_demo --seq F,A,F,D --chain --camera-yaw   # prints t
 python -m scripts.cell_move_demo --seq F,A,F,D --chain --gyro-sample 0  # ... back to the old point sampling
 python -m scripts.cell_move_demo --seq F6,B6 --v 0.30 --align --camera-yaw --ev -2 --frame-log survey/m7/f6b6 --frame-log-light  # in-motion camera log (#184)
 python -m scripts.frame_log_report survey/m7/f6b6 --plot f6b6.png   # off-Pi: fps, latency, sway, blur-free residuals
+python -m scripts.speed_run --size 8 --fuse                # fuse the camera while driving (#187); keep the leg cap until #189
+python -m scripts.stop_report --label off a.log --label on b.log   # off-Pi: per-stop cross-track vs along-track offsets
 
 # stand-alone start/stop with one button + a buzzer (#79; systemd unit in deploy/)
 python -m scripts.speed_run --size 16 --ev -2 --white-tops --save-run-config  # trial day: save the command that just completed
