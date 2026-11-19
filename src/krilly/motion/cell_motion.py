@@ -535,6 +535,11 @@ class CellMotion:
         return _wrap_angle(self.phi_ref - self.est.phi)
 
     @property
+    def axis_k(self) -> int:
+        """今の脚の主軸 (基準方位からの 90° 単位: 0=前 / +1=左 / -1=右 / 2=後、#188)。"""
+        return self._axis_k
+
+    @property
     def translating(self) -> bool:
         """平行移動のプリミティブを実行中か (回転を指令していない区間、#153)。"""
         return self._kind is Kind.FORWARD

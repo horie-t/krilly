@@ -360,7 +360,15 @@ def _main() -> int:
             while True:
                 time.sleep(args.dt)
                 now = time.monotonic(); dt = now - last; last = now
-                fused = fuser.before_update() if fuser is not None else None
+                fused = fuser.before_update(motion) if fuser is not None else None
+                if fuser is not None and fuser.ahead_stop is not None:
+                    a = fuser.ahead_stop
+                    log.error("%s: 今の脚が通る境目に壁が見える (%.0f mm 先、赤の割合 %.2f)。"
+                              "推定のずれか地図の誤り、止める (#188)",
+                              label, a.distance_m * 1000, a.fraction)
+                    motion.abort()
+                    stopped = "blocked"
+                    break
                 rate = gyro_rate()
                 done = motion.update(dt, gyro_rate=rate)
                 if fuser is not None:
@@ -514,6 +522,11 @@ def _main() -> int:
             residual = abs(math.degrees(residual_rad))
             if residual <= args.max_heading_residual and not stopped:
                 return True
+            if stopped == "blocked":
+                # 当たる前に止めた。回復 (#113) は接触を前提にしているので使わない
+                snapshot("blocked")
+                log.error("進行中止 (前方の境目に壁、#188)。")
+                return False
             if stopped == "contact":
                 log.error("動作を途中で止めた (動作中の最大の回転 %.2f°)。壁との接触の疑い。",
                           math.degrees(watch.peak_rad))

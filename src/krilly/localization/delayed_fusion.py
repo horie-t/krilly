@@ -154,6 +154,9 @@ class CameraMeasurement:
     #: 壁の切れ目の縁 (#189、``perception.wall_end.BandEdge``: ``axis`` / ``offset_mm`` /
     #: ``red_on_plus`` を持つもの)。
     edges: tuple = ()
+    #: 前方の境目の見張り用の、行・列ごとの赤の数 (#188、``perception.ahead.AheadProfiles``)。
+    #: 融合には使わない — 撮影時刻と一緒に制御ループへ運ぶだけ。
+    ahead: object = None
 
 
 @dataclass
