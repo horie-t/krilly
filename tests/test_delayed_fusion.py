@@ -319,3 +319,22 @@ def test_single_edge_from_a_misplaced_wall_is_rejected():
     # 1 枚目は追跡 (前のフレームの正しい縁と 12 mm 食い違う)、2 枚目は 1 本だけの縁の確かめで落ちる
     assert res.skipped["縁:前後"] == "1 本だけの縁が直前と合わない"
     assert sim.est.x == pytest.approx(x_before)
+
+
+def test_single_edge_tolerance_grows_with_distance_since_the_last_edge():
+    """脚の始めの縁 (食い違い小) の後、ずれが育った先の縁 (食い違い大) も使う。"""
+    cfg = FusionConfig(use_edges=True, edge_gain=0.3)
+    sim = Sim(v=0.30, bias=(0.0, 0.0, 0.0), cfg=cfg)
+    for _ in range(10):
+        sim.tick()
+    one = ((0.09, False),)
+    for t in (96, 63, 30):                              # 始めの縁で期待値を作る (食い違い 0)
+        sim.fusion.apply(edge_frame(sim, sim.t_ns - t * MS, one))
+    for _ in range(150):                                # 900 mm 進む間に 18 mm ずれが育つ
+        sim.tick()
+        sim.est.x -= 0.0012 * 0.02 / 0.02 * 0.1         # 1 tick (6 mm 進む) あたり 0.12 mm 後ろへ
+    gap = sim.true[0] - sim.est.x
+    assert gap == pytest.approx(0.018, abs=0.001)
+    for t in (63, 30):
+        res = sim.fusion.apply(edge_frame(sim, sim.t_ns - t * MS, one))
+    assert res.applied and "縁:前後" in res.errors     # 6 mm の範囲では捨てていた
