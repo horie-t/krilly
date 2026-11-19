@@ -128,6 +128,16 @@ class FusionConfig:
     #: 合計の上限 [m]。超えたらその動作では縁を使わない (暴走の歯止め)。7 セルの直線で
     #: 溜まる進行方向の誤りが 13〜20 mm (#187) なので 25 mm。
     edge_max_total_m: float = 0.025
+    #: **縁が 1 本だけのフレーム**は、同じ動作で直前に使った縁の食い違い (から、その後に
+    #: 掛けた補正を引いた値) とこの範囲で合うときだけ使う [m]。動作の最初の 1 本は、次の
+    #: フレームで合うのを確かめてから使う。ずれて置かれた壁や抜けた柱の縁は 10〜20 mm
+    #: 食い違う (2026-11-19 の long8、木の床: 東の列の西側と (5,4) の北の壁) — 同じフレームに
+    #: 別の縁があれば ``edge_max_spread_m`` で落ちるが、1 本だけだとそれが効かない。
+    edge_single_tol_m: float = 0.006
+    #: 1 本だけの縁が直前と合わないことがこのフレーム数続いたら、期待値の方を捨てて
+    #: 新しい縁で確かめ直す (直前に使った縁の方が間違っていた場合に、ずっと縁を使え
+    #: なくならないため)。
+    edge_single_reset_frames: int = 5
     #: 縁の補正を**試算だけ**して推定には入れない (``FusionResult.edge_would_*`` に残す)。
     #: 偽の縁が出ないことを、機体を動かさずに記録で確かめるため (2026-11-19 の衝突の後)。
     edge_observe_only: bool = False
@@ -222,6 +232,9 @@ class DelayedFusion:
         self._prev_edges: tuple | None = None
         #: 軸ごとの縁による補正の合計 [m] と、止めたか
         self.edge_total = {"x": 0.0, "y": 0.0}
+        #: 軸ごとの「次のフレームで期待する縁の食い違い」(1 本だけの縁を確かめるため)
+        self._edge_expect: dict[str, float | None] = {"x": None, "y": None}
+        self._edge_mismatch = {"x": 0, "y": 0}
         self.edges_disabled: str | None = None
 
     def _track_edges(self, edges, past) -> list:
@@ -323,8 +336,25 @@ class DelayedFusion:
                     res.skipped[name] = "縁どうしが食い違う"
                     continue
                 error = sum(errs) / len(errs)
+                expect = self._edge_expect[axis]
+                if len(errs) == 1:
+                    if expect is None:
+                        # 確かめる相手がいない: 次のフレームで合えば使う
+                        self._edge_expect[axis] = error
+                        res.skipped[name] = "1 本だけの縁 (次のフレームで確かめる)"
+                        continue
+                    if abs(error - expect) > cfg.edge_single_tol_m:
+                        self._edge_mismatch[axis] += 1
+                        if self._edge_mismatch[axis] >= cfg.edge_single_reset_frames:
+                            self._edge_expect[axis] = error      # 確かめ直し (次のフレームで)
+                            self._edge_mismatch[axis] = 0
+                        res.skipped[name] = "1 本だけの縁が直前と合わない"
+                        continue
+                self._edge_mismatch[axis] = 0
                 res.errors[name] = error
                 step = _clamp(cfg.edge_gain * error, cfg.edge_max_step_m)
+                # 補正を掛けると次の食い違いはその分だけ小さくなるはず (試算では掛けない)
+                self._edge_expect[axis] = error - (0.0 if cfg.edge_observe_only else step)
                 if cfg.edge_observe_only:
                     # 試算では推定を直さないので食い違いが残り続け、合計の上限に意味が無い
                     res.edge_would_dx_m += step * ux
