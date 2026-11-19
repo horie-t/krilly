@@ -75,6 +75,7 @@ class Camera:
         exposure_value: float | None = None,
         exposure_us: int | None = None,
         gain: float | None = None,
+        max_exposure_us: int | None = None,
         picam2=None,
     ) -> None:
         #: ロックした露出時間 [us] とアナログゲイン、およびゲインの上限 (#78)。
@@ -99,6 +100,12 @@ class Camera:
         #: 飛んで壁を見落とし、機体が衝突した)。露出を下げる手段が要る。
         self.forced_exposure_us = exposure_us
         self.forced_gain = gain
+        #: 露光の上限 [us] (#184)。AE (と EV) が決めた露光がこれより長ければ、露光をこれに
+        #: 縮めて**その分だけゲインを上げ**、明るさを保つ。走りながら撮る絵のブレを減らす
+        #: ため: 30 ms では 0.30 m/s で 9 mm 動き、約 0.4 m/s でブレが帯の幅 (12 mm) を超える。
+        #: 黒い床・EV −2 の家の照明で「32.7 ms・ゲイン 2.45」と「8 ms・ゲイン 9.94」は同じ明るさで、
+        #: 8 ms でも壁の赤の割合と位置の読みは 30 ms と変わらなかった (2026-11-20)。
+        self.max_exposure_us = max_exposure_us
         self.ae_constraint = ae_constraint
         #: AE の目標を何段ずらすか (負で暗く)。**黒い床ではこれが効く。**
         #: 露出時間を決め打ちするのと違い「AE の判断より N 段暗く」なので、
@@ -163,13 +170,22 @@ class Camera:
         controls = getattr(picam2, "camera_controls", None) or {}
         if "AnalogueGain" in controls:
             self.max_analogue_gain = float(controls["AnalogueGain"][1])
+        self.exposure_limited = False
+        if (self.max_exposure_us and not self.forced_exposure_us
+                and self.exposure_time_us > self.max_exposure_us):
+            # 明るさ (露光 × ゲイン) を保ったまま露光を縮める。ゲインが上限に当たれば、
+            # その分だけ暗くなる (警告する)
+            want = self.analogue_gain * self.exposure_time_us / self.max_exposure_us
+            self.analogue_gain = min(want, self.max_analogue_gain)
+            self.exposure_time_us = int(self.max_exposure_us)
+            self.exposure_limited = want > self.max_analogue_gain
         picam2.set_controls({
             "AeEnable": False,
             "AwbEnable": False,
             "ExposureTime": self.exposure_time_us,
             "AnalogueGain": self.analogue_gain,
         })
-        if self.forced_exposure_us or self.forced_gain:
+        if self.forced_exposure_us or self.forced_gain or self.max_exposure_us:
             # **指定した露出が効くのは次のフレームからではない。** センサーが新しい
             # 露出で撮り始めるまで数フレームかかるので、ここで待たないと最初の
             # 1 枚は古い露出のまま返る。実機で実際に踏んだ: --measure 1 では
@@ -187,6 +203,12 @@ class Camera:
                  " (フレーム間隔の上限)" if self.exposure_is_capped() else "",
                  self.analogue_gain, self.max_analogue_gain, stops,
                  forced, self.exposure_warning() or "")
+        if self.max_exposure_us and not self.forced_exposure_us:
+            log.info("  露光の上限 %.1fms (#184)%s", self.max_exposure_us / 1000.0,
+                     " ** ゲインが上限に当たり、明るさを保てていない (暗くなる) **"
+                     if getattr(self, "exposure_limited", False) else
+                     "、ゲインで明るさを保った" if self.exposure_time_us >= self.max_exposure_us
+                     else "")
 
     def exposure_is_capped(self) -> bool:
         """露出がフレーム間隔の上限に張り付いているか。
@@ -294,6 +316,10 @@ def add_camera_args(p: argparse.ArgumentParser) -> None:
                         "N 段暗く」なので、会場の明るさが変わっても追従する")
     g.add_argument("--exposure", type=float, default=None, metavar="ミリ秒",
                    help="露出時間を手動で固定する (AE の判断を使わない)")
+    g.add_argument("--max-exposure", type=float, default=None, metavar="ミリ秒",
+                   help="露光の上限 [ms] (#184)。AE が決めた露光がこれより長ければ縮めて、その分"
+                        "ゲインを上げて明るさを保つ。走りながら撮る絵のブレを減らす (8 なら 0.30 m/s で"
+                        " 2.4 mm)。ゲインの上限 (16) に当たると暗くなるので、ログの残り段数を見ること")
     g.add_argument("--gain", type=float, default=None, metavar="倍率",
                    help="アナログゲインを手動で固定する (AE の判断を使わない)")
 
@@ -306,4 +332,6 @@ def camera_kwargs(args) -> dict:
         "exposure_value": args.ev,
         "exposure_us": None if args.exposure is None else int(args.exposure * 1000),
         "gain": args.gain,
+        "max_exposure_us": None if getattr(args, "max_exposure", None) is None
+        else int(args.max_exposure * 1000),
     }

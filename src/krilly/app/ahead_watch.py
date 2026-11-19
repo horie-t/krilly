@@ -38,6 +38,10 @@ class AheadWatchConfig:
     #: いるうちに次の向きへ切り替わる** ので、そのまま見ると前の脚の横の壁を「次の脚の
     #: 境目」と取り違える (2026-11-19 の long8、`--chain-legs 4` などで最大 0.30〜0.40)。
     max_lane_offset_m: float = 0.04
+    #: これより近い境目は見ない [m]。機体の陰の縁で境目が半分隠れて読みが不安定になり
+    #: (黒い床の 3×3 で 70 mm 先に 0.34、2026-11-20)、しかも 0.30 m/s ではもう止まりきれない
+    #: (止まるのに 75 mm + 遅れの分 21 mm)。
+    min_distance_m: float = 0.08
     pitch_m: float = 0.18
     profile: AheadConfig = field(default_factory=AheadConfig)
 
@@ -88,7 +92,7 @@ class AheadWatch:
         result = None
         for j in range(3):
             b = (j + 0.5) * p - along
-            if b <= 0 or b >= last:
+            if b < cfg.min_distance_m or b >= last:
                 continue
             frac = boundary_fraction(prof, axis_k, b, cfg.profile)
             if frac is None:
