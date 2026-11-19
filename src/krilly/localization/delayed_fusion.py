@@ -134,6 +134,11 @@ class FusionConfig:
     #: 食い違う (2026-11-19 の long8、木の床: 東の列の西側と (5,4) の北の壁) — 同じフレームに
     #: 別の縁があれば ``edge_max_spread_m`` で落ちるが、1 本だけだとそれが効かない。
     edge_single_tol_m: float = 0.006
+    #: その範囲を、前に縁を使ってから進んだ距離 1 m あたりこれだけ広げる。進行方向の誤りは
+    #: 進むほど育つ (1.5〜2 %) ので、**脚の始めの縁の食い違いと、900 mm 先の縁の食い違いは
+    #: 合わなくて当然**。2026-11-19 の long8 の南へ 7 セル (b7_a) では、始めの縁 (−3 mm) と
+    #: 比べてスタート近くの本物の縁 (−20 mm) を捨て続け、−16.7 mm ずれて着いた。
+    edge_single_tol_per_m: float = 0.03
     #: 1 本だけの縁が直前と合わないことがこのフレーム数続いたら、期待値の方を捨てて
     #: 新しい縁で確かめ直す (直前に使った縁の方が間違っていた場合に、ずっと縁を使え
     #: なくならないため)。
@@ -238,6 +243,8 @@ class DelayedFusion:
         #: 軸ごとの「次のフレームで期待する縁の食い違い」(1 本だけの縁を確かめるため)
         self._edge_expect: dict[str, float | None] = {"x": None, "y": None}
         self._edge_mismatch = {"x": 0, "y": 0}
+        #: 期待値を作ったときの撮影時点の位置 (そこから進んだ距離で許す範囲を広げる)
+        self._edge_expect_at: dict[str, tuple[float, float] | None] = {"x": None, "y": None}
         self.edges_disabled: str | None = None
 
     def reset_edge_budget(self) -> None:
@@ -246,6 +253,7 @@ class DelayedFusion:
         self.edges_disabled = None
         self._edge_expect = {"x": None, "y": None}
         self._edge_mismatch = {"x": 0, "y": 0}
+        self._edge_expect_at = {"x": None, "y": None}
 
     def _track_edges(self, edges, past) -> list:
         """前のフレームから、推定の移動量どおりに動いた縁だけを返す。
@@ -351,12 +359,17 @@ class DelayedFusion:
                     if expect is None:
                         # 確かめる相手がいない: 次のフレームで合えば使う
                         self._edge_expect[axis] = error
+                        self._edge_expect_at[axis] = (x, y)
                         res.skipped[name] = "1 本だけの縁 (次のフレームで確かめる)"
                         continue
-                    if abs(error - expect) > cfg.edge_single_tol_m:
+                    at = self._edge_expect_at[axis]
+                    moved = 0.0 if at is None else math.hypot(x - at[0], y - at[1])
+                    tol = cfg.edge_single_tol_m + cfg.edge_single_tol_per_m * moved
+                    if abs(error - expect) > tol:
                         self._edge_mismatch[axis] += 1
                         if self._edge_mismatch[axis] >= cfg.edge_single_reset_frames:
                             self._edge_expect[axis] = error      # 確かめ直し (次のフレームで)
+                            self._edge_expect_at[axis] = (x, y)
                             self._edge_mismatch[axis] = 0
                         res.skipped[name] = "1 本だけの縁が直前と合わない"
                         continue
@@ -365,6 +378,7 @@ class DelayedFusion:
                 step = _clamp(cfg.edge_gain * error, cfg.edge_max_step_m)
                 # 補正を掛けると次の食い違いはその分だけ小さくなるはず (試算では掛けない)
                 self._edge_expect[axis] = error - (0.0 if cfg.edge_observe_only else step)
+                self._edge_expect_at[axis] = (x, y)
                 if cfg.edge_observe_only:
                     # 試算では推定を直さないので食い違いが残り続け、合計の上限に意味が無い
                     res.edge_would_dx_m += step * ux
