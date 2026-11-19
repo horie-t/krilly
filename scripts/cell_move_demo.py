@@ -288,6 +288,12 @@ def _main() -> int | None:
     p.add_argument("--fuse-yaw-every", type=int, default=3, metavar="N",
                    help="--fuse で axis_yaw を N 枚に 1 枚測る (毎フレームだと 30fps が保てない)。"
                         "0 で向きは融合しない")
+    p.add_argument("--fuse-edges", action="store_true",
+                   help="--fuse で壁の切れ目の縁から進行方向の位置も補正する (#189)")
+    p.add_argument("--fuse-edges-dry", action="store_true",
+                   help="--fuse で壁の切れ目の縁を探して食い違いを記録するが、推定には入れない (#189)")
+    p.add_argument("--post-top", choices=("auto", "red", "white"), default="auto",
+                   help="柱の上面の色 (#189)。auto = 縁ごとに判定。会場で分かっていれば決め打ちする")
     p.add_argument("--fuse-along", action="store_true",
                    help="--fuse で進行方向の軸も補正する (既定は横ずれだけ。直角な帯は走行中ブレる)")
     p.add_argument("--frame-log-tail", type=float, default=1.5, metavar="秒",
@@ -578,7 +584,9 @@ def _main() -> int | None:
                 from krilly.localization.delayed_fusion import DelayedFusion, FusionConfig
 
                 over = {"camera_yaw_offset_rad": math.radians(kin.cfg.camera_yaw_offset_deg),
-                        "along_track": args.fuse_along}
+                        "along_track": args.fuse_along,
+                        "use_edges": args.fuse_edges or args.fuse_edges_dry,
+                        "edge_observe_only": args.fuse_edges_dry}
                 if args.fuse_gain is not None:
                     over["gain"] = args.fuse_gain
                 if args.fuse_delay is not None:
@@ -595,7 +603,9 @@ def _main() -> int | None:
             if args.fuse:
                 # 融合に使う構成: 壁の帯は毎フレーム、axis_yaw は N 枚に 1 枚、傾きは測らない
                 probe = ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg,
-                                    do_yaw=args.fuse_yaw_every > 0, do_tilt=False)
+                                    do_yaw=args.fuse_yaw_every > 0, do_tilt=False,
+                                    do_edges=args.fuse_edges or args.fuse_edges_dry,
+                                    post_top=args.post_top)
             else:
                 probe = ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg,
                                     do_yaw=not args.frame_log_light,

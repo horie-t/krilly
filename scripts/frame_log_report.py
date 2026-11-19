@@ -202,12 +202,13 @@ def report_processing(frames: list[dict]) -> list[str]:
     else:
         lines.append(f"- フレーム {n} 枚 (撮影時刻が無いので fps と遅れは出せない)")
     for key, name in (("t_measure_ms", "壁の帯 + cell_offset"), ("t_yaw_ms", "axis_yaw"),
-                      ("t_tilt_ms", "傾き (赤マスク + 消失点)")):
+                      ("t_tilt_ms", "傾き (赤マスク + 消失点)"),
+                      ("t_edges_ms", "壁の切れ目の縁 (#189)")):
         v = [f.get(key) for f in frames]
         if any(x is not None for x in v):
             lines.append(f"- {name}: 中央値 {fmt_ms(pct(v, 50))} ms / 95% {fmt_ms(pct(v, 95))} "
                          f"/ 最大 {fmt_ms(pct(v, 100))} ms")
-    total = [sum(f.get(k) or 0.0 for k in ("t_measure_ms", "t_yaw_ms", "t_tilt_ms"))
+    total = [sum(f.get(k) or 0.0 for k in ("t_measure_ms", "t_yaw_ms", "t_tilt_ms", "t_edges_ms"))
              for f in frames]
     lines.append(f"- 合計: 中央値 {fmt_ms(pct(total, 50))} ms / 95% {fmt_ms(pct(total, 95))} ms")
     recv = [(f["recv_ns"] - f["sensor_ts_ns"]) / 1e6 for f in frames

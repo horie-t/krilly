@@ -23,8 +23,9 @@ from __future__ import annotations
 import argparse
 import math
 import queue
+import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from krilly.localization.delayed_fusion import DelayedFusion, FusionConfig
 from krilly.logging_config import get_logger
@@ -47,14 +48,26 @@ def add_fusion_args(p: argparse.ArgumentParser) -> None:
                         "ときだけ。推定の向きが進む向きで違う件が未解決のため)")
     g.add_argument("--fuse-along", action="store_true",
                    help="走行中に進行方向の軸も補正する (既定は横ずれだけ)")
+    g.add_argument("--fuse-edges", action="store_true",
+                   help="壁の切れ目の縁から、進行方向の位置も走行中に補正する (#189)")
+    g.add_argument("--post-top", choices=("auto", "red", "white"), default="auto",
+                   help="柱の上面の色 (#189)。auto = 縁ごとに判定。試走会で分かったら決め打ちする")
+    g.add_argument("--fuse-edges-dry", action="store_true",
+                   help="壁の切れ目の縁を探して補正量を試算するが、推定には入れない (#189 の確認用)。"
+                        "動作の完了ログに「縁(試算)」として出る")
     g.add_argument("--frame-log", default=None, metavar="PREFIX",
                    help="--fuse の間のフレームを PREFIX_frames.csv に、制御の tick を "
                         "PREFIX_ticks.csv に記録する (scripts.frame_log_report で解析)")
+    g.add_argument("--frame-log-save", type=int, default=0, metavar="N",
+                   help="--frame-log 中、N 枚に 1 枚を PREFIX_frames/ に JPEG で残す (処理時間を食う)")
 
 
 def fusion_config_from_args(args, camera_yaw_offset_deg: float) -> FusionConfig:
     over = {"camera_yaw_offset_rad": math.radians(camera_yaw_offset_deg),
-            "along_track": bool(getattr(args, "fuse_along", False))}
+            "along_track": bool(getattr(args, "fuse_along", False)),
+            "use_edges": bool(getattr(args, "fuse_edges", False)
+                              or getattr(args, "fuse_edges_dry", False)),
+            "edge_observe_only": bool(getattr(args, "fuse_edges_dry", False))}
     if getattr(args, "fuse_gain", None) is not None:
         over["gain"] = args.fuse_gain
     if getattr(args, "fuse_delay", None) is not None:
@@ -73,11 +86,21 @@ class FusionSummary:
     dy_m: float = 0.0
     dphi_rad: float = 0.0
     abs_m: float = 0.0         # 位置の補正の絶対値の合計
+    edge_would_dx_m: float = 0.0   # 縁の補正の試算 (--fuse-edges-dry)
+    edge_would_dy_m: float = 0.0
+    edge_note: str = ""            # 縁を止めた理由など
+    #: 縁の食い違い [m] (フレームごと、軸の名前 -> 並び)。**試算の合計は目安にならない**
+    #: — 試算では推定を直さないので同じ食い違いが毎フレーム残り、合計は上限に張り付く。
+    edge_errors: dict = field(default_factory=dict)
 
     def describe(self) -> str:
         return ("融合 %d 回 (フレーム %d、使わず %d) 補正 X%+.1f Y%+.1f mm%s" % (
             self.applied, self.frames, self.rejected, self.dx_m * 1000, self.dy_m * 1000,
-            "" if not self.dphi_rad else " 方位%+.2f°" % math.degrees(self.dphi_rad)))
+            "" if not self.dphi_rad else " 方位%+.2f°" % math.degrees(self.dphi_rad))) + (
+            "".join(" / %s 食い違い 中央値 %+.1f mm (%d 枚)" % (
+                name, statistics.median(v) * 1000, len(v))
+                for name, v in sorted(self.edge_errors.items()) if v)) + (
+            "" if not self.edge_note else " / ** %s **" % self.edge_note)
 
 
 class MotionFusion:
@@ -89,7 +112,8 @@ class MotionFusion:
     """
 
     def __init__(self, camera, detector, est, config: FusionConfig, *, yaw_cfg=None,
-                 yaw_every: int = 0, frame_log: str | None = None,
+                 yaw_every: int = 0, frame_log: str | None = None, save_every: int = 0,
+                 post_top: str = "auto",
                  clock_ns=time.monotonic_ns, logger_factory=None) -> None:
         from krilly.perception.frame_log import FrameLogger, ProbeConfig, TickLog, focal_px
 
@@ -101,12 +125,14 @@ class MotionFusion:
         self.current = FusionSummary()
         self.total = FusionSummary()
         probe = ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg, do_yaw=yaw_every > 0,
-                            do_tilt=False)
+                            do_tilt=False, do_edges=config.use_edges, post_top=post_top)
         factory = logger_factory or FrameLogger
         self.logger = factory(
             camera, detector, probe,
             f"{frame_log}_frames.csv" if frame_log else None,
-            on_measure=self._on_measure, yaw_every=yaw_every, clock_ns=clock_ns)
+            on_measure=self._on_measure, yaw_every=yaw_every, clock_ns=clock_ns,
+            **({"save_every": save_every, "save_dir": f"{frame_log}_frames"}
+               if frame_log and save_every > 0 else {}))
         self.ticks = TickLog(f"{frame_log}_ticks.csv", clock_ns=clock_ns) if frame_log else None
 
     # -- カメラのスレッドから -------------------------------------------------
@@ -150,6 +176,11 @@ class MotionFusion:
             except queue.Empty:
                 break
             res = self.fusion.apply(m)
+            self.current.edge_would_dx_m += res.edge_would_dx_m
+            self.current.edge_would_dy_m += res.edge_would_dy_m
+            for name, err in res.errors.items():
+                if name.startswith("縁"):
+                    self.current.edge_errors.setdefault(name, []).append(err)
             dx += res.dx_m
             dy += res.dy_m
             dphi += res.dphi_rad
@@ -177,6 +208,9 @@ class MotionFusion:
         s = self.current
         s.frames = self.logger.frames - self.total.frames
         s.applied, s.rejected = self.fusion.applied, self.fusion.rejected
+        if self.fusion.edges_disabled:
+            s.edge_note = self.fusion.edges_disabled
+            log.warning("  %s (#189)", self.fusion.edges_disabled)
         t = self.total
         t.frames += s.frames
         t.applied += s.applied
@@ -208,11 +242,15 @@ def motion_fusion_from_args(args, camera, detector, est, camera_yaw_offset_deg: 
     cfg = fusion_config_from_args(args, camera_yaw_offset_deg)
     fuser = MotionFusion(camera, detector, est, cfg, yaw_cfg=yaw_cfg,
                          yaw_every=max(0, args.fuse_yaw_every),
-                         frame_log=getattr(args, "frame_log", None))
+                         frame_log=getattr(args, "frame_log", None),
+                         save_every=getattr(args, "frame_log_save", 0) or 0,
+                         post_top=getattr(args, "post_top", "auto"))
     log.info("動作の最中もカメラを融合する (#187): gain %.2f / 遅れ %.0fms / 向き%s / 進行方向%s%s",
              cfg.gain, cfg.delay_s * 1000,
              "も (%d 枚に 1 枚)" % args.fuse_yaw_every if args.fuse_yaw_every > 0
              else "は止まったときだけ",
-             "も補正" if cfg.along_track else "は補正しない",
+             "も補正" if cfg.along_track else
+             ("は壁の切れ目で試算だけ (#189、推定には入れない)" if cfg.edge_observe_only
+              else "は壁の切れ目で補正 (#189)" if cfg.use_edges else "は補正しない"),
              "、記録 %s_frames.csv / _ticks.csv" % args.frame_log if args.frame_log else "")
     return fuser

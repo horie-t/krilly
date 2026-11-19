@@ -29,6 +29,12 @@
   横ずれと向き (#187) を先に入れ、前後は壁の切れ目 (#189) で扱う。
 - **回っている最中の絵は使わない** (``max_rotation_rad``) — その場旋回中の絵は回転で
   ブレ、帯の位置も軸角も信用できない。
+- **壁の切れ目の縁 (#189) は、進行方向でも使う** (``use_edges``)。縁は「セルの境目 ±
+  柱の半幅」にあるので、帯に沿った方向の位置が分かる (``perception/wall_end.py``)。
+  どの境目の縁かは撮影時点の推定から決める — 推定の誤りがセルの半分 (約 80 mm) より
+  小さければ取り違えない。横ずれとは別のゲイン・上限を持つ: 縁は 1 本あたり約 2 mm
+  の誤差 (#189 の実測) で、溜まった進行方向の誤り (7 セルで 13〜20 mm) を直すために
+  食い違いの上限を広めにする。
 
 推定の世界座標は、セル中心が ``pitch_m`` の格子点 (整数倍) にあること
 (``cell_move_demo`` は開始セルの中心が原点、``speed_run`` は (x·pitch, y·pitch))。
@@ -47,6 +53,21 @@ def fold_quarter(a: float) -> float:
     """角度 [rad] を (-45°, 45°] に折り返す (迷路の軸は 90° 周期)。"""
     q = math.pi / 2.0
     return (a + q / 2.0) % q - q / 2.0
+
+
+def edge_offset_m(edge, current_m: float, pitch_m: float, inset_m: float) -> float:
+    """壁の切れ目の縁 1 つから、その軸での機体の位置 (今のセルの中央から [m]) を出す。
+
+    ``perception.wall_end.offset_from_edge`` と同じ計算 (層を逆向きに import しないため
+    ここにも置く)。縁は「境目 ± inset」(切れ目の側へ) にあり、どの境目かは推定の位置
+    ``current_m`` から決める。
+    """
+    side = -inset_m if edge.red_on_plus else inset_m
+    if getattr(edge, "post", "red") == "white":
+        side = -side                  # 白い柱: 赤は柱の手前で終わる
+    edge_est = current_m + edge.offset_mm / 1000.0
+    k = round((edge_est - side) / pitch_m - 0.5)
+    return (k + 0.5) * pitch_m + side - edge.offset_mm / 1000.0
 
 
 def _clamp(v: float, limit: float) -> float:
@@ -83,6 +104,33 @@ class FusionConfig:
     pitch_m: float = 0.18
     #: カメラが機体に対して回っている角度 [rad] (+ = CCW、``camera_yaw_offset_deg``)。
     camera_yaw_offset_rad: float = 0.0
+    #: 壁の切れ目の縁を使うか (#189)。
+    use_edges: bool = False
+    #: 縁の食い違いの何割を直すか / 1 回の上限 [m] / これより大きな食い違いは捨てる [m]。
+    #: 縁は 1 フレームに写っている間 (0.30 m/s で約 1 s、30 枚) ずっと読めるので、
+    #: 0.3 なら数枚で収束する。上限 3 mm/枚 = 90 mm/s。
+    edge_gain: float = 0.3
+    edge_max_step_m: float = 0.003
+    edge_max_error_m: float = 0.030
+    #: 同じ軸の縁どうしの食い違いがこれを超えたら、その軸の縁は使わない [m]
+    #: (取り違えた縁や、テープ・継ぎ目を拾った偽の縁が混ざっている)。
+    edge_max_spread_m: float = 0.008
+    #: 縁の、セルの境目からの距離 [m] (柱の半幅、``wall_end.EDGE_INSET_MM``)。
+    edge_inset_m: float = 0.006
+    #: **縁は、前のフレームから推定の移動量どおりに動いたものだけを使う** [m]。機体に
+    #: 付いて動くもの (影・テープ・ケーブル) は画面上でほとんど動かないので、ここで
+    #: 落ちる。2026-11-19 の long8 の衝突では、偽の縁が機体の 120 mm の移動の間に
+    #: 25〜30 mm しか動いていなかった。前のフレームとの移動がこれより小さい間は確かめ
+    #: られないので使わない (止まっている間は縁の補正をしない)。
+    edge_track_tol_m: float = 0.004
+    edge_track_min_move_m: float = 0.002
+    #: 1 つの融合 (= 1 動作、``MotionFusion.begin`` ごとに作り直す) の間に縁で直す量の
+    #: 合計の上限 [m]。超えたらその動作では縁を使わない (暴走の歯止め)。7 セルの直線で
+    #: 溜まる進行方向の誤りが 13〜20 mm (#187) なので 25 mm。
+    edge_max_total_m: float = 0.025
+    #: 縁の補正を**試算だけ**して推定には入れない (``FusionResult.edge_would_*`` に残す)。
+    #: 偽の縁が出ないことを、機体を動かさずに記録で確かめるため (2026-11-19 の衝突の後)。
+    edge_observe_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,6 +141,9 @@ class CameraMeasurement:
     forward_m: float | None = None     # セル中央に対する機体のずれ (車体 +x)
     left_m: float | None = None        # 同 (車体 +y)
     axis_rad: float | None = None      # axis_yaw の軸角 ((-45°, 45°]、カメラの向き)
+    #: 壁の切れ目の縁 (#189、``perception.wall_end.BandEdge``: ``axis`` / ``offset_mm`` /
+    #: ``red_on_plus`` を持つもの)。
+    edges: tuple = ()
 
 
 @dataclass
@@ -104,6 +155,8 @@ class FusionResult:
     dphi_rad: float = 0.0
     errors: dict[str, float] = field(default_factory=dict)   # 軸 -> 食い違い (補正前)
     skipped: dict[str, str] = field(default_factory=dict)    # 軸 -> 使わなかった理由
+    edge_would_dx_m: float = 0.0   # 縁の補正の試算 (``edge_observe_only`` のとき、世界座標)
+    edge_would_dy_m: float = 0.0
 
     @property
     def applied(self) -> bool:
@@ -165,6 +218,40 @@ class DelayedFusion:
         self.history = PoseHistory(self.cfg.history_s)
         self.applied = 0
         self.rejected = 0
+        #: 縁の追跡用: 前のフレームの (撮影時点の推定姿勢, 縁の並び)
+        self._prev_edges: tuple | None = None
+        #: 軸ごとの縁による補正の合計 [m] と、止めたか
+        self.edge_total = {"x": 0.0, "y": 0.0}
+        self.edges_disabled: str | None = None
+
+    def _track_edges(self, edges, past) -> list:
+        """前のフレームから、推定の移動量どおりに動いた縁だけを返す。
+
+        縁の ``offset_mm`` は機体から見た位置なので、機体がその軸に Δs 進めば −Δs
+        動くはず。同じ帯・同じ向き (``red_on_plus``) の縁で、この関係を満たすものが
+        前のフレームにあれば本物とみなす。
+        """
+        cfg = self.cfg
+        prev = self._prev_edges
+        self._prev_edges = (past, tuple(edges))
+        if prev is None or not edges:
+            return []
+        (px, py, pphi), pedges = prev
+        x, y, phi = past
+        c, s = math.cos(phi), math.sin(phi)
+        moved = {"x": (x - px) * c + (y - py) * s, "y": -(x - px) * s + (y - py) * c}
+        out = []
+        for e in edges:
+            ds = moved[e.axis]
+            if abs(ds) < cfg.edge_track_min_move_m:
+                continue                  # 動いていないと、機体に付いたものと区別できない
+            for p in pedges:
+                if p.band != e.band or p.red_on_plus != e.red_on_plus:
+                    continue
+                if abs((e.offset_mm - p.offset_mm) / 1000.0 + ds) <= cfg.edge_track_tol_m:
+                    out.append(e)
+                    break
+        return out
 
     def record(self, t_ns: int) -> None:
         self.history.record(t_ns, self.est.pose)
@@ -213,6 +300,45 @@ class DelayedFusion:
             step = _clamp(cfg.gain * error, cfg.max_step_m)
             dx += step * ux
             dy += step * uy
+        tracked = self._track_edges(m.edges, past) if cfg.use_edges else []
+        if cfg.use_edges and m.edges and self.edges_disabled is None:
+            for axis, (ux, uy), name in (("x", (c, s), "縁:前後"), ("y", (-s, c), "縁:左右")):
+                current = (x - cx) * ux + (y - cy) * uy
+                errs = []
+                axis_edges = [e for e in m.edges if e.axis == axis]
+                if axis_edges and not any(e.axis == axis for e in tracked):
+                    res.skipped[name] = "前のフレームと動きが合わない (機体と一緒に動く?)"
+                    continue
+                for e in tracked:
+                    if e.axis != axis:
+                        continue
+                    err = edge_offset_m(e, current, cfg.pitch_m, cfg.edge_inset_m) - current
+                    if abs(err) <= cfg.edge_max_error_m:
+                        errs.append(err)
+                if not errs:
+                    if any(e.axis == axis for e in m.edges):
+                        res.skipped[name] = "食い違いが大きい"
+                    continue
+                if max(errs) - min(errs) > cfg.edge_max_spread_m:
+                    res.skipped[name] = "縁どうしが食い違う"
+                    continue
+                error = sum(errs) / len(errs)
+                res.errors[name] = error
+                step = _clamp(cfg.edge_gain * error, cfg.edge_max_step_m)
+                if cfg.edge_observe_only:
+                    # 試算では推定を直さないので食い違いが残り続け、合計の上限に意味が無い
+                    res.edge_would_dx_m += step * ux
+                    res.edge_would_dy_m += step * uy
+                    continue
+                if abs(self.edge_total[axis] + step) > cfg.edge_max_total_m:
+                    self.edges_disabled = (
+                        "縁の補正の合計が %.0f mm を超えるので、この動作では縁を使わない"
+                        % (cfg.edge_max_total_m * 1000))
+                    res.skipped[name] = self.edges_disabled
+                    break
+                self.edge_total[axis] += step
+                dx += step * ux
+                dy += step * uy
         if m.axis_rad is not None:
             body_axis = m.axis_rad - cfg.camera_yaw_offset_rad
             error = fold_quarter(body_axis - phi)
