@@ -55,6 +55,10 @@ def add_fusion_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--fuse-edges-dry", action="store_true",
                    help="壁の切れ目の縁を探して補正量を試算するが、推定には入れない (#189 の確認用)。"
                         "動作の完了ログに「縁(試算)」として出る")
+    g.add_argument("--ahead-check", action="store_true",
+                   help="走りながら、今の脚が通るセルの境目に壁が見えたら止める (#188)")
+    g.add_argument("--ahead-check-dry", action="store_true",
+                   help="前方の境目の見張りを試算だけ (止めずに記録する、#188)")
     g.add_argument("--frame-log", default=None, metavar="PREFIX",
                    help="--fuse の間のフレームを PREFIX_frames.csv に、制御の tick を "
                         "PREFIX_ticks.csv に記録する (scripts.frame_log_report で解析)")
@@ -92,6 +96,9 @@ class FusionSummary:
     #: 縁の食い違い [m] (フレームごと、軸の名前 -> 並び)。**試算の合計は目安にならない**
     #: — 試算では推定を直さないので同じ食い違いが毎フレーム残り、合計は上限に張り付く。
     edge_errors: dict = field(default_factory=dict)
+    ahead_max: float = 0.0         # 今の脚の境目で見えた赤の割合の最大 (#188)
+    ahead_checked: int = 0
+    ahead_note: str = ""
 
     def describe(self) -> str:
         return ("融合 %d 回 (フレーム %d、使わず %d) 補正 X%+.1f Y%+.1f mm%s" % (
@@ -100,7 +107,10 @@ class FusionSummary:
             "".join(" / %s 食い違い 中央値 %+.1f mm (%d 枚)" % (
                 name, statistics.median(v) * 1000, len(v))
                 for name, v in sorted(self.edge_errors.items()) if v)) + (
-            "" if not self.edge_note else " / ** %s **" % self.edge_note)
+            "" if not self.edge_note else " / ** %s **" % self.edge_note) + (
+            "" if not self.ahead_checked else " / 前方 最大 %.2f (%d 回)" % (
+                self.ahead_max, self.ahead_checked)) + (
+            "" if not self.ahead_note else " / ** %s **" % self.ahead_note)
 
 
 class MotionFusion:
@@ -113,7 +123,7 @@ class MotionFusion:
 
     def __init__(self, camera, detector, est, config: FusionConfig, *, yaw_cfg=None,
                  yaw_every: int = 0, frame_log: str | None = None, save_every: int = 0,
-                 post_top: str = "auto",
+                 post_top: str = "auto", ahead=None,
                  clock_ns=time.monotonic_ns, logger_factory=None) -> None:
         from krilly.perception.frame_log import FrameLogger, ProbeConfig, TickLog, focal_px
 
@@ -125,7 +135,10 @@ class MotionFusion:
         self.current = FusionSummary()
         self.total = FusionSummary()
         probe = ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg, do_yaw=yaw_every > 0,
-                            do_tilt=False, do_edges=config.use_edges, post_top=post_top)
+                            do_tilt=False, do_edges=config.use_edges, post_top=post_top,
+                            do_ahead=ahead is not None)
+        #: 前方の境目の見張り (#188、``app.ahead_watch.AheadWatch``)
+        self.ahead = ahead
         factory = logger_factory or FrameLogger
         self.logger = factory(
             camera, detector, probe,
@@ -159,13 +172,25 @@ class MotionFusion:
                 break
         self.fusion = DelayedFusion(self.est, self.cfg)
         self.fusion.record(self.clock_ns())
+        if self.ahead is not None:
+            self.ahead.reset()
         self.current = FusionSummary()
         if self.ticks is not None:
             self.ticks.label = label
         self.logger.start()
 
-    def before_update(self) -> tuple[float, float, float, int] | None:
-        """届いている測定をすべて融合し、この tick の補正量の合計を返す。"""
+    @property
+    def ahead_stop(self):
+        """前方の境目に壁が見えて**止めるべき**なら :class:`AheadAlarm` (試算だけなら None)。"""
+        if self.ahead is None or self.ahead.alarm is None or self.ahead.cfg.observe_only:
+            return None
+        return self.ahead.alarm
+
+    def before_update(self, motion=None) -> tuple[float, float, float, int] | None:
+        """届いている測定をすべて融合し、この tick の補正量の合計を返す。
+
+        ``motion`` (``CellMotion``) を渡すと、前方の境目の見張り (#188) も回す。
+        """
         if self.fusion is None:
             return None
         dx = dy = dphi = 0.0
@@ -176,6 +201,12 @@ class MotionFusion:
             except queue.Empty:
                 break
             res = self.fusion.apply(m)
+            if (self.ahead is not None and motion is not None and m.ahead is not None
+                    and motion.translating):
+                past = self.fusion.history.at(m.t_ns - self.cfg.delay_s * 1e9)
+                if past is not None:
+                    self.ahead.check(m.ahead, past, motion.reference, motion.axis_k,
+                                     motion.reference[2])
             self.current.edge_would_dx_m += res.edge_would_dx_m
             self.current.edge_would_dy_m += res.edge_would_dy_m
             for name, err in res.errors.items():
@@ -208,6 +239,14 @@ class MotionFusion:
         s = self.current
         s.frames = self.logger.frames - self.total.frames
         s.applied, s.rejected = self.fusion.applied, self.fusion.rejected
+        if self.ahead is not None:
+            s.ahead_max = self.ahead.max_fraction
+            s.ahead_checked = self.ahead.checked
+            if self.ahead.alarm is not None:
+                a = self.ahead.alarm
+                s.ahead_note = ("前方の境目に壁 (%.0f mm 先、赤の割合 %.2f、%d フレーム)%s"
+                                % (a.distance_m * 1000, a.fraction, a.frames,
+                                   " [試算]" if self.ahead.cfg.observe_only else ""))
         if self.fusion.edges_disabled:
             s.edge_note = self.fusion.edges_disabled
             log.warning("  %s (#189)", self.fusion.edges_disabled)
@@ -240,7 +279,13 @@ def motion_fusion_from_args(args, camera, detector, est, camera_yaw_offset_deg: 
     if not getattr(args, "fuse", False):
         return None
     cfg = fusion_config_from_args(args, camera_yaw_offset_deg)
-    fuser = MotionFusion(camera, detector, est, cfg, yaw_cfg=yaw_cfg,
+    ahead = None
+    if getattr(args, "ahead_check", False) or getattr(args, "ahead_check_dry", False):
+        from krilly.app.ahead_watch import AheadWatch, AheadWatchConfig
+
+        ahead = AheadWatch(AheadWatchConfig(observe_only=not args.ahead_check))
+        log.info("前方の境目を見張る (#188)%s", "" if args.ahead_check else " [試算だけ、止めない]")
+    fuser = MotionFusion(camera, detector, est, cfg, yaw_cfg=yaw_cfg, ahead=ahead,
                          yaw_every=max(0, args.fuse_yaw_every),
                          frame_log=getattr(args, "frame_log", None),
                          save_every=getattr(args, "frame_log_save", 0) or 0,

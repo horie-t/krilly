@@ -65,7 +65,7 @@ def focal_px(camera_height_mm: float = CAMERA_HEIGHT_MM,
 
 FRAME_FIELDS = (
     "seq", "sensor_ts_ns", "recv_ns", "done_ns", "exposure_us", "gain", "frame_duration_us",
-    "t_measure_ms", "t_yaw_ms", "t_tilt_ms", "t_edges_ms",
+    "t_measure_ms", "t_yaw_ms", "t_tilt_ms", "t_edges_ms", "t_ahead_ms",
     *(f"frac_{e}" for e in EDGES), *(f"shift_{e}_px" for e in EDGES),
     *(f"sat_{e}" for e in EDGES),
     "forward_mm", "left_mm", "walls_x", "walls_y",
@@ -108,6 +108,8 @@ class ProbeConfig:
     edge_bands: tuple = ("left", "right", "front", "back")
     #: 柱の上面の色 ("auto" / "red" / "white"、``wall_end.EdgeConfig.post_top``)。
     post_top: str = "auto"
+    #: 前方の境目の見張り用に、行・列ごとの赤の数を作るか (#188)。
+    do_ahead: bool = False
 
 
 def probe_frame(bgr: np.ndarray, detector: WallDetector, cfg: ProbeConfig) -> dict:
@@ -151,6 +153,14 @@ def probe_frame(bgr: np.ndarray, detector: WallDetector, cfg: ProbeConfig) -> di
                                                     shifts_px=shifts,
                                                     config=EdgeConfig(post_top=cfg.post_top)))
         row["t_edges_ms"] = (time.perf_counter() - t4) * 1000.0
+
+    if cfg.do_ahead:
+        from krilly.perception.ahead import ahead_profiles
+
+        t5 = time.perf_counter()
+        row["ahead_profiles"] = ahead_profiles(
+            bgr, {e: int(measured[e][1]) for e in EDGES})
+        row["t_ahead_ms"] = (time.perf_counter() - t5) * 1000.0
 
     for k in ("roll_deg", "pitch_deg", "roll_resid_deg", "pitch_resid_deg"):
         row[k] = None
@@ -335,6 +345,7 @@ def measurement_from_row(row: dict):
         left_m=None if row.get("left_mm") is None else row["left_mm"] / 1000.0,
         axis_rad=None if yaw is None else math.radians(yaw),
         edges=tuple(decode_edges(row.get("edges"))),
+        ahead=row.get("ahead_profiles"),
     )
 
 
