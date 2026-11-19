@@ -50,8 +50,13 @@ class Sim:
         self.fusion.record(self.t_ns)
 
     def true_at(self, t_ns):
-        best = min(self.true_log, key=lambda p: abs(p[0] - t_ns))
-        return best[1]
+        """真の姿勢を時刻で線形補間する (最寄りの記録だと 0.3 m/s で 3 mm 粗い)。"""
+        log = self.true_log
+        for (t0, p0), (t1, p1) in zip(log, log[1:]):
+            if t0 <= t_ns <= t1:
+                w = (t_ns - t0) / (t1 - t0)
+                return tuple(a + w * (b - a) for a, b in zip(p0, p1))
+        return min(log, key=lambda p: abs(p[0] - t_ns))[1]
 
     def measure(self, sensor_ts, yaw=None, along=True):
         x, y, phi = self.true_at(sensor_ts - self.delay_s * 1e9)
@@ -175,3 +180,109 @@ def test_heading_correction_folds_and_uses_camera_offset():
 def test_fold_quarter():
     assert math.degrees(fold_quarter(math.radians(91))) == pytest.approx(1.0)
     assert math.degrees(fold_quarter(math.radians(-46))) == pytest.approx(44.0)
+
+
+class Edge:
+    """``perception.wall_end.BandEdge`` の代わり (必要な属性だけ)。"""
+
+    def __init__(self, axis, offset_mm, red_on_plus, band="left"):
+        self.axis, self.offset_mm, self.red_on_plus, self.band = axis, offset_mm, red_on_plus, band
+
+
+def edge_seen_from(true_along_m, boundary_m, red_on_plus, inset=0.006):
+    """真の位置 (セル中央から) の機体が見る縁の offset_mm。"""
+    edge_world = boundary_m + (-inset if red_on_plus else inset)
+    return Edge("x", (edge_world - true_along_m) * 1000.0, red_on_plus)
+
+
+def along_of(sim, t_img):
+    true_x = sim.true_at(t_img - sim.delay_s * 1e9)[0]
+    return true_x - round(true_x / PITCH) * PITCH
+
+
+def edge_frame(sim, t_img, boundaries=((0.09, False), (-0.09, True))):
+    along = along_of(sim, t_img)
+    return CameraMeasurement(int(t_img), edges=tuple(edge_seen_from(along, b, plus)
+                                                     for b, plus in boundaries))
+
+
+def test_edges_correct_along_track_while_moving():
+    cfg = FusionConfig(use_edges=True, edge_gain=1.0, edge_max_step_m=1.0)
+    sim = Sim(v=0.30, bias=(-0.012, 0.0, 0.0), cfg=cfg)   # 推定は真より 12 mm 後ろ
+    for _ in range(10):
+        sim.tick()
+    first = sim.fusion.apply(edge_frame(sim, sim.t_ns - 63 * MS))
+    assert not first.applied                                 # 1 枚目は追跡の相手がいない
+    res = sim.fusion.apply(edge_frame(sim, sim.t_ns - 30 * MS))
+    assert "縁:前後" in res.errors
+    assert sim.est.x - sim.true[0] == pytest.approx(0.0, abs=0.0005)
+
+
+def test_edges_are_off_by_default_and_inconsistent_edges_are_dropped():
+    sim = Sim(v=0.30, bias=(0.010, 0.0, 0.0))
+    for _ in range(10):
+        sim.tick()
+    sim.fusion.apply(edge_frame(sim, sim.t_ns - 63 * MS))
+    res = sim.fusion.apply(edge_frame(sim, sim.t_ns - 30 * MS))
+    assert not res.applied                                  # use_edges=False が既定
+    cfg = FusionConfig(use_edges=True)
+    sim2 = Sim(v=0.30, bias=(0.010, 0.0, 0.0), cfg=cfg)
+    for _ in range(10):
+        sim2.tick()
+    for t in (63, 30):
+        m = edge_frame(sim2, sim2.t_ns - t * MS, ((0.09, False),))
+        good = m.edges[0]
+        bad = Edge("x", good.offset_mm + 15.0, False, band="right")   # 15 mm 食い違う偽の縁
+        res = sim2.fusion.apply(CameraMeasurement(m.t_ns, edges=(good, bad)))
+    assert res.skipped["縁:前後"] == "縁どうしが食い違う" and not res.applied
+
+
+def test_edge_that_moves_with_the_robot_is_ignored():
+    """2026-11-19 の衝突の再現: 機体に付いて動く偽の縁 (影) は、何フレーム見えても使わない。"""
+    cfg = FusionConfig(use_edges=True)
+    sim = Sim(v=0.30, bias=(0.0, 0.0, 0.0), cfg=cfg)
+    for _ in range(10):
+        sim.tick()
+    fixed = Edge("x", -40.0, False, band="right")         # 画面上で動かない
+    for _ in range(20):
+        sim.tick()
+        res = sim.fusion.apply(CameraMeasurement(sim.t_ns - 30 * MS, edges=(fixed,)))
+        assert not res.applied
+    assert "動きが合わない" in res.skipped["縁:前後"]
+    assert sim.est.x == pytest.approx(sim.true[0])
+
+
+def test_total_edge_correction_is_capped_per_motion():
+    cfg = FusionConfig(use_edges=True, edge_max_error_m=0.08, edge_gain=1.0,
+                       edge_max_step_m=0.003)
+    sim = Sim(v=0.30, bias=(-0.040, 0.0, 0.0), cfg=cfg)   # 40 mm も後ろ (上限 25 mm を超える)
+    for _ in range(10):
+        sim.tick()
+    for _ in range(30):
+        sim.tick()
+        sim.fusion.apply(edge_frame(sim, sim.t_ns - 30 * MS))
+    assert sim.fusion.edges_disabled is not None
+    assert sim.fusion.edge_total["x"] == pytest.approx(0.024, abs=0.0031)
+    assert sim.true[0] - sim.est.x == pytest.approx(0.040 - sim.fusion.edge_total["x"])
+
+
+def test_edge_offset_matches_the_perception_helper():
+    from krilly.localization.delayed_fusion import edge_offset_m
+    from krilly.perception.wall_end import BandEdge, offset_from_edge
+
+    for off, plus, est in ((50.0, False, 3.0), (-110.0, True, -20.0), (150.0, True, 40.0)):
+        e = BandEdge("left", "x", off, plus, 0.0)
+        assert edge_offset_m(e, est / 1000, 0.18, 0.006) * 1000 == pytest.approx(
+            offset_from_edge(e, est))
+
+
+def test_observe_only_reports_but_does_not_move_the_estimate():
+    cfg = FusionConfig(use_edges=True, edge_observe_only=True, edge_gain=1.0,
+                       edge_max_step_m=1.0)
+    sim = Sim(v=0.30, bias=(-0.012, 0.0, 0.0), cfg=cfg)
+    for _ in range(10):
+        sim.tick()
+    sim.fusion.apply(edge_frame(sim, sim.t_ns - 63 * MS))
+    res = sim.fusion.apply(edge_frame(sim, sim.t_ns - 30 * MS))
+    assert res.edge_would_dx_m == pytest.approx(0.012, abs=0.0005)
+    assert not res.applied and sim.est.x - sim.true[0] == pytest.approx(-0.012)

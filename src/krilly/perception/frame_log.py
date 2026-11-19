@@ -65,13 +65,15 @@ def focal_px(camera_height_mm: float = CAMERA_HEIGHT_MM,
 
 FRAME_FIELDS = (
     "seq", "sensor_ts_ns", "recv_ns", "done_ns", "exposure_us", "gain", "frame_duration_us",
-    "t_measure_ms", "t_yaw_ms", "t_tilt_ms",
+    "t_measure_ms", "t_yaw_ms", "t_tilt_ms", "t_edges_ms",
     *(f"frac_{e}" for e in EDGES), *(f"shift_{e}_px" for e in EDGES),
     *(f"sat_{e}" for e in EDGES),
     "forward_mm", "left_mm", "walls_x", "walls_y",
     "yaw_deg", "yaw_len_px",
     "roll_deg", "pitch_deg", "roll_resid_deg", "pitch_resid_deg", "bands_h", "bands_v",
     "saved",
+    # #189: 壁の切れ目の縁 (perception.wall_end.encode_edges の文字列)
+    "edges",
 )
 
 TICK_FIELDS = (
@@ -101,6 +103,11 @@ class ProbeConfig:
     do_yaw: bool = True
     do_tilt: bool = True
     tilt_min_length: int = 120
+    #: 壁の切れ目の縁を探すか (#189)。左右の帯だけなら 1 枚 3.3 ms、4 本で 5.7 ms。
+    do_edges: bool = False
+    edge_bands: tuple = ("left", "right", "front", "back")
+    #: 柱の上面の色 ("auto" / "red" / "white"、``wall_end.EdgeConfig.post_top``)。
+    post_top: str = "auto"
 
 
 def probe_frame(bgr: np.ndarray, detector: WallDetector, cfg: ProbeConfig) -> dict:
@@ -131,6 +138,19 @@ def probe_frame(bgr: np.ndarray, detector: WallDetector, cfg: ProbeConfig) -> di
         row["t_yaw_ms"] = (time.perf_counter() - t2) * 1000.0
         if yaw is not None:
             row["yaw_deg"], row["yaw_len_px"] = yaw.angle_deg, yaw.total_length_px
+
+    row["edges"] = ""
+    if cfg.do_edges:
+        from krilly.perception.wall_end import encode_edges, find_band_edges
+
+        t4 = time.perf_counter()
+        shifts = {e: int(measured[e][1]) for e in EDGES}
+        from krilly.perception.wall_end import EdgeConfig
+
+        row["edges"] = encode_edges(find_band_edges(bgr, bands=cfg.edge_bands,
+                                                    shifts_px=shifts,
+                                                    config=EdgeConfig(post_top=cfg.post_top)))
+        row["t_edges_ms"] = (time.perf_counter() - t4) * 1000.0
 
     for k in ("roll_deg", "pitch_deg", "roll_resid_deg", "pitch_resid_deg"):
         row[k] = None
@@ -307,11 +327,14 @@ def measurement_from_row(row: dict):
     if ts is None:
         return None
     yaw = row.get("yaw_deg")
+    from krilly.perception.wall_end import decode_edges
+
     return CameraMeasurement(
         int(ts),
         forward_m=None if row.get("forward_mm") is None else row["forward_mm"] / 1000.0,
         left_m=None if row.get("left_mm") is None else row["left_mm"] / 1000.0,
         axis_rad=None if yaw is None else math.radians(yaw),
+        edges=tuple(decode_edges(row.get("edges"))),
     )
 
 
