@@ -286,3 +286,36 @@ def test_observe_only_reports_but_does_not_move_the_estimate():
     res = sim.fusion.apply(edge_frame(sim, sim.t_ns - 30 * MS))
     assert res.edge_would_dx_m == pytest.approx(0.012, abs=0.0005)
     assert not res.applied and sim.est.x - sim.true[0] == pytest.approx(-0.012)
+
+
+def test_single_edge_needs_confirmation_and_must_agree():
+    cfg = FusionConfig(use_edges=True, edge_gain=1.0, edge_max_step_m=1.0)
+    sim = Sim(v=0.30, bias=(-0.010, 0.0, 0.0), cfg=cfg)   # 推定は真より 10 mm 後ろ
+    for _ in range(10):
+        sim.tick()
+    one = ((0.09, False),)
+    sim.fusion.apply(edge_frame(sim, sim.t_ns - 96 * MS, one))      # 追跡の相手づくり
+    r1 = sim.fusion.apply(edge_frame(sim, sim.t_ns - 63 * MS, one))
+    assert not r1.applied and "確かめる" in r1.skipped["縁:前後"]   # 最初の 1 本は保留
+    r2 = sim.fusion.apply(edge_frame(sim, sim.t_ns - 30 * MS, one))
+    assert r2.applied                                               # 次のフレームで合った
+    assert sim.est.x - sim.true[0] == pytest.approx(0.0, abs=0.0005)
+
+
+def test_single_edge_from_a_misplaced_wall_is_rejected():
+    """ずれて置かれた壁の縁 (12 mm 食い違う) が 1 本だけ写っても使わない。"""
+    cfg = FusionConfig(use_edges=True, edge_gain=0.3)
+    sim = Sim(v=0.30, bias=(0.0, 0.0, 0.0), cfg=cfg)
+    for _ in range(10):
+        sim.tick()
+    for t in (129, 96):                                  # まず正しい縁で期待値を作る
+        sim.fusion.apply(edge_frame(sim, sim.t_ns - t * MS, ((0.09, False), (-0.09, True))))
+    x_before = sim.est.x
+    for t in (63, 30):                                   # ずれた壁の縁は機体の動きどおりに動く
+        m = edge_frame(sim, sim.t_ns - t * MS, ((0.09, False),))
+        bad = Edge("x", m.edges[0].offset_mm + 12.0, False)
+        res = sim.fusion.apply(CameraMeasurement(m.t_ns, edges=(bad,)))
+        assert not res.applied
+    # 1 枚目は追跡 (前のフレームの正しい縁と 12 mm 食い違う)、2 枚目は 1 本だけの縁の確かめで落ちる
+    assert res.skipped["縁:前後"] == "1 本だけの縁が直前と合わない"
+    assert sim.est.x == pytest.approx(x_before)

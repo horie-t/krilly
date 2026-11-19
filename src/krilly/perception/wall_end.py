@@ -170,18 +170,31 @@ def find_band_edges(
         hi = min(across, hi + shift + cfg.margin_px)
         if hi - lo < 4:
             continue
-        strip = bgr[:, lo:hi] if vertical else bgr[lo:hi, :]
-        axis = 1 if vertical else 0          # 帯の幅の方向に平均する
-        # 白い柱・白飛びの判定用: トップハットが効くように広めに切り出してから帯の幅に戻す
+        # 帯の周りを広めに切り出し、帯の赤の中心を帯に沿って直線で当てはめ、その直線に
+        # 沿って帯の幅だけ取り出す。**固定の位置で切り出すと、傾いて写った壁 (機体の向き +
+        # カメラの取り付けの回り) が画面の端で切り出しから外れて「切れ目」に見える**
+        # (2026-11-19 の long8: 画面の端から端まで続く北の壁の右の方に偽の縁)。
         wlo, whi = max(0, lo - cfg.white_pad_px), min(across, hi + cfg.white_pad_px)
         wide = bgr[:, wlo:whi] if vertical else bgr[wlo:whi, :]
-        white_full, _ = white_yellow_mask_parts(wide, WhiteYellowConfig(), vertical=vertical)
-        white = white_full[:, lo - wlo:hi - wlo] if vertical else white_full[lo - wlo:hi - wlo, :]
-        white_frac = (white > 0).mean(axis=axis)
-        p = redness(strip).mean(axis=axis)
-        mask_frac = (red_mask(strip, cfg.red) > 0).mean(axis=axis)   # 帯の幅に対する赤のマスクの割合
+        white_wide, _ = white_yellow_mask_parts(wide, WhiteYellowConfig(), vertical=vertical)
+        layers = [redness(wide), (red_mask(wide, cfg.red) > 0).astype(np.float32),
+                  _green_mask(wide).astype(np.float32), (white_wide > 0).astype(np.float32)]
+        if not vertical:                  # 帯に沿う向きを 0 軸にそろえる
+            layers = [a.T for a in layers]
+        red_w, mask_w, green_w, white_w = layers
+        half_w = (hi - lo) // 2
+        center = _band_center_line(mask_w, default=(lo + hi) / 2.0 - wlo)
+        cols = np.clip(np.round(center)[:, None].astype(int)
+                       + np.arange(-half_w, half_w + 1)[None, :], 0, mask_w.shape[1] - 1)
+
+        def straight(a: np.ndarray) -> np.ndarray:
+            return np.take_along_axis(a, cols, axis=1).mean(axis=1)
+
+        p = straight(red_w)
+        mask_frac = straight(mask_w)        # 帯の幅に対する赤のマスクの割合
         present = mask_frac > cfg.min_plateau
-        occ = _green_mask(strip).mean(axis=axis) > 0.05
+        occ = straight(green_w) > 0.05
+        white_frac = straight(white_w)
         length = len(p)
         if int(present.sum()) < cfg.side_px:
             continue
@@ -241,6 +254,32 @@ def find_band_edges(
                                 bool(red_low),        # 座標の小さい側 = 車体の + 側
                                 float(pos), post))
     return out
+
+
+def _band_center_line(mask: np.ndarray, default: float, min_rows: int = 30,
+                      min_px: int = 3) -> np.ndarray:
+    """帯に沿った各位置での帯の中心 (幅の方向の画素)。
+
+    **傾きだけ**を赤のマスクの重心の直線から取り、中心の位置は ``default`` (校正位置 +
+    横ずれ) のまま画面の中央で合わせる。重心は遠近で見える壁の白い側面や交差する
+    短い壁に引っ張られるので、位置まで当てはめると縁の精度が落ちた (黒い床の b_mixed で
+    「前が赤 − 後ろが赤」の標準偏差が 2.9 → 5.3 mm)。
+
+    ``mask`` は (帯に沿う向き, 幅の向き)。赤が ``min_px`` 画素以上ある位置が ``min_rows``
+    に満たなければ傾き 0。外れ値を 1 回除いて当て直す。
+    """
+    n, w = mask.shape
+    counts = mask.sum(axis=1)
+    rows = np.flatnonzero(counts >= min_px)
+    k = 0.0
+    if len(rows) >= min_rows:
+        cen = (mask[rows] * np.arange(w)[None, :]).sum(axis=1) / counts[rows]
+        k, b = np.polyfit(rows, cen, 1)
+        keep = np.abs(cen - (k * rows + b)) <= 4.0
+        if keep.sum() >= min_rows:
+            k, b = np.polyfit(rows[keep], cen[keep], 1)
+        k = float(np.clip(k, -0.05, 0.05))      # ±2.9° より大きな傾きは誤った当てはめ
+    return (default + k * (np.arange(n) - (n - 1) / 2.0)).astype(np.float32)
 
 
 def _half_crossing(p: np.ndarray, center: int, half: float, reach: int) -> float | None:
