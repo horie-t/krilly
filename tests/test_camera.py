@@ -117,10 +117,34 @@ def test_camera_args_round_trip():
     assert camera_kwargs(p.parse_args([])) == {
         "max_frame_duration_us": 33_300, "ae_constraint": None,
         "exposure_value": None, "exposure_us": None, "gain": None,
+        "max_exposure_us": None,
     }
     got = camera_kwargs(p.parse_args(
         ["--max-frame-duration", "100", "--ae-constraint", "Highlight",
-         "--exposure", "8", "--gain", "2.5"]))
+         "--exposure", "8", "--gain", "2.5", "--max-exposure", "8"]))
     assert got == {"max_frame_duration_us": 100_000, "ae_constraint": "Highlight",
-                   "exposure_value": None, "exposure_us": 8_000, "gain": 2.5}
+                   "exposure_value": None, "exposure_us": 8_000, "gain": 2.5,
+                   "max_exposure_us": 8_000}
     Camera(picam2=FakePicam2(), **got)          # 受け取れること
+
+
+def test_max_exposure_shortens_exposure_and_keeps_brightness():
+    """#184: AE の露光 32.7 ms・ゲイン 2.45 を、上限 8 ms に縮めてゲイン 10 に上げる。"""
+    cam = Camera(picam2=FakePicam2(32700, 2.45), max_exposure_us=8000)
+    cam.lock_exposure(cam._picam2)
+    assert cam.exposure_time_us == 8000
+    assert cam.analogue_gain * cam.exposure_time_us == __import__("pytest").approx(2.45 * 32700)
+    assert cam._picam2.controls["ExposureTime"] == 8000
+    assert not cam.exposure_limited
+
+
+def test_max_exposure_reports_when_gain_runs_out():
+    cam = Camera(picam2=FakePicam2(32700, 6.0, max_gain=16.0), max_exposure_us=8000)
+    cam.lock_exposure(cam._picam2)
+    assert cam.analogue_gain == 16.0 and cam.exposure_limited     # 6 × 4.1 = 24.5 > 16
+
+
+def test_max_exposure_does_nothing_when_ae_is_already_shorter():
+    cam = Camera(picam2=FakePicam2(5000, 1.5), max_exposure_us=8000)
+    cam.lock_exposure(cam._picam2)
+    assert cam.exposure_time_us == 5000 and cam.analogue_gain == 1.5
