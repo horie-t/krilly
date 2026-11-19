@@ -33,6 +33,11 @@ class AheadWatchConfig:
     min_frames: int = 2
     #: 止めずに記録だけする。
     observe_only: bool = False
+    #: 機体が今の脚の通り道 (行き先を通る、主軸に平行な直線) から横にこれ以上離れている
+    #: 間は見ない [m]。**止まらずに曲がる (#80) とき、``axis_k`` は機体がまだ前の脚の上に
+    #: いるうちに次の向きへ切り替わる** ので、そのまま見ると前の脚の横の壁を「次の脚の
+    #: 境目」と取り違える (2026-11-19 の long8、`--chain-legs 4` などで最大 0.30〜0.40)。
+    max_lane_offset_m: float = 0.04
     pitch_m: float = 0.18
     profile: AheadConfig = field(default_factory=AheadConfig)
 
@@ -56,6 +61,8 @@ class AheadWatch:
     def reset(self) -> None:
         self.alarm: AheadAlarm | None = None
         self.max_fraction = 0.0           # 今の脚の境目で見えた赤の割合の最大 (記録用)
+        self.max_at: tuple[float, float] | None = None   # その (境目までの距離, 通り道からの横) [m]
+        self.off_lane = 0                 # 通り道から外れていて見なかったフレーム数
         self.checked = 0
         self._streak: dict[tuple[int, int], int] = {}
 
@@ -71,6 +78,11 @@ class AheadWatch:
         cx, cy = round(x / p) * p, round(y / p) * p
         along = (x - cx) * ux + (y - cy) * uy            # 今のセルの中央から主軸の向きに
         remaining = (reference[0] - x) * ux + (reference[1] - y) * uy
+        lane = -(x - reference[0]) * uy + (y - reference[1]) * ux     # 通り道からの横
+        if abs(lane) > cfg.max_lane_offset_m:
+            self.off_lane += 1
+            self._streak.clear()
+            return None
         last = remaining + p / 2.0 - cfg.end_margin_m      # これより手前の境目だけ
         seen: set[tuple[int, int]] = set()
         result = None
@@ -82,7 +94,9 @@ class AheadWatch:
             if frac is None:
                 continue
             self.checked += 1
-            self.max_fraction = max(self.max_fraction, frac)
+            if frac > self.max_fraction:
+                self.max_fraction = frac
+                self.max_at = (b, lane)
             key = (round((x + b * ux) / (p / 2)), round((y + b * uy) / (p / 2)))
             seen.add(key)
             if frac >= cfg.threshold:

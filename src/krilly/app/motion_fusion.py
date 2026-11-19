@@ -98,6 +98,7 @@ class FusionSummary:
     edge_errors: dict = field(default_factory=dict)
     ahead_max: float = 0.0         # 今の脚の境目で見えた赤の割合の最大 (#188)
     ahead_checked: int = 0
+    ahead_at: tuple | None = None   # 最大が出た (境目までの距離, 通り道からの横) [m]
     ahead_note: str = ""
 
     def describe(self) -> str:
@@ -108,8 +109,10 @@ class FusionSummary:
                 name, statistics.median(v) * 1000, len(v))
                 for name, v in sorted(self.edge_errors.items()) if v)) + (
             "" if not self.edge_note else " / ** %s **" % self.edge_note) + (
-            "" if not self.ahead_checked else " / 前方 最大 %.2f (%d 回)" % (
-                self.ahead_max, self.ahead_checked)) + (
+            "" if not self.ahead_checked else " / 前方 最大 %.2f (%d 回%s)" % (
+                self.ahead_max, self.ahead_checked,
+                "" if self.ahead_at is None else "、%.0f mm 先・横 %+.0f mm" % (
+                    self.ahead_at[0] * 1000, self.ahead_at[1] * 1000))) + (
             "" if not self.ahead_note else " / ** %s **" % self.ahead_note)
 
 
@@ -132,6 +135,7 @@ class MotionFusion:
         self.clock_ns = clock_ns
         self._queue: queue.SimpleQueue = queue.SimpleQueue()
         self.fusion: DelayedFusion | None = None
+        self._leg_axis: int | None = None     # 今の脚の主軸 (縁の上限を脚ごとに数え直す)
         self.current = FusionSummary()
         self.total = FusionSummary()
         probe = ProbeConfig(focal_px=focal_px(), yaw=yaw_cfg, do_yaw=yaw_every > 0,
@@ -172,6 +176,7 @@ class MotionFusion:
                 break
         self.fusion = DelayedFusion(self.est, self.cfg)
         self.fusion.record(self.clock_ns())
+        self._leg_axis = None
         if self.ahead is not None:
             self.ahead.reset()
         self.current = FusionSummary()
@@ -193,6 +198,13 @@ class MotionFusion:
         """
         if self.fusion is None:
             return None
+        if motion is not None and motion.translating:
+            # 縁の補正の合計の上限 (25 mm) は**脚ごと**に数え直す。経路全体を 1 動作で
+            # 走ると (--chain-legs 4、約 3.4 m)、上限に届いて残りの区間で縁が効かなく
+            # なった (2026-11-19 の long8)。
+            if self._leg_axis is not None and motion.axis_k != self._leg_axis:
+                self.fusion.reset_edge_budget()
+            self._leg_axis = motion.axis_k
         dx = dy = dphi = 0.0
         n = 0
         while True:
@@ -242,6 +254,7 @@ class MotionFusion:
         if self.ahead is not None:
             s.ahead_max = self.ahead.max_fraction
             s.ahead_checked = self.ahead.checked
+            s.ahead_at = self.ahead.max_at
             if self.ahead.alarm is not None:
                 a = self.ahead.alarm
                 s.ahead_note = ("前方の境目に壁 (%.0f mm 先、赤の割合 %.2f、%d フレーム)%s"
