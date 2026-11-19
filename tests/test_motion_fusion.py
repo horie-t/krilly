@@ -119,3 +119,23 @@ def test_stop_report_splits_cross_and_along_by_last_direction():
     assert stops[1] == {"dir": "E", "cell": (2, 3), "cross": -1.2, "along": None}
     assert group_args(["--label", "a", "x.log", "y.log", "--label", "b", "z.log"]) == [
         ("a", ["x.log", "y.log"]), ("b", ["z.log"])]
+
+
+def test_edge_budget_is_reset_when_the_leg_changes():
+    est = DeadReckoning(phi=0.0)
+    fuser, clock = make(est)
+
+    class Motion:
+        translating = True
+        axis_k = 0
+        reference = (0.36, 0.0, 0.0)
+
+    m = Motion()
+    fuser.begin()
+    fuser.fusion.edge_total["x"] = 0.025
+    fuser.fusion.edges_disabled = "上限"
+    fuser.before_update(m)
+    assert fuser.fusion.edges_disabled == "上限"          # 同じ脚のあいだはそのまま
+    m.axis_k = 1                                          # 角を曲がった
+    fuser.before_update(m)
+    assert fuser.fusion.edges_disabled is None and fuser.fusion.edge_total["x"] == 0.0

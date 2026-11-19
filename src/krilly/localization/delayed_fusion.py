@@ -240,6 +240,13 @@ class DelayedFusion:
         self._edge_mismatch = {"x": 0, "y": 0}
         self.edges_disabled: str | None = None
 
+    def reset_edge_budget(self) -> None:
+        """縁の補正の合計と、1 本だけの縁の期待値を数え直す (脚が変わったとき、#189)。"""
+        self.edge_total = {"x": 0.0, "y": 0.0}
+        self.edges_disabled = None
+        self._edge_expect = {"x": None, "y": None}
+        self._edge_mismatch = {"x": 0, "y": 0}
+
     def _track_edges(self, edges, past) -> list:
         """前のフレームから、推定の移動量どおりに動いた縁だけを返す。
 

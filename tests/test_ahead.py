@@ -80,3 +80,16 @@ def test_observe_only_records_but_does_not_ask_to_stop():
     assert watch.alarm is not None and fuser.ahead_stop is None
     watch.cfg = AheadWatchConfig(observe_only=False)
     assert fuser.ahead_stop is watch.alarm
+
+
+def test_not_judged_while_still_off_the_new_legs_lane():
+    """止まらずに曲がるとき: 次の脚の向きに切り替わっても、通り道に乗るまでは見ない。"""
+    watch = AheadWatch()
+    prof = ahead_profiles(frame_with_crossing_wall(90.0))
+    # 次の脚は東向き (φ=0) で y=0 を通る。機体はまだ 60 mm 南 (前の脚の上)
+    for _ in range(3):
+        assert watch.check(prof, (0.0, -0.06, 0.0), (0.36, 0.0, 0.0), 0, 0.0) is None
+    assert watch.alarm is None and watch.off_lane == 3
+    # 通り道に乗ったら見る
+    watch.check(prof, (0.0, -0.01, 0.0), (0.36, 0.0, 0.0), 0, 0.0)
+    assert watch.check(prof, (0.0, -0.01, 0.0), (0.36, 0.0, 0.0), 0, 0.0) is not None
